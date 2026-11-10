@@ -59,6 +59,8 @@ export interface AgentEntry {
 
 // ───────────────────────────── run / node / delegation ─────────────────────────────
 
+export type DelegationMode = "lead" | "auto";
+
 export type RunStatus = "active" | "idle" | "completed" | "failed" | "canceled";
 
 export interface RunPolicy {
@@ -68,6 +70,13 @@ export interface RunPolicy {
   maxActiveChildren: number;
   /** Auto-approve permission requests of every node in the run (recorded as by: "policy"). */
   autoApprove: boolean;
+  /**
+   * How strongly agents are steered toward delegating (default "lead").
+   * - "lead": the root acts as the lead of the run — it splits separable work and delegates it in
+   *   parallel to the best-suited agents, keeping planning, integration and verification for itself.
+   * - "auto": every agent decides on its own whether delegating is worth it.
+   */
+  delegation?: DelegationMode;
   /** Optional run budget; exceeding it rejects new delegations and cancels nothing by itself. */
   budget?: { maxCostUsd?: number; maxTokens?: number; maxWallMinutes?: number };
 }

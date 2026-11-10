@@ -16,7 +16,7 @@ export interface CreateRunRequest {
 
 export interface PatchRunRequest {
   title?: string;
-  policy?: Partial<Pick<RunPolicy, "autoApprove" | "maxDepth" | "maxActiveChildren" | "budget">>;
+  policy?: Partial<Pick<RunPolicy, "autoApprove" | "maxDepth" | "maxActiveChildren" | "budget" | "delegation">>;
 }
 
 export interface SendMessageRequest {

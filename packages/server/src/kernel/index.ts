@@ -14,7 +14,7 @@ export function isBatonToolPermission(request: PermissionRequest): boolean {
   const server = request.input?.serverName ?? request.input?.server_name ?? request.input?.server;
   return server === "baton";
 }
-export const DEFAULT_POLICY: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false };
+export const DEFAULT_POLICY: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, delegation: "lead" };
 const now = (): string => new Date().toISOString();
 const active = (status: string): boolean => ["starting", "running", "waiting_permission", "queued"].includes(status);
 const done = (d: DelegationRecord): boolean => ["completed", "failed", "canceled"].includes(d.status);
@@ -105,6 +105,7 @@ export class Kernel {
   }
   private validatePolicy(policy: RunPolicy): RunPolicy {
     if (!Number.isInteger(policy.maxDepth) || policy.maxDepth < 0 || !Number.isInteger(policy.maxActiveChildren) || policy.maxActiveChildren < 1 || typeof policy.autoApprove !== "boolean") throw new Error("Invalid run policy");
+    if (policy.delegation !== undefined && policy.delegation !== "lead" && policy.delegation !== "auto") throw new Error("Invalid run policy: delegation must be \"lead\" or \"auto\"");
     if (policy.budget) for (const [key, value] of Object.entries(policy.budget)) if (!["maxCostUsd", "maxTokens", "maxWallMinutes"].includes(key) || typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error("Invalid run budget");
     return policy;
   }
@@ -127,7 +128,7 @@ export class Kernel {
     rt.opening = (async () => {
       const n = this.store.node(id), driver = this.registry.get(n.agentId);
       if (!driver) throw new Error(`Agent unavailable: ${n.agentId}`);
-      const spec = { cwd: n.cwd, model: n.model, modeId: n.modeId, thinking: n.thinking, title: n.title, systemPrompt: systemPrompt(n, this.store.snapshot(n.runId).run.policy), mcpServers: { baton: { type: "http" as const, url: `${this.options.baseUrl}/mcp/n/${rt.token}` } } };
+      const spec = { cwd: n.cwd, model: n.model, modeId: n.modeId, thinking: n.thinking, title: n.title, systemPrompt: systemPrompt(n, this.store.snapshot(n.runId).run.policy, (await this.registry.detect()).filter((a) => a.status === "ready" && a.enabled)), mcpServers: { baton: { type: "http" as const, url: `${this.options.baseUrl}/mcp/n/${rt.token}` } } };
       const session = n.persistence !== undefined && driver.capabilities.resume ? await driver.resume(n.persistence, spec) : await driver.open(spec);
       if (rt.closed) { await session.close(); throw new Error("Node session closed during startup"); }
       rt.session = session;

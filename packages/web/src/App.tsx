@@ -12,13 +12,13 @@ type Page = "runs" | "agents" | "settings";
 type Tab = "topology" | "timeline" | "transcript";
 const Topology = lazy(() => import("./components/Topology.js").then(module => ({ default: module.Topology })));
 const Timeline = lazy(() => import("./components/Timeline.js").then(module => ({ default: module.Timeline })));
-const defaultPolicy: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false };
+const defaultPolicy: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, delegation: "lead" };
 function storedPolicy(): RunPolicy {
   try {
     const saved: unknown = JSON.parse(localStorage.getItem("baton.defaults") ?? "null");
     if (typeof saved === "object" && saved) {
       const values = saved as Record<string, unknown>;
-      return { maxDepth: typeof values.maxDepth === "number" ? Math.max(0, Math.min(10, values.maxDepth)) : 3, maxActiveChildren: typeof values.maxActiveChildren === "number" ? Math.max(1, Math.min(30, values.maxActiveChildren)) : 6, autoApprove: values.autoApprove === true, ...(typeof values.maxCostUsd === "number" && values.maxCostUsd > 0 ? { budget: { maxCostUsd: values.maxCostUsd } } : {}) };
+      return { maxDepth: typeof values.maxDepth === "number" ? Math.max(0, Math.min(10, values.maxDepth)) : 3, maxActiveChildren: typeof values.maxActiveChildren === "number" ? Math.max(1, Math.min(30, values.maxActiveChildren)) : 6, autoApprove: values.autoApprove === true, delegation: values.delegation === "auto" ? "auto" : "lead", ...(typeof values.maxCostUsd === "number" && values.maxCostUsd > 0 ? { budget: { maxCostUsd: values.maxCostUsd } } : {}) };
     }
   } catch { /* Use conservative defaults for malformed settings. */ }
   return defaultPolicy;
