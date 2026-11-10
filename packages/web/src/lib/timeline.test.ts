@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createScenario, replay } from "../demo/scenario.js";
-import { displayStatus, treeOrder } from "./derive.js";
+import { displayRunStatus, displayStatus, summarize, treeOrder } from "./derive.js";
 import { fitTime, niceTicks, panTime, timeX, waitingIntervals, xTime, zoomTime } from "./timeline.js";
 import { graphPositions } from "../components/Topology.js";
 
@@ -32,6 +32,16 @@ describe("timeline scale and layout", () => {
     expect(waitingIntervals(snapshot, snapshot.run.rootNodeId, base + 86000)).toEqual([[base + 8000, base + 86000]]);
     expect(displayStatus(snapshot.nodes[0]!, snapshot)).toBe("waiting_children");
     expect(displayStatus(snapshot.nodes.find(node => node.status === "waiting_permission")!, snapshot)).toBe("waiting_permission");
+  });
+  it("shows an idle Run as active while any descendant is executing or waiting for permission", () => {
+    const idle = { ...snapshot, run: { ...snapshot.run, status: "idle" as const }, nodes: snapshot.nodes.map(node => ({ ...node, status: "idle" as const })) };
+    expect(displayRunStatus(idle)).toBe("idle");
+    for (const status of ["starting", "running", "waiting_permission"] as const) {
+      const executing = { ...idle, nodes: idle.nodes.map((node, index) => index === 1 ? { ...node, status } : node) };
+      expect(displayRunStatus(executing)).toBe("active");
+      expect(summarize(executing).status).toBe("active");
+      expect(displayRunStatus({ ...executing, run: { ...executing.run, status: "canceled" } })).toBe("canceled");
+    }
   });
   it("uses depth-first tree order even when input is shuffled; cycles cannot loop", () => {
     expect(treeOrder([...snapshot.nodes].reverse()).map(node => node.id.split(":").at(-1))).toEqual(["root", "api", "index", "ui", "review"]);

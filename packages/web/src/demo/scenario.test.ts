@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { applyEvent, type RunSnapshot } from "@baton/protocol";
 import { createScenario } from "./scenario.js";
 import { DemoClient } from "./client.js";
+import { parseBatonMessage } from "../lib/baton-messages.js";
 
 const base = Date.parse("2026-11-10T07:00:00Z");
 
@@ -40,6 +41,9 @@ describe("deterministic demo protocol stream", () => {
     expect(snapshot.run.usage.inputTokens).toBe(sum.inputTokens);
     expect(snapshot.run.usage.outputTokens).toBe(sum.outputTokens);
     expect(snapshot.run.usage.costUsd).toBeCloseTo(sum.costUsd, 8);
+    const protocol = scenario.events.filter(event => event.type === "item" && event.item.type === "user_message").flatMap(event => event.type === "item" && event.item.type === "user_message" ? parseBatonMessage(event.item.text) ?? [] : []);
+    expect(protocol.filter(part => part.type === "assignment")).toHaveLength(4);
+    expect(protocol.filter(part => part.type === "results")).toHaveLength(3);
   });
   it("implements the same client actions, resolves permissions and delivers the child result", async () => {
     const client = new DemoClient(() => base + 86000);
@@ -51,6 +55,8 @@ describe("deterministic demo protocol stream", () => {
     expect(after.run.status).toBe("idle");
     const rows = await client.items(permission.nodeId);
     expect(rows.items.at(-1)?.item.type).toBe("assistant_message");
+    const parent = await client.items(after.run.rootNodeId);
+    expect(parent.items.some(row => row.item.type === "user_message" && parseBatonMessage(row.item.text)?.some(part => part.type === "results" && part.results.some(result => result.delegationId === `d-${permission.nodeId}`)))).toBe(true);
     await client.send(permission.nodeId, "补充无障碍说明");
     expect((await client.run("run-demo")).nodes.find(node => node.id === permission.nodeId)!.turns).toBe(2);
     expect((await client.delegation(`d-${permission.nodeId}`)).round).toBe(2);

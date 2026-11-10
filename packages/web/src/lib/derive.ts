@@ -1,4 +1,4 @@
-import type { NodeRecord, NodeStatus, RunSnapshot, RunSummary } from "@baton/protocol";
+import type { NodeRecord, NodeStatus, RunSnapshot, RunStatus, RunSummary } from "@baton/protocol";
 
 export const agentColors: Record<string, string> = { claude: "#cc795a", codex: "#22a584", pi: "#8c7ce9", gemini: "#5989dc" };
 export const statusLabels: Record<string, string> = {
@@ -8,6 +8,10 @@ export const terminal = (status: string): boolean => ["completed", "failed", "ca
 export function displayStatus(node: NodeRecord, snapshot: RunSnapshot): NodeStatus | "waiting_children" {
   if (["running", "idle"].includes(node.status) && snapshot.delegations.some(edge => edge.fromNodeId === node.id && !terminal(edge.status))) return "waiting_children";
   return node.status;
+}
+export function displayRunStatus(snapshot: Pick<RunSnapshot, "run" | "nodes">): RunStatus {
+  if (snapshot.run.status === "idle" && snapshot.nodes.some(node => ["starting", "running", "waiting_permission"].includes(node.status))) return "active";
+  return snapshot.run.status;
 }
 export function treeOrder(nodes: NodeRecord[]): NodeRecord[] {
   const children = new Map<string | null, NodeRecord[]>();
@@ -26,7 +30,7 @@ export function treeOrder(nodes: NodeRecord[]): NodeRecord[] {
 }
 export function summarize(snapshot: RunSnapshot): RunSummary {
   const { run, nodes } = snapshot;
-  return { ...run, rootAgentId: nodes.find(node => node.id === run.rootNodeId)?.agentId ?? "unknown", agents: [...new Set(nodes.map(node => node.agentId))], nodeCount: nodes.length, activeNodeCount: nodes.filter(node => !terminal(node.status) && node.status !== "idle").length, pendingPermissions: snapshot.permissions.filter(permission => permission.status === "pending").length };
+  return { ...run, status: displayRunStatus(snapshot), rootAgentId: nodes.find(node => node.id === run.rootNodeId)?.agentId ?? "unknown", agents: [...new Set(nodes.map(node => node.agentId))], nodeCount: nodes.length, activeNodeCount: nodes.filter(node => !terminal(node.status) && node.status !== "idle").length, pendingPermissions: snapshot.permissions.filter(permission => permission.status === "pending").length };
 }
 export const tokens = (value: number): string => value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 1 : 2)}k` : String(Math.round(value));
 export const cost = (value: number): string => `$${value.toFixed(value < 1 ? 3 : 2)}`;

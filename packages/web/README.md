@@ -25,11 +25,17 @@ Implemented screens:
 
 - Run list, live totals and policy controls, new Run dialog.
 - Dagre topology with provider cards, delegation results, inline permission actions,
-  stable positions between structural changes, minimap and follow toggle.
+  stable positions between structural changes, minimap and follow toggle. Fit uses
+  0.85–1.1 zoom to keep text readable; minimap hides below 900px canvas width and while
+  the inspector is open.
 - SVG timeline with node/turn/tool/wait bands, delegation and delivery arrows,
-  pointer-centered wheel zoom, drag pan, hover details and node selection.
+  pointer-centered wheel zoom, drag pan, hover details and node selection. Rows are
+  44px high; the title column starts at 260px and resizes by dragging its divider or
+  using the focused divider's arrow keys. Tool kinds have distinct colors and tooltips.
 - Node-switchable conversation, safe markdown-lite, collapsed reasoning, per-kind
-  tool details, and message composer (Cmd/Ctrl+Enter).
+  tool details, and message composer (Cmd/Ctrl+Enter). Server `baton-assignment` and
+  `baton-results` messages render as task/result cards linking to the child inspector,
+  with JSON and artifacts collapsed. Malformed wrappers fall back to escaped text.
 - Inspector with brief, acceptance, output schema, JSON result, artifacts, permissions,
   usage, metadata, recent transcript, message and cancel-subtree actions.
 - Agents catalog and browser-local default policy / theme settings.
@@ -51,6 +57,8 @@ npm run build -w @baton/web
 Tests cover protocol replay/store integration, same-item replacement, lazy-load races,
 reconnection offsets, token handling, SSE chunking, safe content rendering, deterministic
 demo relationships/actions, time math, tree ordering and graph geometry.
+The browser demo's baton message formats are compared against the server's pure
+prompt formatters in web tests, including batched delivery and escaped title attributes.
 
 Known limits: browser and daemon integration QA are performed by the lead. The timeline
 groups spans in linear time and uses one SVG, but a 30-node/2,000-span browser performance

@@ -5,9 +5,9 @@ import { clock, cost, displayStatus, duration, terminal, tokens } from "../lib/d
 import { AgentMark, Icon, PermissionActions, Status } from "./common.js";
 import { Markdown, ToolDetail, TranscriptRow } from "./Transcript.js";
 
-export function Inspector({ snapshot, nodeId, now, close, converse, cancel, decide, busy, store, items }: {
+export function Inspector({ snapshot, nodeId, now, close, converse, cancel, decide, busy, store, items, inspect }: {
   snapshot: RunSnapshot; nodeId: string; now: number; close: () => void; converse: (id: string) => void; cancel: (id: string) => void;
-  decide: (id: string, response: PermissionResponse) => void; busy: boolean; store: RunStore; items: Record<string, ItemRecord[]>;
+  decide: (id: string, response: PermissionResponse) => void; busy: boolean; store: RunStore; items: Record<string, ItemRecord[]>; inspect: (id: string) => void;
 }) {
   const node = snapshot.nodes.find(entry => entry.id === nodeId);
   useEffect(() => { if (node) { void store.loadItems(node.id); } }, [node?.id, store]);
@@ -23,6 +23,6 @@ export function Inspector({ snapshot, nodeId, now, close, converse, cancel, deci
     {edge?.result && <section className="inspector-section"><h3>交付结果 <span className={`result-${edge.result.status}`}>{edge.result.status}</span></h3><Markdown text={edge.result.summary} />{!edge.result.reported && <div className="notice-row warning">结果由最后一条回复自动生成</div>}{edge.result.result !== undefined && <pre>{JSON.stringify(edge.result.result, null, 2)}</pre>}{edge.result.artifacts?.map((artifact, index) => <div className="artifact" key={index}><span>{artifact.kind === "file" ? "↗" : "◇"}</span><div><code>{artifact.value}</code>{artifact.description && <p>{artifact.description}</p>}</div></div>)}{edge.result.error && <p className="error-text">{edge.result.error}</p>}</section>}
     <section className="inspector-section"><h3>节点信息</h3><dl className="meta-grid"><dt>Agent</dt><dd>{node.agentId}</dd><dt>Model</dt><dd>{node.model ?? "默认"}</dd><dt>Mode / Thinking</dt><dd>{node.modeId ?? "default"} / {node.thinking ?? "default"}</dd><dt>工作目录</dt><dd><code>{node.cwd}</code></dd><dt>创建</dt><dd>{clock(node.createdAt)}</dd><dt>更新</dt><dd>{clock(node.updatedAt)}</dd><dt>结束</dt><dd>{node.endedAt ? clock(node.endedAt) : "—"}</dd><dt>用时 / 轮次</dt><dd>{duration(node.createdAt, node.endedAt ?? now)} / {node.turns}</dd><dt>Input / Output</dt><dd>{tokens(node.usage.inputTokens)} / {tokens(node.usage.outputTokens)}</dd><dt>Cached / Cost</dt><dd>{tokens(node.usage.cachedInputTokens)} / {cost(node.usage.costUsd)}</dd><dt>Node ID</dt><dd className="mono">{node.id}</dd></dl></section>
     {permissions.length > 0 && <section className="inspector-section"><h3>权限记录</h3>{permissions.map(permission => <div className="permission-history" key={permission.id}><strong>{permission.request.title ?? permission.request.name}</strong><span>{permission.status === "pending" ? "待处理" : permission.resolution?.behavior === "allow" ? "已允许" : permission.status === "expired" ? "已过期" : "已拒绝"} · {permission.resolvedBy ?? "—"} · {duration(permission.requestedAt, permission.resolvedAt ?? now)}</span></div>)}</section>}
-    <section className="inspector-section inspector-transcript"><h3>最近会话 <button className="text-button" onClick={() => converse(node.id)}>查看全部 ↗</button></h3>{(items[node.id] ?? []).slice(-8).map(row => <TranscriptRow key={row.seq} row={row} node={node} />)}{!items[node.id]?.length && <p className="muted">暂无消息</p>}</section>
+    <section className="inspector-section inspector-transcript"><h3>最近会话 <button className="text-button" onClick={() => converse(node.id)}>查看全部 ↗</button></h3>{(items[node.id] ?? []).slice(-8).map(row => <TranscriptRow key={row.seq} row={row} node={node} snapshot={snapshot} inspect={inspect} />)}{!items[node.id]?.length && <p className="muted">暂无消息</p>}</section>
   </div></aside>;
 }
