@@ -23,6 +23,11 @@ fetch cannot overwrite newer streamed content.
 
 Implemented screens:
 
+- Cross-run 待处理 home page: permissions, roster proposals, agent questions and
+  stall/round-limit escalations, grouped by Run and ordered by oldest pending item.
+  Its independent fetch-streamed SSE subscription refetches on every `changed`,
+  reconciles after connection, and refetches after reconnect. It remains active on
+  every console page. Run/sidebar counts use `pendingTotal`.
 - Run list, live totals and policy controls, new Run dialog.
 - Dagre topology with provider cards, delegation results, inline permission actions,
   stable positions between structural changes, minimap and follow toggle. Fit uses
@@ -39,6 +44,20 @@ Implemented screens:
 - Inspector with brief, acceptance, output schema, JSON result, artifacts, permissions,
   usage, metadata, recent transcript, message and cancel-subtree actions.
 - Agents catalog and browser-local default policy / theme settings.
+
+Permission cards support allow once, always allow (editable command prefix/path
+glob, global/Run scope, optional agent restriction), and deny. Settings includes
+permission rule create/delete, decision/source, scope, hit count and last hit.
+Questions support option buttons and free text; answers are durable `baton-answer`
+transcript cards. Escalations support dismiss, cancel, and per-delegation round
+extension with an optional note. Node cards/inspector show 等你回答 and 停滞;
+the timeline shows question waits and escalation markers/bands.
+
+Browser notifications are opt-in in Settings and request native browser permission
+from that action. New pending items (excluding nonblocking questions) and completed
+Run transitions notify only while the tab is hidden, with a 30-second per-Run merge
+window. New Run and Settings have collapsed advanced policy controls for team size,
+stall minutes and maximum delegation rounds.
 
 Teams are available both as a Run tab and as saved presets in the left navigation.
 New Run supports dynamic teams (optional seeded roles), a preset's lead and roster,
@@ -58,7 +77,11 @@ nodes stay visible as replaced with a dashed connection to their successors.
 The timeline marks roster/proposal decisions on the root row. `baton-notice`
 messages appear as safely escaped notice cards.
 
-Demo opens a pending team proposal for the login-flow Run; its queued delegates
+Demo opens the global inbox with all four kinds. The 人工介入 Run has a blocking
+question, a stalled builder and a tester with a held round-limit follow-up. Answer,
+extend/dismiss/cancel, and inspect the durable answer/notice messages. Settings has
+a sample permission rule with a hit; always-allow creates rules in the same demo.
+The login-flow Run has a pending team proposal; its queued delegates
 remain stopped until approved (and use any edited specs). Dropped roles or rejected
 proposals cancel their queued work. A saved product-team preset is included. Select
 the search Run in the sidebar to inspect an evolving team and a replacement.
@@ -86,6 +109,10 @@ parsing, original/edited approval, dropped roles, rejection, a second pending-pr
 error, replacement approval, and disabled-approval behavior.
 The browser demo's baton message formats are compared against the server's pure
 prompt formatters in web tests, including batched delivery and escaped title attributes.
+Human-loop tests cover cross-Run grouping, pattern derivation, reducer upserts,
+remembered rules and precedence, durable answers, escalation choices, cancellation,
+inbox reconnect/races, typed API calls, SSE `changed`, escaped cards, notification
+gating/coalescing and maximum team size.
 
 Known limits: browser and daemon integration QA are performed by the lead. The timeline
 groups spans in linear time and uses one SVG, but a 30-node/2,000-span browser performance

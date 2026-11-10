@@ -16,7 +16,8 @@ describe("browser demo teams and approval gate", () => {
     let now = base; const client = new DemoClient(() => now); const { id, proposal, snapshot } = await gate(client);
     expect(snapshot.run.policy.teamApproval).toBe(true);
     expect(activeMembers(snapshot.run.team)).toHaveLength(0);
-    expect(summarize(snapshot).pendingPermissions).toBe(1);
+    expect(summarize(snapshot).pendingPermissions).toBe(0);
+    expect(summarize(snapshot).pendingTotal).toBe(1);
     expect(snapshot.delegations.every(edge => edge.status === "queued" && edge.blockedByProposal === proposal.id)).toBe(true);
     expect(snapshot.nodes).toHaveLength(1);
     expect(snapshot.delegations.every(edge => !snapshot.nodes.some(node => node.id === edge.toNodeId))).toBe(true);

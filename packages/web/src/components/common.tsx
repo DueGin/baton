@@ -8,8 +8,9 @@ export function AgentMark({ agent, small = false }: { agent: string; small?: boo
 export function Status({ status, dot = true }: { status: string; dot?: boolean }) {
   return <span className={`status status-${status}`}>{dot && <i className="status-dot" />}{statusLabels[status] ?? status}</span>;
 }
-export function Icon({ name, size = 18 }: { name: "graph" | "timeline" | "chat" | "agents" | "settings" | "plus" | "close" | "sun" | "moon" | "arrow" | "stop" | "chevron" | "refresh" | "check"; size?: number }) {
+export function Icon({ name, size = 18 }: { name: "inbox" | "graph" | "timeline" | "chat" | "agents" | "settings" | "plus" | "close" | "sun" | "moon" | "arrow" | "stop" | "chevron" | "refresh" | "check"; size?: number }) {
   const paths: Record<typeof name, ReactNode> = {
+    inbox: <><path d="M4 4h16l2 12v4H2v-4L4 4Z" /><path d="M2 15h6l2 3h4l2-3h6" /></>,
     graph: <><rect x="8" y="2" width="8" height="5" rx="1" /><rect x="2" y="17" width="7" height="5" rx="1" /><rect x="15" y="17" width="7" height="5" rx="1" /><path d="M12 7v5H5v5m7-5h7v5" /></>,
     timeline: <><path d="M4 4v16M9 6h10M9 12h6M9 18h12" /></>,
     chat: <path d="M21 11a9 9 0 0 1-9 9H7l-5 2 2-5v-6a9 9 0 0 1 17 0Z" />,

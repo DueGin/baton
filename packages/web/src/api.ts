@@ -2,6 +2,7 @@ import type {
   AgentEntry, CreateRunRequest, DelegationRecord, GetItemsResponse, PatchRunRequest,
   PermissionDecision, RunEventEnvelope, RunSnapshot, RunSummary, AddMemberRequest, ReplaceMemberRequest,
   ReassignRequest, TeamPreset, TeamPresetInput, SaveTeamPresetRequest, ApproveTeamProposalRequest, RejectTeamProposalRequest,
+  InboxItem, AnswerQuestionRequest, ResolveEscalationRequest, PermissionRule, CreatePermissionRuleRequest,
 } from "@baton/protocol";
 
 /** The server may attach availability warnings to successful preset mutations. */
@@ -31,6 +32,13 @@ export interface BatonClient {
   reassign(id: string, request: ReassignRequest): Promise<void>;
   approveTeam(runId: string, proposalId: string, request: ApproveTeamProposalRequest): Promise<void>;
   rejectTeam(runId: string, proposalId: string, request: RejectTeamProposalRequest): Promise<void>;
+  inbox(): Promise<InboxItem[]>;
+  inboxEvents(changed: () => void, signal: AbortSignal): Promise<void>;
+  answer(id: string, request: AnswerQuestionRequest): Promise<void>;
+  resolveEscalation(id: string, request: ResolveEscalationRequest): Promise<void>;
+  permissionRules(): Promise<PermissionRule[]>;
+  createPermissionRule(request: CreatePermissionRuleRequest): Promise<void>;
+  deletePermissionRule(id: string): Promise<void>;
   /** A connection lasts until aborted or disconnected. The store owns reconnects. */
   events(runId: string, after: number, onEvent: (event: RunEventEnvelope) => void, signal: AbortSignal): Promise<void>;
 }
@@ -86,15 +94,25 @@ export class ApiClient implements BatonClient {
   reassign = (id: string, body: ReassignRequest) => this.request<void>(`/delegations/${encodeURIComponent(id)}/reassign`, "POST", body);
   approveTeam = (id: string, proposalId: string, body: ApproveTeamProposalRequest) => this.request<void>(`/runs/${encodeURIComponent(id)}/team/proposals/${encodeURIComponent(proposalId)}/approve`, "POST", body);
   rejectTeam = (id: string, proposalId: string, body: RejectTeamProposalRequest) => this.request<void>(`/runs/${encodeURIComponent(id)}/team/proposals/${encodeURIComponent(proposalId)}/reject`, "POST", body);
+  inbox = () => this.request<InboxItem[]>("/inbox");
+  answer = (id: string, body: AnswerQuestionRequest) => this.request<void>(`/questions/${encodeURIComponent(id)}/answer`, "POST", body);
+  resolveEscalation = (id: string, body: ResolveEscalationRequest) => this.request<void>(`/escalations/${encodeURIComponent(id)}/resolve`, "POST", body);
+  permissionRules = () => this.request<PermissionRule[]>("/permission-rules");
+  createPermissionRule = (body: CreatePermissionRuleRequest) => this.request<void>("/permission-rules", "POST", body);
+  deletePermissionRule = (id: string) => this.request<void>(`/permission-rules/${encodeURIComponent(id)}`, "DELETE");
+  inboxEvents = (changed: () => void, signal: AbortSignal) => this.stream("/inbox/events", new SseFrames(frame => { if (frame.event === "changed" || frame.data === "changed") changed(); }), signal, changed);
 
-  async events(id: string, after: number, onEvent: (event: RunEventEnvelope) => void, signal: AbortSignal): Promise<void> {
-    const response = await fetch(`/api/runs/${encodeURIComponent(id)}/events?after=${after}`, {
+  events(id: string, after: number, onEvent: (event: RunEventEnvelope) => void, signal: AbortSignal): Promise<void> {
+    return this.stream(`/runs/${encodeURIComponent(id)}/events?after=${after}`, new SseParser(onEvent), signal);
+  }
+  private async stream(path: string, parser: { push: (chunk: string) => void }, signal: AbortSignal, connected?: () => void): Promise<void> {
+    const response = await fetch(`/api${path}`, {
       headers: { Authorization: `Bearer ${this.token}`, Accept: "text/event-stream" }, signal,
     });
     if (!response.ok || !response.body) throw new Error(`事件连接失败 (${response.status})`);
+    connected?.(); // Reconcile after the server has subscribed, closing the initial snapshot gap.
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
-    const parser = new SseParser(onEvent);
     try {
       while (!signal.aborted) {
         const { done, value } = await reader.read();
@@ -107,9 +125,9 @@ export class ApiClient implements BatonClient {
 }
 
 /** SSE frames may span UTF-8 chunks and contain multiple data lines. */
-export class SseParser {
+export class SseFrames {
   private buffer = "";
-  constructor(private readonly emit: (event: RunEventEnvelope) => void) {}
+  constructor(private readonly emit: (frame: { event: string; data: string }) => void) {}
   push(chunk: string): void {
     this.buffer += chunk;
     let boundary: RegExpExecArray | null;
@@ -117,7 +135,11 @@ export class SseParser {
       const frame = this.buffer.slice(0, boundary.index);
       this.buffer = this.buffer.slice(boundary.index + boundary[0].length);
       const data = frame.split(/\r?\n/).filter(line => line.startsWith("data:")).map(line => line.slice(5).trimStart()).join("\n");
-      if (data) this.emit(JSON.parse(data) as RunEventEnvelope);
+      const event = frame.split(/\r?\n/).find(line => line.startsWith("event:"))?.slice(6).trim() ?? "message";
+      if (data || event !== "message") this.emit({ event, data });
     }
   }
+}
+export class SseParser extends SseFrames {
+  constructor(emit: (event: RunEventEnvelope) => void) { super(frame => { if (frame.data) emit(JSON.parse(frame.data) as RunEventEnvelope); }); }
 }

@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { RunSnapshot } from "@baton/protocol";
 import { agentColors, clock, duration, treeOrder } from "../lib/derive.js";
 import { fitTime, niceTicks, panTime, timeX, waitingIntervals, zoomTime, type TimeViewport } from "../lib/timeline.js";
+import { escalationLabels } from "../lib/inbox.js";
 import { actorLabels, changeLabels } from "../lib/teams.js";
 import { Toggle } from "./common.js";
 
@@ -24,13 +25,15 @@ export function Timeline({ snapshot, now, inspect }: { snapshot: RunSnapshot; no
   const rows = useMemo(() => treeOrder(snapshot.nodes), [snapshot.nodes]);
   const index = useMemo(() => new Map(rows.map((node, row) => [node.id, row])), [rows]);
   const grouped = useMemo(() => {
-    const groups = new Map<string, { turns: RunSnapshot["turns"]; tools: RunSnapshot["toolSpans"]; permissions: RunSnapshot["permissions"] }>();
-    const group = (nodeId: string) => { let value = groups.get(nodeId); if (!value) { value = { turns: [], tools: [], permissions: [] }; groups.set(nodeId, value); } return value; };
+    const groups = new Map<string, { turns: RunSnapshot["turns"]; tools: RunSnapshot["toolSpans"]; permissions: RunSnapshot["permissions"]; questions: RunSnapshot["questions"]; escalations: RunSnapshot["escalations"] }>();
+    const group = (nodeId: string) => { let value = groups.get(nodeId); if (!value) { value = { turns: [], tools: [], permissions: [], questions: [], escalations: [] }; groups.set(nodeId, value); } return value; };
     snapshot.turns.forEach(turn => group(turn.nodeId).turns.push(turn));
     snapshot.toolSpans.forEach(span => group(span.nodeId).tools.push(span));
     snapshot.permissions.forEach(permission => group(permission.nodeId).permissions.push(permission));
+    (snapshot.questions ?? []).forEach(question => group(question.nodeId).questions.push(question));
+    (snapshot.escalations ?? []).forEach(escalation => group(escalation.nodeId).escalations.push(escalation));
     return groups;
-  }, [snapshot.turns, snapshot.toolSpans, snapshot.permissions]);
+  }, [snapshot.turns, snapshot.toolSpans, snapshot.permissions, snapshot.questions, snapshot.escalations]);
   const chartWidth = Math.max(200, width - gutter - 20);
   const x = (time: string | number): number => gutter + timeX(typeof time === "string" ? Date.parse(time) : time, view, chartWidth);
   const band = (start: string | number, end?: string | number) => ({ x: x(start), width: Math.max(2, x(end ?? now) - x(start)) });
@@ -50,7 +53,7 @@ export function Timeline({ snapshot, now, inspect }: { snapshot: RunSnapshot; no
       <rect width={width} height={height} fill="var(--surface)" />
       <text x="20" y="26" className="svg-eyebrow">NODE / AGENT</text>
       <g clipPath={`url(#${pattern}-clip)`}>{niceTicks(view, chartWidth).map(tick => <g key={tick}><line x1={x(tick)} x2={x(tick)} y1={HEADER} y2={height} stroke="var(--border)" strokeDasharray="3 5" /><text x={x(tick) + 4} y={26} className="svg-time">{clock(new Date(tick).toISOString())}</text></g>)}</g>
-      {rows.map((node, row) => { const y = HEADER + row * ROW; const data = grouped.get(node.id) ?? { turns: [], tools: [], permissions: [] }; return <g key={node.id} className={`timeline-row ${node.status === "replaced" ? "timeline-row-replaced" : ""}`}>
+      {rows.map((node, row) => { const y = HEADER + row * ROW; const data = grouped.get(node.id) ?? { turns: [], tools: [], permissions: [], questions: [], escalations: [] }; return <g key={node.id} className={`timeline-row ${node.status === "replaced" ? "timeline-row-replaced" : ""}`}>
         <rect x="0" y={y} width={width} height={ROW} className="timeline-row-bg" />
         <line x1="0" x2={width} y1={y + ROW} y2={y + ROW} stroke="var(--border)" />
         <g clipPath={`url(#${pattern}-labels)`} onMouseMove={event => hover(event, `${node.title}${node.status === "replaced" ? " · 已替换" : ""}\n${node.agentId} · ${duration(node.createdAt, node.endedAt ?? now)}`)} onMouseLeave={() => setTooltip(null)}><title>{node.title}{node.status === "replaced" ? " · 已替换" : ""}</title><rect x="0" y={y} width={gutter} height={ROW} fill="transparent" />
@@ -64,6 +67,8 @@ export function Timeline({ snapshot, now, inspect }: { snapshot: RunSnapshot; no
           {data.turns.map(turn => <rect key={turn.id} {...band(turn.startedAt, turn.endedAt ?? node.endedAt)} y={y + 8} height="11" rx="2" fill={triggerColors[turn.trigger]} opacity="0.85" onMouseMove={event => hover(event, `${turn.trigger} turn · ${turn.status}\n${clock(turn.startedAt)} · ${duration(turn.startedAt, turn.endedAt ?? now)}`)} />)}
           {data.permissions.map(permission => <rect key={permission.id} {...band(permission.requestedAt, permission.resolvedAt ?? node.endedAt)} y={y + 6} height="15" rx="2" fill={`url(#${pattern}-hatch)`} onMouseMove={event => hover(event, `${permission.request.title ?? "权限请求"}\n${permission.status} · ${duration(permission.requestedAt, permission.resolvedAt ?? now)}`)} />)}
           {data.tools.map((span, i) => <rect key={span.id} data-tool-kind={span.kind} {...band(span.startedAt, span.endedAt)} y={y + 24 + i % 2 * 7} height="5" rx="1" fill={toolColors[span.kind] ?? "#8794a4"} stroke={span.status === "failed" ? "var(--red)" : "none"} strokeWidth="1" onMouseMove={event => hover(event, `工具 · ${span.kind} / ${span.name}\n${span.summary ?? ""}\n${span.status} · ${clock(span.startedAt)} · ${duration(span.startedAt, span.endedAt ?? now)}`)}><title>{`${span.kind}: ${span.summary ?? span.name}`}</title></rect>)}
+          {data.questions.map(question => <rect key={question.id} {...band(question.askedAt, question.answeredAt ?? node.endedAt)} y={y + 20} height="3" fill="var(--blue)" strokeDasharray={question.blocking ? undefined : "3 2"} onMouseMove={event => hover(event, `提问 · ${question.blocking ? "等你回答" : "不阻塞"} · ${question.status}\n${question.question}\n${question.answer ?? "尚未回答"}`)}><title>{question.question}</title></rect>)}
+          {data.escalations.map(escalation => <g key={escalation.id} onMouseMove={event => hover(event, `${escalationLabels[escalation.kind]} · ${escalation.status}\n${escalation.detail}\n${escalation.note ?? ""}`)}>{escalation.kind === "stall" && <rect {...band(escalation.createdAt, escalation.resolvedAt ?? node.endedAt)} y={y + 35} height="3" fill="var(--red)" opacity="0.65" />}<path d={`M${x(escalation.createdAt)} ${y + 3} l5 9 h-10Z`} fill="var(--red)" stroke="var(--surface)" strokeWidth="1" /><title>{escalationLabels[escalation.kind]} · {escalation.detail}</title></g>)}
           {node.id === snapshot.run.rootNodeId && snapshot.run.team?.changes.map((change, i) => <g key={`${change.at}-${i}`} className="team-timeline-marker" onMouseMove={event => hover(event, `${changeLabels[change.kind]} · ${actorLabels[change.by]}\n${clock(change.at)}\n${change.reason ?? "未说明理由"}`)}><path d={`M${x(change.at)} ${y + 2} l5 5 -5 5 -5 -5Z`} fill={change.kind === "member_replaced" ? "var(--amber)" : "var(--purple)"} stroke="var(--surface)" strokeWidth="1" /><title>{changeLabels[change.kind]} · {change.reason}</title></g>)}
         </g>
       </g>; })}
@@ -73,7 +78,7 @@ export function Timeline({ snapshot, now, inspect }: { snapshot: RunSnapshot; no
       <line x1={gutter} x2={gutter} y1="0" y2={height} stroke="var(--border-strong)" />
       <rect x={gutter - 5} y="0" width="10" height={height} fill="transparent" className="timeline-column-resizer" role="separator" aria-label="调整节点标题列宽" aria-orientation="vertical" aria-valuenow={gutter} tabIndex={0} onKeyDown={event => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); setGutter(current => Math.max(220, Math.min(420, width - 220, current + (event.key === "ArrowRight" ? 20 : -20)))); } }}><title>拖动调整列宽；方向键微调</title></rect>
     </svg></div>
-    <div className="timeline-legend">{Object.entries(triggerColors).map(([trigger, color]) => <span key={trigger}><i style={{ background: color }} />{trigger}</span>)}<span><i className="hatched" />权限等待</span><span><i className="dotted" />等待子节点</span></div>
+    <div className="timeline-legend">{Object.entries(triggerColors).map(([trigger, color]) => <span key={trigger}><i style={{ background: color }} />{trigger}</span>)}<span><i className="hatched" />权限等待</span><span><i className="dotted" />等待子节点</span><span><i style={{ background: "var(--blue)" }} />提问等待</span><span><i style={{ background: "var(--red)" }} />升级</span></div>
     <div className="timeline-tool-legend"><span>TOOLS</span>{Object.entries(toolColors).slice(0, 8).map(([kind, color]) => <span key={kind}><i style={{ background: color }} />{kind}</span>)}</div>
     {tooltip && <div className="timeline-tooltip" style={{ left: Math.min(tooltip.x + 14, window.innerWidth - 330), top: Math.min(tooltip.y + 14, window.innerHeight - 100) }}>{tooltip.text}</div>}
   </div>;

@@ -19,7 +19,7 @@ export interface DeliveredResult {
   artifactsText?: string;
   note?: string;
 }
-export type BatonMessagePart = { type: "text"; text: string } | { type: "notice"; text: string } | AssignmentMessage | { type: "results"; results: DeliveredResult[] };
+export type BatonMessagePart = { type: "text"; text: string } | { type: "notice"; text: string } | { type: "answer"; questionId: string; text: string } | AssignmentMessage | { type: "results"; results: DeliveredResult[] };
 
 function decodeAttribute(value: string): string {
   return value.replace(/&(amp|quot|lt|gt|apos);/g, (_, entity: string) => ({ amp: "&", quot: '"', lt: "<", gt: ">", apos: "'" })[entity] ?? "");
@@ -97,12 +97,12 @@ function deliveredResult(attrs: string, body: string): DeliveredResult | null {
 /** Return null on an incomplete/malformed wrapper so the transcript can show the original. */
 export function parseBatonMessage(text: string): BatonMessagePart[] | null {
   const parts: BatonMessagePart[] = [];
-  const opener = /<(baton-assignment|baton-results|baton-notice)\b/;
+  const opener = /<(baton-assignment|baton-results|baton-notice|baton-answer)\b/;
   let rest = text.replace(/\r\n/g, "\n");
   let recognized = false;
   while (rest) {
     const start = opener.exec(rest);
-    if (!start) { if (/<\/(?:baton-assignment|baton-results|baton-notice)>/.test(rest)) return null; parts.push({ type: "text", text: rest }); break; }
+    if (!start) { if (/<\/(?:baton-assignment|baton-results|baton-notice|baton-answer)>/.test(rest)) return null; parts.push({ type: "text", text: rest }); break; }
     if (start.index > 0) parts.push({ type: "text", text: rest.slice(0, start.index) });
     rest = rest.slice(start.index);
     const tag = start[1]!;
@@ -110,8 +110,12 @@ export function parseBatonMessage(text: string): BatonMessagePart[] | null {
     const end = rest.indexOf(`</${tag}>`);
     if (!head || end < head[0].length) return null;
     const body = rest.slice(head[0].length, end);
-    if (/<\/?(?:baton-assignment|baton-results|baton-notice)\b/.test(body)) return null;
-    if (tag === "baton-notice") {
+    if (/<\/?(?:baton-assignment|baton-results|baton-notice|baton-answer)\b/.test(body)) return null;
+    if (tag === "baton-answer") {
+      const values = attributes(head[1]!, ["question"]);
+      if (!values || !body.trim()) return null;
+      parts.push({ type: "answer", questionId: values.question!, text: body.trim() });
+    } else if (tag === "baton-notice") {
       if (!body.trim()) return null;
       parts.push({ type: "notice", text: body.trim() });
     } else if (tag === "baton-assignment") {

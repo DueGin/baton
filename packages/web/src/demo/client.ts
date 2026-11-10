@@ -1,8 +1,10 @@
-import { applyEvent, emptyUsage, type CreateRunRequest, type DelegationRecord, type GetItemsResponse, type PatchRunRequest, type PermissionDecision, type RunEvent, type RunEventEnvelope, type RunSnapshot, type TimelineItem, type AddMemberRequest, type ReplaceMemberRequest, type ReassignRequest, type TeamPreset, type TeamPresetInput, type SaveTeamPresetRequest, type TeamRecord, type TeamMember, type TeamMemberSpec, type TeamChange, type TeamProposal, type ApproveTeamProposalRequest, type RejectTeamProposalRequest } from "@baton/protocol";
+import { applyEvent, emptyUsage, type CreateRunRequest, type DelegationRecord, type GetItemsResponse, type PatchRunRequest, type PermissionDecision, type RunEvent, type RunEventEnvelope, type RunSnapshot, type TimelineItem, type AddMemberRequest, type ReplaceMemberRequest, type ReassignRequest, type TeamPreset, type TeamPresetInput, type SaveTeamPresetRequest, type TeamRecord, type TeamMember, type TeamMemberSpec, type TeamChange, type TeamProposal, type ApproveTeamProposalRequest, type RejectTeamProposalRequest, type InboxItem, type AnswerQuestionRequest, type ResolveEscalationRequest, type PermissionRule, type CreatePermissionRuleRequest, type QuestionRecord, type EscalationRecord } from "@baton/protocol";
 import type { BatonClient, TeamPresetResult } from "../api.js";
 import { summarize, terminal } from "../lib/derive.js";
 import { createScenario, demoAgents } from "./scenario.js";
 import { demoBriefPrompt, demoResultsPrompt } from "./prompts.js";
+import { snapshotInbox, sortInbox, permissionPattern } from "../lib/inbox.js";
+import { matchPermissionRule } from "../lib/permission-rules.js";
 import { activeMembers, cleanMember, defaultAgentSpec, pendingProposals, validateMembers, validatePreset } from "../lib/teams.js";
 
 interface DemoRun { snapshot: RunSnapshot; remaining: RunEventEnvelope[]; log: RunEventEnvelope[] }
@@ -10,6 +12,9 @@ export class DemoClient implements BatonClient {
   readonly demo = true;
   private data = new Map<string, DemoRun>();
   private listeners = new Set<(event: RunEventEnvelope) => void>();
+  private inboxListeners = new Set<() => void>();
+  private rules = new Map<string, PermissionRule>();
+  private roundExtensions = new Map<string, number>();
   private counter = 0;
   private serial = 0;
   private presets = new Map<string, TeamPreset>();
@@ -32,8 +37,10 @@ export class DemoClient implements BatonClient {
     this.data.set(previous.run.id, { snapshot: previous, log: archived.events, remaining: [] });
     const ts = new Date(now()).toISOString();
     this.presets.set("preset-product", { id: "preset-product", name: "产品交付小队", description: "Lead 协调，Codex 实现，pi 独立审查。", lead: defaultAgentSpec(demoAgents, "claude"), members: [{ role: "engineer", ...defaultAgentSpec(demoAgents, "codex"), responsibilities: "代码实现和测试" }, { role: "reviewer", ...defaultAgentSpec(demoAgents, "pi"), responsibilities: "只读审查与边界验证" }], createdAt: ts, updatedAt: ts });
+    this.rules.set("rule-demo-read", { id: "rule-demo-read", toolName: "read", pattern: "src/**", decision: "allow", scope: "global", agentId: "codex", createdAt: ts, hits: 1, lastHitAt: ts });
     // Keep a second live Run at the approval gate until the human decides.
     void this.createRun({ agent: "claude", cwd: "/workspace/atlas", title: "待确认团队 · 实现登录流程", prompt: "实现登录流程，并独立审查会话安全。", policy: { mode: "dynamic", teamApproval: true } });
+    this.setupHumanDemo();
   }
   agents = async () => structuredClone(demoAgents);
   runs = async () => { this.advance(); return [...this.data.values()].map(data => summarize(data.snapshot)).reverse(); };
@@ -51,6 +58,8 @@ export class DemoClient implements BatonClient {
     const envelope = { ...event, runId: data.snapshot.run.id, seq: data.snapshot.lastSeq + 1, ts: new Date(this.now()).toISOString() } as RunEventEnvelope;
     data.snapshot = applyEvent(data.snapshot, envelope); data.log.push(envelope);
     this.listeners.forEach(listener => listener(envelope));
+    if (["permission", "question", "escalation", "team.updated", "run.updated", "node.updated"].includes(event.type)) this.inboxListeners.forEach(listener => listener());
+    if (event.type === "node.updated" && event.patch.status && terminal(event.patch.status)) for (const question of data.snapshot.questions.filter(row => row.nodeId === event.nodeId && row.status === "pending")) this.emit(data, { type: "question", question: { ...question, status: "canceled", answeredAt: envelope.ts } });
   }
   private append(data: DemoRun, nodeId: string, item: TimelineItem): void {
     const seq = Math.max(0, ...data.log.filter(event => event.type === "item" && event.nodeId === nodeId).map(event => event.type === "item" ? event.itemSeq : 0)) + 1;
@@ -72,12 +81,14 @@ export class DemoClient implements BatonClient {
     }
   }
   async createRun(request: CreateRunRequest): Promise<RunSnapshot> {
+    if (request.team?.length && request.team.length > (request.policy?.maxTeamSize ?? 5)) throw new Error("团队人数超过 maxTeamSize");
     const id = `run-local-${++this.counter}`; const ts = new Date(this.now()).toISOString(); const rootNodeId = `${id}:root`;
     const preset = request.teamPresetId ? this.presets.get(request.teamPresetId) : undefined;
     if (request.teamPresetId && !preset) throw new Error("团队预设不存在");
+    if (preset && preset.members.length > (request.policy?.maxTeamSize ?? 5)) throw new Error("预设团队人数超过 maxTeamSize");
     const lead = preset?.lead ?? { agentId: request.agent ?? "claude", model: request.model, modeId: request.modeId, thinking: request.thinking };
     const mode = preset ? "preset" : request.policy?.mode ?? "dynamic";
-    const snapshot: RunSnapshot = { run: { id, title: request.title || request.prompt.slice(0, 28), status: "active", cwd: request.cwd, rootNodeId, createdAt: ts, updatedAt: ts, policy: { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, teamApproval: true, ...request.policy, mode }, usage: emptyUsage() }, nodes: [{ id: rootNodeId, runId: id, parentNodeId: null, delegationId: null, depth: 0, ...lead, title: request.title || "处理用户请求", status: "running", activity: "分析任务", cwd: request.cwd, usage: emptyUsage(), turns: 1, createdAt: ts, updatedAt: ts }], turns: [{ id: `${id}:t1`, runId: id, nodeId: rootNodeId, status: "running", trigger: "user", startedAt: ts }], delegations: [], permissions: [], toolSpans: [], lastSeq: 0 };
+    const snapshot: RunSnapshot = { run: { id, title: request.title || request.prompt.slice(0, 28), status: "active", cwd: request.cwd, rootNodeId, createdAt: ts, updatedAt: ts, policy: { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, teamApproval: true, maxTeamSize: 5, stallMinutes: 10, maxRoundsPerDelegation: 3, ...request.policy, mode }, usage: emptyUsage() }, nodes: [{ id: rootNodeId, runId: id, parentNodeId: null, delegationId: null, depth: 0, ...lead, title: request.title || "处理用户请求", status: "running", activity: "分析任务", cwd: request.cwd, usage: emptyUsage(), turns: 1, createdAt: ts, updatedAt: ts }], turns: [{ id: `${id}:t1`, runId: id, nodeId: rootNodeId, status: "running", trigger: "user", startedAt: ts }], delegations: [], permissions: [], questions: [], escalations: [], toolSpans: [], lastSeq: 0 };
     const data = { snapshot, log: [], remaining: [] }; this.data.set(id, data);
     this.append(data, rootNodeId, { type: "user_message", text: request.prompt });
     this.append(data, rootNodeId, { type: "notice", level: "info", message: "这是浏览器内 demo。消息与操作保存在本次会话中，不会调用本机 agent。" });
@@ -89,10 +100,11 @@ export class DemoClient implements BatonClient {
       const specs = preset?.members ?? request.team;
       if (specs?.length) {
         const issues = validateMembers(specs); if (issues.length) throw new Error(issues.join("；"));
+        this.checkTeamSize(data, specs.length);
         const members = specs.map(spec => this.member(spec, preset ? "preset" : "human", "由创建 Run 时指定"));
         const team: TeamRecord = { source: preset ? "preset" : "dynamic", ...(preset ? { presetId: preset.id, presetName: preset.name } : {}), members, proposals: [], changes: [], updatedAt: ts };
         this.teamUpdate(data, team, { kind: "formed", by: preset ? "preset" : "human", at: ts, reason: "创建 Run 时带入名单" });
-      } else if (!preset) this.proposeTeam(id, [{ role: "engineer", ...defaultAgentSpec(demoAgents, "codex"), responsibilities: "实现功能与测试" }, { role: "reviewer", ...defaultAgentSpec(demoAgents, "pi"), responsibilities: "独立检查安全和边界" }], "实现与审查分开，由两名成员并行推进；名单确认后开工。");
+      } else if (!preset) this.proposeTeam(id, [{ role: "engineer", ...defaultAgentSpec(demoAgents, "codex"), responsibilities: "实现功能与测试" }, ...((request.policy?.maxTeamSize ?? 5) > 1 ? [{ role: "reviewer", ...defaultAgentSpec(demoAgents, "pi"), responsibilities: "独立检查安全和边界" }] : [])], "实现与审查分开，由成员推进；名单确认后开工。");
       else this.teamUpdate(data, { source: "preset", presetId: preset.id, presetName: preset.name, members: [], proposals: [], changes: [], updatedAt: ts }, { kind: "formed", by: "preset", at: ts, reason: "使用无成员预设，由 lead 处理任务" });
     }
     return structuredClone(data.snapshot);
@@ -122,12 +134,14 @@ export class DemoClient implements BatonClient {
   private teamUpdate(data: DemoRun, team: TeamRecord, change: TeamChange): void {
     this.emit(data, { type: "team.updated", team: { ...team, changes: [...team.changes, change], updatedAt: change.at }, change });
   }
+  private checkTeamSize(data: DemoRun, size: number): void { if (size > (data.snapshot.run.policy.maxTeamSize ?? 5)) throw new Error(`团队人数超过 maxTeamSize (${data.snapshot.run.policy.maxTeamSize ?? 5})`); }
   private teamFor(data: DemoRun): TeamRecord {
     if (data.snapshot.run.policy.mode === "solo") throw new Error("单独完成模式没有团队");
     return data.snapshot.run.team ?? { source: "dynamic", members: [], proposals: [], changes: [], updatedAt: new Date(this.now()).toISOString() };
   }
   async addMember(id: string, request: AddMemberRequest): Promise<void> {
     const data = this.get(id); const team = this.teamFor(data); const issues = validateMembers([...activeMembers(team), request]); if (issues.length) throw new Error(issues.join("；"));
+    this.checkTeamSize(data, activeMembers(team).length + 1);
     const member = this.member(request, "human", request.reason);
     this.teamUpdate(data, { ...team, members: [...team.members, member] }, { kind: "member_added", by: "human", memberId: member.id, at: member.addedAt, reason: request.reason });
   }
@@ -171,6 +185,7 @@ export class DemoClient implements BatonClient {
     const data = this.get(id); const team = this.teamFor(data);
     if (pendingProposals(team).length) throw new Error("已有待确认提案，请先处理");
     const issues = validateMembers([...activeMembers(team), ...specs]); if (issues.length) throw new Error(issues.join("；"));
+    this.checkTeamSize(data, activeMembers(team).length + specs.length);
     const ts = new Date(this.now()).toISOString();
     if (data.snapshot.run.policy.teamApproval === false) {
       const members = specs.map(spec => this.member(spec, "lead", rationale));
@@ -227,9 +242,11 @@ export class DemoClient implements BatonClient {
   private notice(data: DemoRun, nodeId: string, text: string): void { this.append(data, nodeId, { type: "user_message", text: `<baton-notice>\n${text}\n</baton-notice>` }); }
   async approveTeam(id: string, proposalId: string, request: ApproveTeamProposalRequest): Promise<void> {
     const data = this.get(id); const team = this.teamFor(data); const proposal = team.proposals.find(entry => entry.id === proposalId && entry.status === "pending"); if (!proposal) throw new Error("提案已处理或不存在");
+    if (data.snapshot.run.status === "canceled") throw new Error("Run 已取消");
     const specs = (proposal.kind === "replacement" ? [request.replacement ?? proposal.replace!.with] : request.members ?? proposal.members ?? []).map(cleanMember);
     if (proposal.replace && specs[0]?.role !== proposal.replace.with.role) throw new Error("换人必须保留原角色");
     const issues = validateMembers([...activeMembers(team).filter(member => member.id !== proposal.replace?.memberId), ...specs]); if (issues.length) throw new Error(issues.join("；"));
+    this.checkTeamSize(data, activeMembers(team).length - (proposal.replace ? 1 : 0) + specs.length);
     const ts = new Date(this.now()).toISOString(); const members = specs.map(spec => this.member(spec, proposal.by, proposal.rationale));
     this.teamUpdate(data, { ...team, rationale: proposal.rationale ?? team.rationale, members: [...team.members, ...members], proposals: team.proposals.map(entry => entry.id === proposalId ? { ...entry, status: "approved", decidedAt: ts, approvedMembers: proposal.kind !== "replacement" ? specs : undefined, approvedReplacement: proposal.kind === "replacement" ? specs[0] : undefined, feedback: request.note } : entry) }, { kind: "approved", by: "human", at: ts, proposalId, reason: request.note ?? "批准名单" });
     if (!proposal.replace) this.teamUpdate(data, data.snapshot.run.team!, { kind: proposal.kind === "formation" ? "formed" : "member_added", by: proposal.by, at: ts, proposalId, reason: proposal.rationale });
@@ -302,6 +319,7 @@ export class DemoClient implements BatonClient {
     for (const edge of data.snapshot.delegations) if (ids.has(edge.toNodeId) && !terminal(edge.status)) {
       if (edge.blockedByProposal) this.cancelQueued(data, edge); else this.emit(data, { type: "delegation.updated", delegationId: edge.id, patch: { status: "canceled", endedAt: ts } });
     }
+    for (const escalation of data.snapshot.escalations) if (ids.has(escalation.nodeId) && escalation.status === "pending") this.emit(data, { type: "escalation", escalation: { ...escalation, status: "resolved", resolution: "cancel", resolvedAt: ts } });
     for (const permission of data.snapshot.permissions) if (ids.has(permission.nodeId) && permission.status === "pending") this.emit(data, { type: "permission", permission: { ...permission, status: "expired", resolvedAt: ts } });
     if (ids.has(data.snapshot.run.rootNodeId)) {
       const team = data.snapshot.run.team;
@@ -309,14 +327,28 @@ export class DemoClient implements BatonClient {
       this.emit(data, { type: "run.updated", patch: { status: "canceled", endedAt: ts, updatedAt: ts } });
     }
   }
-  decide = (requestId: string, decision: PermissionDecision) => this.resolve(requestId, decision, "human");
-  private async resolve(requestId: string, decision: PermissionDecision, by: "human" | "policy"): Promise<void> {
+  decide = async (requestId: string, decision: PermissionDecision): Promise<void> => {
+    if (decision.remember) {
+      for (const data of this.data.values()) {
+        const permission = data.snapshot.permissions.find(row => row.requestId === requestId && row.status === "pending"); if (!permission) continue;
+        const node = data.snapshot.nodes.find(row => row.id === permission.nodeId)!;
+        await this.createPermissionRule({ toolName: permission.request.name, pattern: decision.remember.pattern ?? permissionPattern(permission, data.snapshot.run.cwd), decision: decision.response.behavior, scope: decision.remember.scope, ...(decision.remember.scope === "run" ? { runId: permission.runId } : {}), ...(decision.remember.agentOnly ? { agentId: node.agentId } : {}) });
+        const saved = [...this.rules.values()].at(-1)!; this.rules.set(saved.id, { ...saved, createdFrom: permission.id });
+      }
+    }
+    await this.resolve(requestId, decision, "human");
+  };
+  private async resolve(requestId: string, decision: PermissionDecision, by: "human" | "policy" | "rule", ruleId?: string): Promise<void> {
     for (const data of this.data.values()) {
       const permission = data.snapshot.permissions.find(entry => entry.requestId === requestId && entry.status === "pending");
       if (!permission) continue;
       const ts = new Date(this.now()).toISOString();
-      this.emit(data, { type: "permission", permission: { ...permission, status: "resolved", resolution: decision.response, resolvedBy: by, resolvedAt: ts } });
-      this.append(data, permission.nodeId, { type: "notice", level: "info", message: decision.response.behavior === "allow" ? "授权已允许，继续执行。" : "授权已拒绝，使用现有测试依赖。" });
+      this.emit(data, { type: "permission", permission: { ...permission, status: "resolved", resolution: decision.response, resolvedBy: by, ruleId, resolvedAt: ts } });
+      if (data.snapshot.run.id !== "run-demo") {
+        this.notice(data, permission.nodeId, decision.response.behavior === "allow" ? "授权已允许，继续执行。" : "The human denied this action. Do not retry it; choose a different approach or ask_human.");
+        return;
+      }
+      this.append(data, permission.nodeId, { type: "notice", level: "info", message: decision.response.behavior === "allow" ? "授权已允许，继续执行。" : "The human denied this action. Do not retry it; choose a different approach or ask_human." });
       this.append(data, permission.nodeId, { type: "assistant_message", text: "Command Palette 已完成：支持 ⌘K、方向键导航、Esc 关闭和结果分组。组件测试通过。" });
       this.emit(data, { type: "node.updated", nodeId: permission.nodeId, patch: { status: "completed", activity: "结果已交付", endedAt: ts, updatedAt: ts } });
       for (const turn of data.snapshot.turns) if (turn.nodeId === permission.nodeId && turn.status === "running") this.emit(data, { type: "turn.updated", turnId: turn.id, patch: { status: "completed", endedAt: ts } });
@@ -347,6 +379,72 @@ export class DemoClient implements BatonClient {
       return;
     }
     throw new Error("该权限请求已处理或不存在");
+  }
+  inbox = async (): Promise<InboxItem[]> => { this.advance(); return structuredClone(sortInbox([...this.data.values()].flatMap(data => snapshotInbox(data.snapshot)))); };
+  async inboxEvents(changed: () => void, signal: AbortSignal): Promise<void> {
+    this.inboxListeners.add(changed); const timer = setInterval(() => this.advance(), 500);
+    await new Promise<void>(resolve => { const cleanup = (): void => { clearInterval(timer); this.inboxListeners.delete(changed); resolve(); }; if (signal.aborted) cleanup(); else signal.addEventListener("abort", cleanup, { once: true }); });
+  }
+  async answer(id: string, request: AnswerQuestionRequest): Promise<void> {
+    if (!request.answer.trim()) throw new Error("请填写回答");
+    for (const data of this.data.values()) {
+      const question = data.snapshot.questions.find(row => row.id === id && row.status === "pending"); if (!question) continue;
+      this.emit(data, { type: "question", question: { ...question, status: "answered", answer: request.answer.trim(), answeredAt: new Date(this.now()).toISOString() } });
+      await this.send(question.nodeId, `<baton-answer question="${id}">\n${request.answer.trim()}\n</baton-answer>`); return;
+    }
+    throw new Error("提问已处理或不存在");
+  }
+  /** Demo-only provider hook; ask_human is available even in solo runs. */
+  askHuman(nodeId: string, input: Pick<QuestionRecord, "question" | "options" | "blocking">): QuestionRecord {
+    const data = this.forNode(nodeId); const node = data.snapshot.nodes.find(row => row.id === nodeId)!;
+    if (terminal(node.status) || !input.question.trim()) throw new Error("节点已结束或问题为空");
+    const question: QuestionRecord = { ...input, question: input.question.trim(), id: `question-${++this.serial}`, nodeId, runId: node.runId, status: "pending", askedAt: new Date(this.now()).toISOString() };
+    this.emit(data, { type: "question", question }); return question;
+  }
+  async resolveEscalation(id: string, request: ResolveEscalationRequest): Promise<void> {
+    for (const data of this.data.values()) {
+      const escalation = data.snapshot.escalations.find(row => row.id === id && row.status === "pending"); if (!escalation) continue;
+      if (request.resolution === "extend" && (escalation.kind !== "round_limit" || !Number.isInteger(request.extraRounds ?? 2) || (request.extraRounds ?? 2) < 1)) throw new Error("仅轮次上限可延长，增加轮次须为正整数");
+      this.emit(data, { type: "escalation", escalation: { ...escalation, status: "resolved", resolution: request.resolution, note: request.note, resolvedAt: new Date(this.now()).toISOString() } });
+      if (request.resolution === "cancel") await this.cancelNode(escalation.nodeId);
+      if (request.resolution === "extend") {
+        if (escalation.delegationId) this.roundExtensions.set(escalation.delegationId, (this.roundExtensions.get(escalation.delegationId) ?? 0) + (request.extraRounds ?? 2));
+        if (escalation.pendingMessage) await this.send(escalation.nodeId, escalation.pendingMessage);
+      }
+      const edge = data.snapshot.delegations.find(row => row.id === escalation.delegationId);
+      this.notice(data, edge?.fromNodeId ?? data.snapshot.run.rootNodeId, `升级已处理：${escalation.kind} · ${request.resolution}\n留言：${request.note ?? "无"}`); return;
+    }
+    throw new Error("升级已处理或不存在");
+  }
+  permissionRules = async (): Promise<PermissionRule[]> => structuredClone([...this.rules.values()]);
+  async createPermissionRule(request: CreatePermissionRuleRequest): Promise<void> {
+    if (!request.toolName.trim() || (request.scope === "run" && !request.runId)) throw new Error("请填写工具名称与 Run");
+    if (request.runId) this.get(request.runId);
+    const rule = { ...request, toolName: request.toolName.trim(), pattern: request.pattern?.trim() || undefined, id: `rule-${++this.serial}`, createdAt: new Date(this.now()).toISOString(), hits: 0 };
+    this.rules.set(rule.id, rule);
+  }
+  deletePermissionRule = async (id: string): Promise<void> => { this.rules.delete(id); };
+  /** Demo hook used to exercise deterministic remembered decisions without a provider. */
+  async requestPermission(nodeId: string, permission: import("@baton/protocol").PermissionRecord): Promise<void> {
+    const data = this.forNode(nodeId); const node = data.snapshot.nodes.find(row => row.id === nodeId)!;
+    this.emit(data, { type: "permission", permission });
+    const rule = matchPermissionRule([...this.rules.values()], permission, node.agentId, data.snapshot.run.cwd);
+    if (rule) { this.rules.set(rule.id, { ...rule, hits: rule.hits + 1, lastHitAt: new Date(this.now()).toISOString() }); await this.resolve(permission.requestId, { response: { behavior: rule.decision } }, "rule", rule.id); }
+    else if (data.snapshot.run.policy.autoApprove) await this.resolve(permission.requestId, { response: { behavior: "allow" } }, "policy");
+  }
+  private setupHumanDemo(): void {
+    void this.createRun({ agent: "claude", cwd: "/workspace/atlas", title: "人工介入 · API 与回归验证", prompt: "实现 API 并检查边界，遇到产品选择时请向我提问。", team: [{ role: "builder", ...defaultAgentSpec(demoAgents, "codex"), responsibilities: "实现 API" }, { role: "tester", ...defaultAgentSpec(demoAgents, "pi"), responsibilities: "验证边界" }], policy: { mode: "dynamic", teamApproval: true } });
+    const data = this.get(`run-local-${this.counter}`); const root = data.snapshot.run.rootNodeId;
+    const members = activeMembers(data.snapshot.run.team);
+    members.forEach(member => this.queueTask(data, member, { title: `${member.role} · 验证实现`, task: member.responsibilities ?? "检查实现" }));
+    data.remaining = [];
+    const question: QuestionRecord = { id: "demo-question", runId: data.snapshot.run.id, nodeId: root, question: "搜索结果是否需要包含已归档项目？", options: ["默认隐藏，提供筛选", "全部显示"], blocking: true, status: "pending", askedAt: new Date(this.now()).toISOString() };
+    this.emit(data, { type: "question", question }); this.append(data, root, { type: "assistant_message", text: question.question });
+    const edges = data.snapshot.delegations;
+    const stall: EscalationRecord = { id: "demo-stall", runId: data.snapshot.run.id, nodeId: edges[0]!.toNodeId, delegationId: edges[0]!.id, kind: "stall", detail: "builder 已超过 10 分钟没有新活动；最后活动：npm test。可以忽略或取消委派。", status: "pending", createdAt: new Date(this.now()).toISOString() };
+    this.emit(data, { type: "escalation", escalation: stall });
+    this.emit(data, { type: "escalation", escalation: { id: "demo-round-limit", runId: data.snapshot.run.id, nodeId: edges[1]!.toNodeId, delegationId: edges[1]!.id, kind: "round_limit", detail: "tester 已达到 3 轮，需要你决定是否继续。", pendingMessage: "请补充归档数据的回归测试。", status: "pending", createdAt: new Date(this.now()).toISOString() } });
+    this.emit(data, { type: "delegation.updated", delegationId: edges[1]!.id, patch: { round: 3 } });
   }
   async events(runId: string, after: number, onEvent: (event: RunEventEnvelope) => void, signal: AbortSignal): Promise<void> {
     const listener = (event: RunEventEnvelope): void => { if (event.runId === runId && event.seq > after) { after = event.seq; onEvent(structuredClone(event)); } };
