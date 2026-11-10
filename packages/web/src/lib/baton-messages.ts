@@ -1,8 +1,9 @@
-/** Only the two baton message wrappers are recognized; all other content stays text. */
+/** Recognize baton wrappers only; render their bodies as escaped text. */
 export interface AssignmentMessage {
   type: "assignment";
   delegationId: string;
   title: string;
+  role?: string;
   task: string;
   context?: string;
   acceptance: string[];
@@ -18,7 +19,7 @@ export interface DeliveredResult {
   artifactsText?: string;
   note?: string;
 }
-export type BatonMessagePart = { type: "text"; text: string } | AssignmentMessage | { type: "results"; results: DeliveredResult[] };
+export type BatonMessagePart = { type: "text"; text: string } | { type: "notice"; text: string } | AssignmentMessage | { type: "results"; results: DeliveredResult[] };
 
 function decodeAttribute(value: string): string {
   return value.replace(/&(amp|quot|lt|gt|apos);/g, (_, entity: string) => ({ amp: "&", quot: '"', lt: "<", gt: ">", apos: "'" })[entity] ?? "");
@@ -40,10 +41,10 @@ function attributes(source: string, expected: string[]): Record<string, string> 
 function assignment(attrs: string, body: string): AssignmentMessage | null {
   const values = attributes(attrs, ["delegation"]);
   if (!values) return null;
-  const match = /^\s*Title: ([^\n]+)\n\nTask:\n([\s\S]*)$/.exec(body);
+  const match = /^\s*Title: ([^\n]+)\n(?:Role: ([^\n]+)\n)?\nTask:\n([\s\S]*)$/.exec(body);
   if (!match) return null;
   const finish = "\n\nWhen finished, call report_result once, then end your turn.";
-  let content = match[2]!.trimEnd();
+  let content = match[3]!.trimEnd();
   if (!content.endsWith(finish)) return null;
   content = content.slice(0, -finish.length);
   const readonlyText = "\n\nREAD ONLY: do not modify any files. Inspect, analyse and report only.";
@@ -69,12 +70,12 @@ function assignment(attrs: string, body: string): AssignmentMessage | null {
   const contextAt = content.indexOf("\n\nContext:\n");
   const task = (contextAt < 0 ? content : content.slice(0, contextAt)).trim();
   if (!task) return null;
-  return { type: "assignment", delegationId: values.delegation!, title: match[1]!, task, ...(contextAt < 0 ? {} : { context: content.slice(contextAt + "\n\nContext:\n".length).trim() }), acceptance, readonly };
+  return { type: "assignment", delegationId: values.delegation!, title: match[1]!, ...(match[2] ? { role: match[2] } : {}), task, ...(contextAt < 0 ? {} : { context: content.slice(contextAt + "\n\nContext:\n".length).trim() }), acceptance, readonly };
 }
 
 function deliveredResult(attrs: string, body: string): DeliveredResult | null {
   const values = attributes(attrs, ["delegation", "status", "outcome", "title"]);
-  if (!values || !["success", "partial", "failed"].includes(values.outcome!) || !["queued", "running", "completed", "failed", "canceled", "interrupted"].includes(values.status!)) return null;
+  if (!values || !["success", "partial", "failed"].includes(values.outcome!) || !["queued", "running", "completed", "failed", "canceled", "replaced", "interrupted"].includes(values.status!)) return null;
   let text = body.trim();
   const noteText = "\n\n(The delegate did not call report_result; the summary is its final message.)";
   let note: string | undefined;
@@ -96,12 +97,12 @@ function deliveredResult(attrs: string, body: string): DeliveredResult | null {
 /** Return null on an incomplete/malformed wrapper so the transcript can show the original. */
 export function parseBatonMessage(text: string): BatonMessagePart[] | null {
   const parts: BatonMessagePart[] = [];
-  const opener = /<(baton-assignment|baton-results)\b/;
+  const opener = /<(baton-assignment|baton-results|baton-notice)\b/;
   let rest = text.replace(/\r\n/g, "\n");
   let recognized = false;
   while (rest) {
     const start = opener.exec(rest);
-    if (!start) { if (/<\/(?:baton-assignment|baton-results)>/.test(rest)) return null; parts.push({ type: "text", text: rest }); break; }
+    if (!start) { if (/<\/(?:baton-assignment|baton-results|baton-notice)>/.test(rest)) return null; parts.push({ type: "text", text: rest }); break; }
     if (start.index > 0) parts.push({ type: "text", text: rest.slice(0, start.index) });
     rest = rest.slice(start.index);
     const tag = start[1]!;
@@ -109,8 +110,11 @@ export function parseBatonMessage(text: string): BatonMessagePart[] | null {
     const end = rest.indexOf(`</${tag}>`);
     if (!head || end < head[0].length) return null;
     const body = rest.slice(head[0].length, end);
-    if (/<\/?(?:baton-assignment|baton-results)\b/.test(body)) return null;
-    if (tag === "baton-assignment") {
+    if (/<\/?(?:baton-assignment|baton-results|baton-notice)\b/.test(body)) return null;
+    if (tag === "baton-notice") {
+      if (!body.trim()) return null;
+      parts.push({ type: "notice", text: body.trim() });
+    } else if (tag === "baton-assignment") {
       const parsed = assignment(head[1]!, body);
       if (!parsed) return null;
       parts.push(parsed);

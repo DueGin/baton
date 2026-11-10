@@ -10,8 +10,8 @@ const edge = snapshot.delegations.find(delegation => delegation.brief.readonly)!
 describe("baton protocol transcript messages", () => {
   it("parses the server assignment format with context, acceptance, readonly and schema", () => {
     const parts = parseBatonMessage(briefPrompt(edge));
-    expect(parts).toEqual([{ type: "assignment", delegationId: edge.id, title: edge.brief.title, task: edge.brief.task, context: edge.brief.context, acceptance: edge.brief.acceptance, readonly: true }]);
-    const minimum = { ...edge, brief: { title: "Small task", task: "Inspect the project" } };
+    expect(parts).toEqual([{ type: "assignment", delegationId: edge.id, title: edge.brief.title, role: edge.role, task: edge.brief.task, context: edge.brief.context, acceptance: edge.brief.acceptance, readonly: true }]);
+    const minimum = { ...edge, role: undefined, brief: { title: "Small task", task: "Inspect the project" } };
     expect(parseBatonMessage(briefPrompt(minimum))?.[0]).toMatchObject({ task: "Inspect the project", acceptance: [], readonly: false });
   });
 
@@ -44,6 +44,11 @@ describe("baton protocol transcript messages", () => {
     expect(parts?.[0]?.type).toBe("results");
     if (parts?.[0]?.type !== "results") throw new Error("expected results");
     expect(parts[0].results[0]!.resultText).toContain("[Truncated.");
+  });
+  it("parses notice bodies leniently and rejects incomplete notices", () => {
+    expect(parseBatonMessage('<baton-notice kind="reassigned" old="d1">\n任务 d1 → d2\n<script>bad()</script>\n</baton-notice>')).toEqual([{ type: "notice", text: '任务 d1 → d2\n<script>bad()</script>' }]);
+    expect(parseBatonMessage('<baton-notice>missing end')).toBeNull();
+    expect(parseBatonMessage('<baton-notice> </baton-notice>')).toBeNull();
   });
 
   it("keeps browser demo format exactly equal to server output", () => {

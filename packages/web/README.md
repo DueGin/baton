@@ -26,7 +26,7 @@ Implemented screens:
 - Run list, live totals and policy controls, new Run dialog.
 - Dagre topology with provider cards, delegation results, inline permission actions,
   stable positions between structural changes, minimap and follow toggle. Fit uses
-  0.85–1.1 zoom to keep text readable; minimap hides below 900px canvas width and while
+  0.45–1.1 zoom; minimap hides below 900px canvas width and while
   the inspector is open.
 - SVG timeline with node/turn/tool/wait bands, delegation and delivery arrows,
   pointer-centered wheel zoom, drag pan, hover details and node selection. Rows are
@@ -40,7 +40,30 @@ Implemented screens:
   usage, metadata, recent transcript, message and cancel-subtree actions.
 - Agents catalog and browser-local default policy / theme settings.
 
-Demo starts with a Claude root delegating to Codex, Claude and pi, including a pi
+Teams are available both as a Run tab and as saved presets in the left navigation.
+New Run supports dynamic teams (optional seeded roles), a preset's lead and roster,
+or solo execution. Dynamic roster proposals require human confirmation by default.
+The confirmation card allows role/agent/model/responsibility edits, adding/removing
+roles, approval and rejection with feedback. Pending proposals appear in the Run's
+pending count and team-tab badge. Queued tasks are listed on the proposal card;
+their reserved node IDs do not appear on the graph until approved. Human roster
+edits apply immediately. Preset create/edit/save display availability warnings
+returned by the server; unknown agent IDs are rejected.
+
+The Run team tab shows every role slot, including replaced/removed history, per-status
+delegation counts, actor/reason, and the lead's rationale. Members can be added,
+replaced (optionally moving active work), removed, or saved as a preset. Topology
+cards and the inspector can reassign work (including failed tasks) to a member or agent; old
+nodes stay visible as replaced with a dashed connection to their successors.
+The timeline marks roster/proposal decisions on the root row. `baton-notice`
+messages appear as safely escaped notice cards.
+
+Demo opens a pending team proposal for the login-flow Run; its queued delegates
+remain stopped until approved (and use any edited specs). Dropped roles or rejected
+proposals cancel their queued work. A saved product-team preset is included. Select
+the search Run in the sidebar to inspect an evolving team and a replacement.
+
+The search demo has a Claude root delegating to Codex, Claude and pi, including a pi
 grandchild that fails. Completed results are delivered to parents. The demo continues
 streaming usage, message replacements and verification tools after opening; one UI
 permission stays pending until resolved. Allow/deny and autoApprove resolve it and
@@ -57,6 +80,10 @@ npm run build -w @baton/web
 Tests cover protocol replay/store integration, same-item replacement, lazy-load races,
 reconnection offsets, token handling, SSE chunking, safe content rendering, deterministic
 demo relationships/actions, time math, tree ordering and graph geometry.
+Team tests also cover the shared reducer's full-roster replacement, active slots and
+delegation counts, preset validation/CRUD, progress-preserving reassignment, notice
+parsing, original/edited approval, dropped roles, rejection, a second pending-proposal
+error, replacement approval, and disabled-approval behavior.
 The browser demo's baton message formats are compared against the server's pure
 prompt formatters in web tests, including batched delivery and escaped title attributes.
 

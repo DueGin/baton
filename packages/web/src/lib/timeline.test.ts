@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { createScenario, replay } from "../demo/scenario.js";
 import { displayRunStatus, displayStatus, summarize, treeOrder } from "./derive.js";
 import { fitTime, niceTicks, panTime, timeX, waitingIntervals, xTime, zoomTime } from "./timeline.js";
-import { graphPositions } from "../components/Topology.js";
+import { graphEdges, graphPositions } from "../components/Topology.js";
+import { DemoClient } from "../demo/client.js";
 
 const base = Date.parse("2026-11-10T07:00:00Z");
 const snapshot = replay(createScenario(base), base + 86000);
@@ -44,7 +45,7 @@ describe("timeline scale and layout", () => {
     }
   });
   it("uses depth-first tree order even when input is shuffled; cycles cannot loop", () => {
-    expect(treeOrder([...snapshot.nodes].reverse()).map(node => node.id.split(":").at(-1))).toEqual(["root", "api", "index", "ui", "review"]);
+    expect(treeOrder([...snapshot.nodes].reverse()).map(node => node.id.split(":").at(-1))).toEqual(["root", "api", "index", "ui", "review", "regression", "regression-v2"]);
     const cyclic = snapshot.nodes.map((node, index) => ({ ...node, parentNodeId: snapshot.nodes[(index + 1) % snapshot.nodes.length]!.id }));
     expect(treeOrder(cyclic)).toHaveLength(snapshot.nodes.length);
   });
@@ -54,5 +55,18 @@ describe("timeline scale and layout", () => {
     for (const edge of snapshot.delegations) expect(positions.get(edge.toNodeId)!.y).toBeGreaterThan(positions.get(edge.fromNodeId)!.y);
     const points = [...positions.values()];
     for (let i = 0; i < points.length; i++) for (let j = i + 1; j < points.length; j++) expect(Math.abs(points[i]!.x - points[j]!.x) >= 286 || Math.abs(points[i]!.y - points[j]!.y) >= 210).toBe(true);
+  });
+  it("keeps reserved proposal node IDs out of graph endpoints until approval", async () => {
+    const client = new DemoClient(() => base);
+    const queued = await client.run("run-local-1");
+    expect(graphPositions(queued).size).toBe(1);
+    expect(graphEdges(queued)).toEqual([]);
+    await client.approveTeam(queued.run.id, queued.run.team!.proposals[0]!.id, {});
+    const running = await client.run(queued.run.id);
+    expect(graphPositions(running).size).toBe(3);
+    expect(graphEdges(running)).toHaveLength(2);
+    const edges = graphEdges(snapshot);
+    expect(edges.some(edge => edge.id.startsWith("replacement-") && edge.style?.strokeDasharray)).toBe(true);
+    expect(edges.every(edge => snapshot.nodes.some(node => node.id === edge.source) && snapshot.nodes.some(node => node.id === edge.target))).toBe(true);
   });
 });

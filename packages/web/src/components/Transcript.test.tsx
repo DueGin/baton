@@ -19,6 +19,9 @@ describe("safe agent content rendering", () => {
     expect(html).toContain('class="added"');
     expect(html).toContain('class="removed"');
     expect(html).not.toContain("<script>");
+    const pending = renderToStaticMarkup(<ToolDetail detail={{ type: "baton", tool: "delegate", output: { status: "pending_approval", proposalId: "p1" } }} />);
+    expect(pending).toContain("pending_approval");
+    expect(pending).toContain("p1");
   });
   it("renders baton assignments/results as linked cards and falls back to escaped text", () => {
     const snapshot = replay(createScenario(0), 86000);
@@ -29,6 +32,7 @@ describe("safe agent content rendering", () => {
     expect(assignment).toContain("任务书");
     expect(assignment).toContain('title="查看委派节点"');
     expect(assignment).not.toContain("baton-assignment");
+    expect(assignment).toContain(edge.role!);
     const delivered = render(demoResultsPrompt([{ ...edge, brief: { ...edge.brief, title: '<script>alert("x")</script>' }, result: { ...edge.result!, summary: '<img src=x onerror="bad()">' } }]));
     expect(delivered).toContain("结果送达");
     expect(delivered).toContain("✓ 完成");
@@ -40,5 +44,7 @@ describe("safe agent content rendering", () => {
     const malformed = render('<baton-assignment delegation="x">broken <img src=x></baton-assignment>');
     expect(malformed).toContain("&lt;baton-assignment");
     expect(malformed).not.toContain("protocol-card");
+    const notice = render('<baton-notice>任务已改派 <img src=x onerror="bad()"></baton-notice>');
+    expect(notice).toContain("团队通知"); expect(notice).toContain("baton-notice-card"); expect(notice).not.toContain("<img");
   });
 });

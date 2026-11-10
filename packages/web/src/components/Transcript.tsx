@@ -51,12 +51,16 @@ function toolSummary(detail: ToolCallDetail): string {
   return detail.type;
 }
 function BatonMessage({ parts, snapshot, inspect }: { parts: BatonMessagePart[]; snapshot?: RunSnapshot; inspect?: (id: string) => void }) {
-  const openNode = (delegationId: string): string | undefined => snapshot?.delegations.find(edge => edge.id === delegationId)?.toNodeId;
+  const openNode = (delegationId: string): string | undefined => {
+    const nodeId = snapshot?.delegations.find(edge => edge.id === delegationId)?.toNodeId;
+    return snapshot?.nodes.some(node => node.id === nodeId) ? nodeId : undefined;
+  };
   return <div className="baton-message">{parts.map((part, index) => {
+    if (part.type === "notice") return <article key={index} className="protocol-card baton-notice-card"><div className="protocol-card-type">↪ 团队通知</div><div className="protocol-card-body"><Markdown text={part.text} /></div></article>;
     if (part.type === "text") return <Markdown text={part.text} key={index} />;
     if (part.type === "assignment") {
       const nodeId = openNode(part.delegationId);
-      return <article key={index} className="protocol-card assignment-card"><div className="protocol-card-type"><span>↗ 任务书</span>{part.readonly && <span className="tag">只读委派</span>}</div><button className="protocol-card-heading" disabled={!nodeId || !inspect} onClick={() => { if (nodeId) inspect?.(nodeId); }} title={nodeId ? "查看委派节点" : "委派节点不可用"}><strong>{part.title}</strong><span>↗</span></button><div className="protocol-card-body"><h4>任务</h4><Markdown text={part.task} />{part.context && <><h4>Context</h4><Markdown text={part.context} /></>}{part.acceptance.length > 0 && <><h4>验收标准</h4><ul>{part.acceptance.map((criterion, i) => <li key={i}>{criterion}</li>)}</ul></>}</div></article>;
+      return <article key={index} className="protocol-card assignment-card"><div className="protocol-card-type"><span>↗ 任务书</span>{part.role && <span className="role-badge">{part.role}</span>}{part.readonly && <span className="tag">只读委派</span>}</div><button className="protocol-card-heading" disabled={!nodeId || !inspect} onClick={() => { if (nodeId) inspect?.(nodeId); }} title={nodeId ? "查看委派节点" : "委派节点不可用"}><strong>{part.title}</strong><span>↗</span></button><div className="protocol-card-body"><h4>任务</h4><Markdown text={part.task} />{part.context && <><h4>Context</h4><Markdown text={part.context} /></>}{part.acceptance.length > 0 && <><h4>验收标准</h4><ul>{part.acceptance.map((criterion, i) => <li key={i}>{criterion}</li>)}</ul></>}</div></article>;
     }
     return <Fragment key={index}>{part.results.map((result, i) => {
       const nodeId = openNode(result.delegationId);
@@ -92,6 +96,6 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
   if (!node) return <Empty>等待根节点创建…</Empty>;
   return <div className="transcript-view"><div className="view-toolbar"><div className="transcript-selector"><AgentMark agent={node.agentId} small /><select aria-label="选择会话节点" value={node.id} onChange={event => setNodeId(event.target.value)}>{treeOrder(snapshot.nodes).map(entry => <option key={entry.id} value={entry.id}>{"　".repeat(entry.depth)}{entry.title} · {entry.agentId}</option>)}</select><Status status={node.status} /></div><span className="muted">{rows.length} items</span></div>
     <div className="transcript-scroll" ref={scroll} onScroll={() => { const el = scroll.current; if (el) setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 100); }}><div className="transcript-content">{itemStatus[node.id] === "loading" && <div className="loading-line">正在加载会话…</div>}{itemStatus[node.id] === "error" && <button className="button" onClick={() => { void store.loadItems(node.id, true); }}>重试加载会话</button>}{rows.map(row => <TranscriptRow key={row.seq} row={row} node={node} snapshot={snapshot} inspect={inspect} />)}{!rows.length && itemStatus[node.id] === "ready" && <Empty>这个节点还没有消息。</Empty>}<div ref={bottom} /></div></div>
-    <form className="composer" onSubmit={event => { event.preventDefault(); void submit(); }}><textarea aria-label="消息" placeholder={`向 ${node.agentId} 发送消息…`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void submit(); } }} disabled={node.status === "canceled"} rows={3} /><div className="composer-footer"><span>发送到当前节点 · ⌘ / Ctrl + Enter</span><button className="button primary" disabled={!draft.trim() || busy || node.status === "canceled"}><Icon name="arrow" size={15} />发送</button></div></form>
+    <form className="composer" onSubmit={event => { event.preventDefault(); void submit(); }}><textarea aria-label="消息" placeholder={`向 ${node.agentId} 发送消息…`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void submit(); } }} disabled={["canceled", "replaced"].includes(node.status)} rows={3} /><div className="composer-footer"><span>发送到当前节点 · ⌘ / Ctrl + Enter</span><button className="button primary" disabled={!draft.trim() || busy || ["canceled", "replaced"].includes(node.status)}><Icon name="arrow" size={15} />发送</button></div></form>
   </div>;
 }

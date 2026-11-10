@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { RunSnapshot } from "@baton/protocol";
 import { agentColors, clock, duration, treeOrder } from "../lib/derive.js";
 import { fitTime, niceTicks, panTime, timeX, waitingIntervals, zoomTime, type TimeViewport } from "../lib/timeline.js";
+import { actorLabels, changeLabels } from "../lib/teams.js";
 import { Toggle } from "./common.js";
 
 const ROW = 44; const HEADER = 40;
@@ -49,20 +50,21 @@ export function Timeline({ snapshot, now, inspect }: { snapshot: RunSnapshot; no
       <rect width={width} height={height} fill="var(--surface)" />
       <text x="20" y="26" className="svg-eyebrow">NODE / AGENT</text>
       <g clipPath={`url(#${pattern}-clip)`}>{niceTicks(view, chartWidth).map(tick => <g key={tick}><line x1={x(tick)} x2={x(tick)} y1={HEADER} y2={height} stroke="var(--border)" strokeDasharray="3 5" /><text x={x(tick) + 4} y={26} className="svg-time">{clock(new Date(tick).toISOString())}</text></g>)}</g>
-      {rows.map((node, row) => { const y = HEADER + row * ROW; const data = grouped.get(node.id) ?? { turns: [], tools: [], permissions: [] }; return <g key={node.id} className="timeline-row">
+      {rows.map((node, row) => { const y = HEADER + row * ROW; const data = grouped.get(node.id) ?? { turns: [], tools: [], permissions: [] }; return <g key={node.id} className={`timeline-row ${node.status === "replaced" ? "timeline-row-replaced" : ""}`}>
         <rect x="0" y={y} width={width} height={ROW} className="timeline-row-bg" />
         <line x1="0" x2={width} y1={y + ROW} y2={y + ROW} stroke="var(--border)" />
-        <g clipPath={`url(#${pattern}-labels)`} onMouseMove={event => hover(event, `${node.title}\n${node.agentId} · ${duration(node.createdAt, node.endedAt ?? now)}`)} onMouseLeave={() => setTooltip(null)}><title>{node.title}</title><rect x="0" y={y} width={gutter} height={ROW} fill="transparent" />
+        <g clipPath={`url(#${pattern}-labels)`} onMouseMove={event => hover(event, `${node.title}${node.status === "replaced" ? " · 已替换" : ""}\n${node.agentId} · ${duration(node.createdAt, node.endedAt ?? now)}`)} onMouseLeave={() => setTooltip(null)}><title>{node.title}{node.status === "replaced" ? " · 已替换" : ""}</title><rect x="0" y={y} width={gutter} height={ROW} fill="transparent" />
           <circle cx={18 + node.depth * 14} cy={y + 16} r="3.5" fill={agentColors[node.agentId] ?? "#758799"} />
-          <text x={29 + node.depth * 14} y={y + 19} className="svg-node-title">{node.title}</text>
-          <text x={29 + node.depth * 14} y={y + 34} className="svg-node-subtitle">{node.agentId} · {duration(node.createdAt, node.endedAt ?? now)}</text>
+          <text x={29 + node.depth * 14} y={y + 19} className="svg-node-title">{node.status === "replaced" ? "↪ " : ""}{node.title}</text>
+          <text x={29 + node.depth * 14} y={y + 34} className="svg-node-subtitle">{node.agentId}{node.status === "replaced" ? " · 已替换" : ""} · {duration(node.createdAt, node.endedAt ?? now)}</text>
         </g>
         <g clipPath={`url(#${pattern}-clip)`}>
-          <rect {...band(node.createdAt, node.endedAt)} y={y + 5} height="33" rx="4" fill={agentColors[node.agentId] ?? "#758799"} opacity="0.09" onMouseMove={event => hover(event, `${node.title}\n${node.status} · ${duration(node.createdAt, node.endedAt ?? now)}`)} />
+          <rect {...band(node.createdAt, node.endedAt)} y={y + 5} height="33" rx="4" fill={node.status === "replaced" ? "var(--text-dim)" : agentColors[node.agentId] ?? "#758799"} opacity="0.09" onMouseMove={event => hover(event, `${node.title}\n${node.status} · ${duration(node.createdAt, node.endedAt ?? now)}`)} />
           {waitingIntervals(snapshot, node.id, now).map(([start, end], i) => <rect key={i} {...band(start, end)} y={y + 39} height="3" rx="1" fill="none" stroke="var(--text-dim)" strokeDasharray="2 4" onMouseMove={event => hover(event, `等待子节点 · ${duration(start, end)}`)} />)}
           {data.turns.map(turn => <rect key={turn.id} {...band(turn.startedAt, turn.endedAt ?? node.endedAt)} y={y + 8} height="11" rx="2" fill={triggerColors[turn.trigger]} opacity="0.85" onMouseMove={event => hover(event, `${turn.trigger} turn · ${turn.status}\n${clock(turn.startedAt)} · ${duration(turn.startedAt, turn.endedAt ?? now)}`)} />)}
           {data.permissions.map(permission => <rect key={permission.id} {...band(permission.requestedAt, permission.resolvedAt ?? node.endedAt)} y={y + 6} height="15" rx="2" fill={`url(#${pattern}-hatch)`} onMouseMove={event => hover(event, `${permission.request.title ?? "权限请求"}\n${permission.status} · ${duration(permission.requestedAt, permission.resolvedAt ?? now)}`)} />)}
           {data.tools.map((span, i) => <rect key={span.id} data-tool-kind={span.kind} {...band(span.startedAt, span.endedAt)} y={y + 24 + i % 2 * 7} height="5" rx="1" fill={toolColors[span.kind] ?? "#8794a4"} stroke={span.status === "failed" ? "var(--red)" : "none"} strokeWidth="1" onMouseMove={event => hover(event, `工具 · ${span.kind} / ${span.name}\n${span.summary ?? ""}\n${span.status} · ${clock(span.startedAt)} · ${duration(span.startedAt, span.endedAt ?? now)}`)}><title>{`${span.kind}: ${span.summary ?? span.name}`}</title></rect>)}
+          {node.id === snapshot.run.rootNodeId && snapshot.run.team?.changes.map((change, i) => <g key={`${change.at}-${i}`} className="team-timeline-marker" onMouseMove={event => hover(event, `${changeLabels[change.kind]} · ${actorLabels[change.by]}\n${clock(change.at)}\n${change.reason ?? "未说明理由"}`)}><path d={`M${x(change.at)} ${y + 2} l5 5 -5 5 -5 -5Z`} fill={change.kind === "member_replaced" ? "var(--amber)" : "var(--purple)"} stroke="var(--surface)" strokeWidth="1" /><title>{changeLabels[change.kind]} · {change.reason}</title></g>)}
         </g>
       </g>; })}
       <g clipPath={`url(#${pattern}-clip)`} pointerEvents="none">{snapshot.delegations.map(edge => { const from = index.get(edge.fromNodeId); const to = index.get(edge.toNodeId); if (from === undefined || to === undefined) return null; const startX = x(edge.createdAt); const fromY = HEADER + from * ROW + 11; const toY = HEADER + to * ROW + 9; const deliveredX = edge.deliveredAt ? x(edge.deliveredAt) : 0; return <g key={edge.id} fill="none" stroke="var(--text-dim)" strokeWidth="1" opacity="0.7"><path d={`M${startX - 8} ${fromY} H${startX} V${toY - 4}`} markerEnd={`url(#${pattern}-arrow)`} />{edge.deliveredAt && <path d={`M${deliveredX - 7} ${toY + 10} H${deliveredX} V${fromY + 6}`} strokeDasharray="3 3" markerEnd={`url(#${pattern}-arrow)`} />}</g>; })}
