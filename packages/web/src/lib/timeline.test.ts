@@ -1,0 +1,48 @@
+import { describe, expect, it } from "vitest";
+import { createScenario, replay } from "../demo/scenario.js";
+import { displayStatus, treeOrder } from "./derive.js";
+import { fitTime, niceTicks, panTime, timeX, waitingIntervals, xTime, zoomTime } from "./timeline.js";
+import { graphPositions } from "../components/Topology.js";
+
+const base = Date.parse("2026-11-10T07:00:00Z");
+const snapshot = replay(createScenario(base), base + 86000);
+
+describe("timeline scale and layout", () => {
+  it("maps time reversibly and zooms around the pointer", () => {
+    const view = { start: base, end: base + 60000 };
+    const anchor = xTime(300, view, 1000);
+    expect(xTime(timeX(base + 13500, view, 1000), view, 1000)).toBe(base + 13500);
+    const zoomed = zoomTime(view, 0.5, .3);
+    expect(zoomed.end - zoomed.start).toBe(30000);
+    expect(xTime(300, zoomed, 1000)).toBe(anchor);
+    expect(panTime(view, 100, 1000)).toEqual({ start: base - 6000, end: base + 54000 });
+    expect(zoomTime(view, 0, 0).end - zoomTime(view, 0, 0).start).toBe(1000);
+  });
+  it("returns readable ticks inside the visible range and fits lifetimes", () => {
+    const view = fitTime(snapshot, base + 86000);
+    expect(view.start).toBeLessThan(base);
+    expect(view.end).toBeGreaterThan(base + 86000);
+    const ticks = niceTicks(view, 1000);
+    expect(ticks.length).toBeGreaterThan(2);
+    expect(ticks.length).toBeLessThanOrEqual(12);
+    expect(ticks.every(tick => tick >= view.start && tick <= view.end)).toBe(true);
+    expect(ticks[1]! - ticks[0]!).toBe(ticks[2]! - ticks[1]!);
+  });
+  it("merges overlapping child waits and derives waiting_children", () => {
+    expect(waitingIntervals(snapshot, snapshot.run.rootNodeId, base + 86000)).toEqual([[base + 8000, base + 86000]]);
+    expect(displayStatus(snapshot.nodes[0]!, snapshot)).toBe("waiting_children");
+    expect(displayStatus(snapshot.nodes.find(node => node.status === "waiting_permission")!, snapshot)).toBe("waiting_permission");
+  });
+  it("uses depth-first tree order even when input is shuffled; cycles cannot loop", () => {
+    expect(treeOrder([...snapshot.nodes].reverse()).map(node => node.id.split(":").at(-1))).toEqual(["root", "api", "index", "ui", "review"]);
+    const cyclic = snapshot.nodes.map((node, index) => ({ ...node, parentNodeId: snapshot.nodes[(index + 1) % snapshot.nodes.length]!.id }));
+    expect(treeOrder(cyclic)).toHaveLength(snapshot.nodes.length);
+  });
+  it("lays out parents above descendants deterministically without node collisions", () => {
+    const positions = graphPositions(snapshot);
+    expect(graphPositions(snapshot)).toEqual(positions);
+    for (const edge of snapshot.delegations) expect(positions.get(edge.toNodeId)!.y).toBeGreaterThan(positions.get(edge.fromNodeId)!.y);
+    const points = [...positions.values()];
+    for (let i = 0; i < points.length; i++) for (let j = i + 1; j < points.length; j++) expect(Math.abs(points[i]!.x - points[j]!.x) >= 286 || Math.abs(points[i]!.y - points[j]!.y) >= 210).toBe(true);
+  });
+});

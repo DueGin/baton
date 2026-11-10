@@ -1,0 +1,28 @@
+import { useEffect } from "react";
+import type { ItemRecord, PermissionResponse, RunSnapshot } from "@baton/protocol";
+import type { RunStore } from "../store.js";
+import { clock, cost, displayStatus, duration, terminal, tokens } from "../lib/derive.js";
+import { AgentMark, Icon, PermissionActions, Status } from "./common.js";
+import { Markdown, ToolDetail, TranscriptRow } from "./Transcript.js";
+
+export function Inspector({ snapshot, nodeId, now, close, converse, cancel, decide, busy, store, items }: {
+  snapshot: RunSnapshot; nodeId: string; now: number; close: () => void; converse: (id: string) => void; cancel: (id: string) => void;
+  decide: (id: string, response: PermissionResponse) => void; busy: boolean; store: RunStore; items: Record<string, ItemRecord[]>;
+}) {
+  const node = snapshot.nodes.find(entry => entry.id === nodeId);
+  useEffect(() => { if (node) { void store.loadItems(node.id); } }, [node?.id, store]);
+  if (!node) return null;
+  const edge = snapshot.delegations.find(entry => entry.toNodeId === nodeId);
+  const permissions = snapshot.permissions.filter(permission => permission.nodeId === nodeId);
+  return <aside className="inspector" aria-label="节点详情"><div className="inspector-header"><span className="eyebrow">NODE INSPECTOR</span><button className="icon-button" title="关闭详情" onClick={close}><Icon name="close" /></button></div><div className="inspector-scroll">
+    <div className="inspector-node"><AgentMark agent={node.agentId} /><div><h2>{node.title}</h2><span>{node.agentId} · depth {node.depth}</span></div></div><Status status={displayStatus(node, snapshot)} />
+    <div className="inspector-actions"><button className="button" onClick={() => converse(node.id)}><Icon name="chat" size={15} />发消息</button><button className="button danger" disabled={busy || terminal(node.status)} onClick={() => cancel(node.id)}><Icon name="stop" size={14} />取消子树</button></div>
+    {node.error && <div className="error-panel">{node.error}</div>}
+    {permissions.some(permission => permission.status === "pending") && <section className="inspector-section"><h3>待处理授权</h3>{permissions.filter(permission => permission.status === "pending").map(permission => <div className="permission-panel" key={permission.id}><strong>{permission.request.title ?? permission.request.name}</strong><p>{permission.request.description}</p>{permission.request.detail && <ToolDetail detail={permission.request.detail} />}<PermissionActions permission={permission} decide={decide} busy={busy} /></div>)}</section>}
+    <section className="inspector-section"><h3>任务书 <span>{edge ? `ROUND ${edge.round}` : "ROOT"}</span></h3>{edge ? <><Markdown text={edge.brief.task} />{edge.brief.context && <><h4>Context</h4><p className="muted">{edge.brief.context}</p></>}{edge.brief.acceptance && <><h4>验收标准</h4><ul className="acceptance-list">{edge.brief.acceptance.map((criterion, index) => <li key={index}>{criterion}</li>)}</ul></>}<div className="tag">{edge.brief.readonly ? "只读委派" : "可修改文件"}</div>{edge.brief.outputSchema && <details className="detail-disclosure"><summary>Output schema</summary><pre>{JSON.stringify(edge.brief.outputSchema, null, 2)}</pre></details>}</> : <p className="muted">由用户创建的根会话，负责协调本次 Run。</p>}</section>
+    {edge?.result && <section className="inspector-section"><h3>交付结果 <span className={`result-${edge.result.status}`}>{edge.result.status}</span></h3><Markdown text={edge.result.summary} />{!edge.result.reported && <div className="notice-row warning">结果由最后一条回复自动生成</div>}{edge.result.result !== undefined && <pre>{JSON.stringify(edge.result.result, null, 2)}</pre>}{edge.result.artifacts?.map((artifact, index) => <div className="artifact" key={index}><span>{artifact.kind === "file" ? "↗" : "◇"}</span><div><code>{artifact.value}</code>{artifact.description && <p>{artifact.description}</p>}</div></div>)}{edge.result.error && <p className="error-text">{edge.result.error}</p>}</section>}
+    <section className="inspector-section"><h3>节点信息</h3><dl className="meta-grid"><dt>Agent</dt><dd>{node.agentId}</dd><dt>Model</dt><dd>{node.model ?? "默认"}</dd><dt>Mode / Thinking</dt><dd>{node.modeId ?? "default"} / {node.thinking ?? "default"}</dd><dt>工作目录</dt><dd><code>{node.cwd}</code></dd><dt>创建</dt><dd>{clock(node.createdAt)}</dd><dt>更新</dt><dd>{clock(node.updatedAt)}</dd><dt>结束</dt><dd>{node.endedAt ? clock(node.endedAt) : "—"}</dd><dt>用时 / 轮次</dt><dd>{duration(node.createdAt, node.endedAt ?? now)} / {node.turns}</dd><dt>Input / Output</dt><dd>{tokens(node.usage.inputTokens)} / {tokens(node.usage.outputTokens)}</dd><dt>Cached / Cost</dt><dd>{tokens(node.usage.cachedInputTokens)} / {cost(node.usage.costUsd)}</dd><dt>Node ID</dt><dd className="mono">{node.id}</dd></dl></section>
+    {permissions.length > 0 && <section className="inspector-section"><h3>权限记录</h3>{permissions.map(permission => <div className="permission-history" key={permission.id}><strong>{permission.request.title ?? permission.request.name}</strong><span>{permission.status === "pending" ? "待处理" : permission.resolution?.behavior === "allow" ? "已允许" : permission.status === "expired" ? "已过期" : "已拒绝"} · {permission.resolvedBy ?? "—"} · {duration(permission.requestedAt, permission.resolvedAt ?? now)}</span></div>)}</section>}
+    <section className="inspector-section inspector-transcript"><h3>最近会话 <button className="text-button" onClick={() => converse(node.id)}>查看全部 ↗</button></h3>{(items[node.id] ?? []).slice(-8).map(row => <TranscriptRow key={row.seq} row={row} node={node} />)}{!items[node.id]?.length && <p className="muted">暂无消息</p>}</section>
+  </div></aside>;
+}
