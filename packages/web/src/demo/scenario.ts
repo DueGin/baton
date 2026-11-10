@@ -14,7 +14,7 @@ export interface DemoScenario { initial: RunSnapshot; events: RunEventEnvelope[]
 export function createScenario(base = Date.now() - 86000, id = "run-demo"): DemoScenario {
   const at = (offset: number): string => new Date(base + offset * 1000).toISOString();
   const run = { id, title: "为工作台添加全局搜索", cwd: "/workspace/atlas", rootNodeId: `${id}:root`, status: "active" as const, policy: { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "dynamic" as const, teamApproval: false }, createdAt: at(0), updatedAt: at(0), usage: emptyUsage() };
-  const initial: RunSnapshot = { run, nodes: [], delegations: [], turns: [], toolSpans: [], permissions: [], lastSeq: 0 };
+  const initial: RunSnapshot = { run, nodes: [], delegations: [], turns: [], toolSpans: [], permissions: [], questions: [], escalations: [], lastSeq: 0 };
   const events: RunEventEnvelope[] = [];
   const items: Record<string, ItemRecord[]> = {};
   const itemCounters: Record<string, number> = {};

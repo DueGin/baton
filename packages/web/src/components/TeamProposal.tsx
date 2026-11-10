@@ -8,6 +8,7 @@ export function ProposalCard({ proposal, snapshot, agents, approve, reject, busy
   const [members, setMembers] = useState<TeamMemberSpec[]>(() => original.map(cleanMember));
   const [feedback, setFeedback] = useState(""); const [rejecting, setRejecting] = useState(false);
   const issues = validateMembers([...activeMembers(snapshot.run.team).filter(member => member.id !== proposal.replace?.memberId), ...members]);
+  if (activeMembers(snapshot.run.team).length - (proposal.replace ? 1 : 0) + members.length > (snapshot.run.policy.maxTeamSize ?? 5)) issues.push("成员数超过 maxTeamSize，请精简名单");
   const queued = snapshot.delegations.filter(edge => edge.blockedByProposal === proposal.id && edge.status === "queued");
   const changed = JSON.stringify(members.map(cleanMember)) !== JSON.stringify(original.map(cleanMember));
   const update = (index: number, patch: Partial<TeamMemberSpec>): void => setMembers(current => current.map((member, i) => i === index ? { ...member, ...patch } : member));

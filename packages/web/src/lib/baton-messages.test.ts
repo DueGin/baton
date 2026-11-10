@@ -50,6 +50,12 @@ describe("baton protocol transcript messages", () => {
     expect(parseBatonMessage('<baton-notice>missing end')).toBeNull();
     expect(parseBatonMessage('<baton-notice> </baton-notice>')).toBeNull();
   });
+  it("parses complete answers only and falls back for malformed question attributes", () => {
+    expect(parseBatonMessage('<baton-answer question="q1">\n选择 A\n</baton-answer>')).toEqual([{ type: "answer", questionId: "q1", text: "选择 A" }]);
+    expect(parseBatonMessage('<baton-answer>answer</baton-answer>')).toBeNull();
+    expect(parseBatonMessage('<baton-answer question="q1" onclick="bad">answer</baton-answer>')).toBeNull();
+    expect(parseBatonMessage('<baton-answer question="q1">unfinished')).toBeNull();
+  });
 
   it("keeps browser demo format exactly equal to server output", () => {
     for (const delegation of snapshot.delegations) expect(demoBriefPrompt(delegation)).toBe(briefPrompt(delegation));

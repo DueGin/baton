@@ -3,10 +3,11 @@ import dagre from "@dagrejs/dagre";
 import { Background, BaseEdge, Controls, EdgeLabelRenderer, Handle, MiniMap, Position, ReactFlow, ReactFlowProvider, getSmoothStepPath, useNodesState, useReactFlow, type Edge, type EdgeProps, type Node, type NodeProps } from "@xyflow/react";
 import type { NodeRecord, PermissionResponse, RunSnapshot } from "@baton/protocol";
 import { agentColors, cost, displayStatus, duration, terminal, tokens } from "../lib/derive.js";
+import type { HumanActions } from "./HumanActions.js";
 import { RosterStrip } from "./Teams.js";
 import { AgentMark, PermissionActions, Status, Toggle } from "./common.js";
 
-interface GraphContextValue { snapshot: RunSnapshot; now: number; decide: (id: string, response: PermissionResponse) => void; busy: boolean; reassign: (id: string) => void }
+interface GraphContextValue extends HumanActions { snapshot: RunSnapshot; now: number; decide: (id: string, response: PermissionResponse) => void; busy: boolean; reassign: (id: string) => void; inspect: (id: string) => void }
 const GraphContext = createContext<GraphContextValue | null>(null);
 type AgentNode = Node<{ node: NodeRecord }, "agent">;
 const AgentCard = memo(function AgentCard({ data, selected }: NodeProps<AgentNode>) {
@@ -15,9 +16,11 @@ const AgentCard = memo(function AgentCard({ data, selected }: NodeProps<AgentNod
   const blocked = snapshot.delegations.find(edge => edge.toNodeId === node.id)?.blockedByProposal;
   const status = blocked ? "queued" : displayStatus(node, snapshot);
   const permissions = snapshot.permissions.filter(permission => permission.nodeId === node.id && permission.status === "pending");
+  const questions = (snapshot.questions ?? []).filter(row => row.nodeId === node.id && row.status === "pending" && row.blocking);
+  const stalls = (snapshot.escalations ?? []).filter(row => row.nodeId === node.id && row.status === "pending" && row.kind === "stall");
   const children = snapshot.delegations.filter(edge => edge.fromNodeId === node.id);
   const tool = snapshot.toolSpans.findLast(span => span.nodeId === node.id && span.status === "running");
-  return <div className={`node-card node-${node.status} ${selected ? "selected" : ""} ${permissions.length ? "needs-permission" : ""}`}>
+  return <div className={`node-card node-${node.status} ${selected ? "selected" : ""} ${permissions.length ? "needs-permission" : ""} ${questions.length ? "needs-answer" : ""} ${stalls.length ? "node-stalled" : ""}`}>
     <Handle type="target" position={Position.Top} />
     <div className="node-card-top"><AgentMark agent={node.agentId} small /><span className="node-agent">{node.agentId}</span><Status status={status} /></div>
     <div className="node-role-row">{node.role && <span className="role-badge">{node.role}</span>}{node.delegationId && !["canceled", "replaced"].includes(node.status) && !blocked && snapshot.run.policy.mode !== "solo" && <button className="text-button nodrag nopan" disabled={context.busy} onClick={event => { event.stopPropagation(); context.reassign(node.delegationId!); }}>改派 ↗</button>}</div><div className="node-title">{node.title}</div>
@@ -25,6 +28,8 @@ const AgentCard = memo(function AgentCard({ data, selected }: NodeProps<AgentNod
     <div className={`node-activity ${terminal(node.status) ? "muted" : ""}`}><span className={`activity-indicator ${node.status === "running" ? "live" : ""}`} />{tool?.summary ?? node.activity ?? "等待活动"}</div>
     <div className="node-metrics"><span>{duration(node.createdAt, node.endedAt ?? now)}</span><span>{tokens(node.usage.inputTokens + node.usage.outputTokens)} tokens</span><span>{cost(node.usage.costUsd)}</span>{children.length > 0 && <span title="子委派">⑂ {children.length}</span>}</div>
     {permissions.length > 0 && <div className="node-permission"><span>⚑ {permissions[0]!.request.title ?? "需要授权"}</span><PermissionActions permission={permissions[0]!} decide={context.decide} busy={context.busy} /></div>}
+    {questions[0] && <div className="node-human nodrag nopan" onClick={event => event.stopPropagation()}><strong>等你回答</strong><p title={questions[0].question}>{questions[0].question}</p><div>{questions[0].options?.slice(0, 2).map((option, index) => <button className="button small" key={index} disabled={context.busy} onClick={() => context.answer(questions[0]!.id, option)}>{option}</button>)}<button className="text-button" onClick={() => context.inspect(node.id)}>回答 ↗</button></div></div>}
+    {stalls[0] && <div className="node-human node-stall-actions nodrag nopan" onClick={event => event.stopPropagation()}><strong>停滞</strong><p title={stalls[0].detail}>{stalls[0].detail}</p><div><button className="button small" disabled={context.busy} onClick={() => context.resolve(stalls[0]!.id, { resolution: "dismiss" })}>忽略</button><button className="button small danger" disabled={context.busy} onClick={() => context.resolve(stalls[0]!.id, { resolution: "cancel" })}>取消委派</button></div></div>}
     <Handle type="source" position={Position.Bottom} />
   </div>;
 });
@@ -98,6 +103,6 @@ function GraphView({ snapshot, selected, inspect, openTeam }: { snapshot: RunSna
   </div>;
 }
 
-export function Topology(props: { snapshot: RunSnapshot; selected: string | null; now: number; inspect: (id: string) => void; decide: (id: string, response: PermissionResponse) => void; busy: boolean; reassign: (id: string) => void; openTeam: () => void }) {
+export function Topology(props: { snapshot: RunSnapshot; selected: string | null; now: number; inspect: (id: string) => void; decide: (id: string, response: PermissionResponse) => void; busy: boolean; reassign: (id: string) => void; openTeam: () => void } & HumanActions) {
   return <GraphContext.Provider value={props}><ReactFlowProvider><GraphView {...props} /></ReactFlowProvider></GraphContext.Provider>;
 }

@@ -56,6 +56,7 @@ function BatonMessage({ parts, snapshot, inspect }: { parts: BatonMessagePart[];
     return snapshot?.nodes.some(node => node.id === nodeId) ? nodeId : undefined;
   };
   return <div className="baton-message">{parts.map((part, index) => {
+    if (part.type === "answer") return <article key={index} className="protocol-card baton-answer-card"><div className="protocol-card-type">✓ 你的回答 <code>{part.questionId}</code></div><div className="protocol-card-body"><Markdown text={part.text} /></div></article>;
     if (part.type === "notice") return <article key={index} className="protocol-card baton-notice-card"><div className="protocol-card-type">↪ 团队通知</div><div className="protocol-card-body"><Markdown text={part.text} /></div></article>;
     if (part.type === "text") return <Markdown text={part.text} key={index} />;
     if (part.type === "assignment") {

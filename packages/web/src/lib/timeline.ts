@@ -29,12 +29,14 @@ function lastActivity(snapshot: RunSnapshot, fallback: number): number {
   for (const span of snapshot.toolSpans) { take(span.startedAt); take(span.endedAt); }
   for (const edge of snapshot.delegations) { take(edge.endedAt); take(edge.deliveredAt); }
   for (const node of snapshot.nodes) take(node.endedAt);
+  for (const question of snapshot.questions ?? []) { take(question.askedAt); take(question.answeredAt); }
+  for (const escalation of snapshot.escalations ?? []) { take(escalation.createdAt); take(escalation.resolvedAt); }
   for (const change of snapshot.run.team?.changes ?? []) take(change.at);
   return latest;
 }
 export function fitTime(snapshot: RunSnapshot, now: number): TimeViewport {
   const start = Date.parse(snapshot.run.createdAt);
-  const live = snapshot.nodes.some((node) => node.status === "starting" || node.status === "running" || node.status === "waiting_permission");
+  const live = snapshot.nodes.some((node) => node.status === "starting" || node.status === "running" || node.status === "waiting_permission") || (snapshot.questions ?? []).some(question => question.status === "pending");
   const end = snapshot.run.endedAt ? Date.parse(snapshot.run.endedAt) : live ? now : lastActivity(snapshot, start);
   const pad = Math.max(1500, (end - start) * 0.04);
   return { start: start - pad, end: Math.max(start + 10000, end) + pad };
