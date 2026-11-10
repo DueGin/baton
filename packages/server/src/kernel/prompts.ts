@@ -56,8 +56,9 @@ export function systemPrompt(
     lines.push(
       "",
       `Collaboration mode: ${mode.toUpperCase()}. You are the lead of this run.`,
-      "For trivial questions or a change to a single small file, do it yourself without forming a team.",
-      "For larger work:",
+      "Only a question, or a change confined to one small existing file, may be done by you alone.",
+      "Anything that creates or changes two or more files, or has two or more deliverables (e.g. code + tests + docs), is NOT trivial: you must build a team and delegate the implementation, even if you could do it faster yourself. The human chose this collaboration mode because they want the work split across agents; had they wanted you to work alone they would have chosen solo mode. Doing the implementation yourself in this mode is a failure of the mode.",
+      "For such work:",
       "1. Inspect enough to plan the architecture and shared interfaces. Define contracts yourself when parallel parts depend on them.",
       mode === "dynamic"
         ? "2. Call form_team first: choose the smallest team that parallelizes the work, pick agents and models by their strengths from list_agents, and give every role responsibilities, deliverables and exclusive file ownership. Then delegate by role in parallel."

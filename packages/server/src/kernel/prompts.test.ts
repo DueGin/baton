@@ -19,6 +19,11 @@ describe("systemPrompt", () => {
     expect(text).toContain("mcp__baton__delegate");
     expect(text).not.toContain("report_result exactly once");
   });
+  it("tells the lead that multi-file work requires a team", () => {
+    const text = systemPrompt(root, policy, []);
+    expect(text).toContain("two or more files");
+    expect(text).toContain("is NOT trivial: you must build a team");
+  });
   it("supports solo and never gives members lead instructions", () => {
     expect(systemPrompt(root, { ...policy, mode: "solo" })).toContain("Work alone");
     const delegate = systemPrompt(child, policy);
