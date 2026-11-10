@@ -7,7 +7,9 @@ import type {
   DelegationRecord,
   IsoTime,
   NodeRecord,
+  EscalationRecord,
   PermissionRecord,
+  QuestionRecord,
   RunRecord,
   TeamChange,
   TeamRecord,
@@ -32,6 +34,10 @@ export type RunEvent =
   | { type: "team.updated"; team: TeamRecord; change: TeamChange }
   /** Upsert by span id. */
   | { type: "tool.span"; span: ToolSpanRecord }
+  /** Upsert by id. */
+  | { type: "question"; question: QuestionRecord }
+  /** Upsert by id. */
+  | { type: "escalation"; escalation: EscalationRecord }
   /** Upsert by permission id. */
   | { type: "permission"; permission: PermissionRecord }
   /**

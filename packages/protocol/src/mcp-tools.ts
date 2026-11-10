@@ -122,6 +122,15 @@ export const reassignInput = z.object({
   reason: z.string().min(1),
 });
 
+export const askHumanInput = z.object({
+  question: z.string().min(1).describe("One clear question with the context the human needs to answer it."),
+  options: z.array(z.string().min(1)).max(6).optional().describe("Suggested answers (the human may still type their own)."),
+  blocking: z
+    .boolean()
+    .default(true)
+    .describe("True: you cannot continue without the answer — end your turn after asking. False: keep working; the answer arrives later."),
+});
+
 export const BATON_TOOLS = {
   list_agents: {
     input: listAgentsInput,
@@ -173,6 +182,11 @@ export const BATON_TOOLS = {
     input: statusInput,
     description: "Status of your delegations and their subtrees (state, elapsed time, usage).",
   },
+  ask_human: {
+    input: askHumanInput,
+    description:
+      "Ask the human a judgment question (a decision, missing information, a risky trade-off). Do not use it for things you can find out yourself. The answer arrives as a <baton-answer> message; if blocking, end your turn after asking.",
+  },
   report_result: {
     input: reportResultInput,
     description:
@@ -184,6 +198,7 @@ export type BatonToolName = keyof typeof BATON_TOOLS;
 /** Tools only the root (lead) may call. */
 export const LEAD_ONLY_TOOLS: readonly BatonToolName[] = ["form_team", "replace_member"];
 export type FormTeamInput = z.infer<typeof formTeamInput>;
+export type AskHumanInput = z.infer<typeof askHumanInput>;
 export type ReplaceMemberInput = z.infer<typeof replaceMemberInput>;
 export type ReassignInput = z.infer<typeof reassignInput>;
 export type DelegateInput = z.infer<typeof delegateInput>;

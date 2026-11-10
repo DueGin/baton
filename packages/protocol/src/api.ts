@@ -1,6 +1,6 @@
 /** REST request/response bodies (DESIGN §7). */
 import type { PermissionResponse } from "./timeline.js";
-import type { AgentEntry, DelegationRecord, ItemRecord, RunPolicy, RunSnapshot, RunSummary, TeamMemberSpec, TeamPreset } from "./records.js";
+import type { AgentEntry, DelegationRecord, InboxItem, ItemRecord, PermissionRule, RunPolicy, RunSnapshot, RunSummary, TeamMemberSpec, TeamPreset } from "./records.js";
 
 export interface CreateRunRequest {
   /** Root agent. Optional when `teamPresetId` is given (the preset's lead is used). */
@@ -21,7 +21,7 @@ export interface CreateRunRequest {
 
 export interface PatchRunRequest {
   title?: string;
-  policy?: Partial<Pick<RunPolicy, "autoApprove" | "maxDepth" | "maxActiveChildren" | "budget" | "teamApproval">>;
+  policy?: Partial<Pick<RunPolicy, "autoApprove" | "maxDepth" | "maxActiveChildren" | "budget" | "teamApproval" | "maxTeamSize" | "stallMinutes" | "maxRoundsPerDelegation">>;
 }
 
 export interface SendMessageRequest {
@@ -30,6 +30,8 @@ export interface SendMessageRequest {
 
 export interface PermissionDecision {
   response: PermissionResponse;
+  /** "Always": also save a rule with the same decision. */
+  remember?: { scope: "global" | "run"; pattern?: string; agentOnly?: boolean };
 }
 
 export interface ApiError {
@@ -107,3 +109,24 @@ export interface ApproveTeamProposalRequest {
 export interface RejectTeamProposalRequest {
   feedback: string;
 }
+
+// ───────────────────────────── inbox ─────────────────────────────
+
+/** GET /api/inbox — every pending item across runs, oldest first. */
+export type GetInboxResponse = InboxItem[];
+
+/** POST /api/questions/:id/answer */
+export interface AnswerQuestionRequest {
+  answer: string;
+}
+
+/** POST /api/escalations/:id/resolve */
+export interface ResolveEscalationRequest {
+  resolution: "extend" | "cancel" | "dismiss";
+  /** extend (round_limit): how many more rounds to allow (default 2). */
+  extraRounds?: number;
+  note?: string;
+}
+
+export type ListPermissionRulesResponse = PermissionRule[];
+export type CreatePermissionRuleRequest = Omit<PermissionRule, "id" | "createdAt" | "hits" | "lastHitAt" | "createdFrom">;

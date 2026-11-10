@@ -95,6 +95,7 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
 | `cancel` | 取消一个委派，**级联取消所有子孙** |
 | `status` | 我的委派及其子树的状态摘要 |
 | `report_result` | **子节点**交付结果：`{status: success｜partial｜failed, summary, result?, artifacts?}`。调用后应结束这一轮。根节点调用会报错 |
+| `ask_human` | 向人提问（判断、缺失信息、有风险的取舍）；答案以 `<baton-answer>` 送达，见 §4.6 |
 | `form_team` | **仅主导者**（dynamic）：按需求组建团队——角色、由哪个 agent/模型担任、职责、理由。可多次调用追加角色 |
 | `get_team` | 查看团队：角色、担任者、职责、各自的委派 |
 | `replace_member` | **仅主导者**：给某个角色换人；默认把旧成员未完成的委派连同进展摘要改派给新成员 |
@@ -170,6 +171,44 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
   - 主导者：先组队再派活，团队越小越好。只有简单问题或单个小文件的修改才由它自己做（也就是不组队）。有成员失败、太慢或不合适时，主导者主动换人或改派。
   - 成员：写明它的角色、职责，以及团队里其他人分别负责什么，避免撞文件。
 
+### 4.6 人在回路：收件箱、提问、升级、审批规则
+
+原则：agent 自己能决定的不打扰人。只有需要判断的事才进**跨 Run 的待处理收件箱**，有四类：权限请求、名单提案、agent 的提问、内核升级。
+
+- **提问 `ask_human`**：任何节点都可以调用，参数是 `{question, options?, blocking}`。
+  - 工具立即返回 `{questionId, status:"pending"}`，不阻塞 MCP 调用，因为工具调用有超时。`blocking` 为真时，提示词要求节点结束本轮，此时节点卡片显示"等你回答"。
+  - 人在收件箱回答后，答案以 `<baton-answer question="<id>">…</baton-answer>` 发给提问的节点，送达方式和结果送达相同：steer、新开一轮或排队。
+  - Run 取消或节点进入终态时，未回答的提问标为 `canceled`。
+- **停滞升级**：节点处于运行中的一轮里，超过 `stallMinutes` 分钟（默认 10）没有任何 driver 事件，内核就生成一条 `stall` 升级。
+  - 非根节点：同时给父节点发 `<baton-notice>`，建议父节点 `send`、`reassign` 或 `cancel`。
+  - 同一段停滞只升级一次，收到下一个事件就重置。
+  - 人可以把它标为"忽略"；如果要取消，可以在升级卡片上直接取消对应的委派。
+- **轮次上限升级**：父节点对同一个委派的 `send` 会让 `round` 超过 `maxRoundsPerDelegation`（默认 3）时，这条消息不发出，暂存进 `round_limit` 升级。
+  - 工具返回 `{status:"escalated", escalationId}`，提示词要求父节点结束本轮。
+  - 人可以选择：
+    - 延长（`extraRounds`，默认 +2），暂存的消息随即发出；
+    - 取消这个委派；
+    - 忽略（消息作废）。
+  - 无论选哪个，都给父节点发 `<baton-notice>`，附上人的留言。
+- **审批规则（`PermissionRule`）**：在 `autoApprove` 和人工审批之前，先按确定的规则匹配，不用模型判断。
+  - 规则字段：toolName 精确匹配，`*` 表示任意；agentId 可选；pattern 对 shell 命令按前缀匹配、对文件路径按 glob 匹配，路径相对 Run 的 cwd。
+  - 优先级：先看 `deny` 规则，再看 `allow`；本 Run 的规则优先于全局规则。命中后记 `resolvedBy:"rule"`，带上 `ruleId`，规则的 `hits` 加一。
+  - 人批准时可以勾选"总是"（`remember`），同时生成一条规则。也可以在设置页增删规则。
+  - 人拒绝时，发给 agent 的拒绝消息固定为："The human denied this action. Do not retry it; choose a different approach or ask_human."
+- **收件箱**：
+  - `GET /api/inbox` 返回全部待处理项。`GET /api/inbox/events` 是 SSE，有变化时推送 `changed`。
+  - 顶栏和左侧导航的"待处理"数字用的是 `RunSummary.pendingTotal`。
+- **通知**：只在两种时候发。
+  - 新的待处理项出现时：permission、proposal、blocking question、escalation。
+  - Run 完成时：根节点空闲且没有活跃节点。
+
+  daemon 在 macOS 上用 `osascript` 发系统通知，可以用 `config.json` 里的 `notifications.desktop=false` 关掉。控制台在浏览器授权后也会发 Notification。同一个 Run 30 秒内的通知合并成一条。
+- **成员默认规则**（提示词）：
+  - 只改任务书给你的文件；
+  - 不运行 `git commit/push/merge/rebase/checkout/reset/stash`，集成由主导者负责；
+  - 缺信息时先自己查，查不到再 `ask_human`。
+- **团队规模**：`maxTeamSize` 默认 5，超出的 `form_team` 和追加会被拒绝。主导者提示词要求优先复用已有成员。职责要写成路由约定："派给我：…；别派给我：…"。
+
 ## 5. Driver 接口（server 和 providers 之间的边界）
 
 契约文件是 `packages/server/src/driver/types.ts`。内核只依赖这个接口：
@@ -209,7 +248,12 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
 | GET | `/api/nodes/:nodeId/items?after=<itemSeq>` | 节点 transcript |
 | POST | `/api/nodes/:nodeId/messages` | `{ text }`，人给节点发消息 |
 | POST | `/api/nodes/:nodeId/cancel` | 级联取消该节点的子树 |
-| POST | `/api/permissions/:requestId` | `PermissionDecision` |
+| POST | `/api/permissions/:requestId` | `PermissionDecision`（可带 `remember` 生成规则） |
+| GET | `/api/inbox` · `/api/inbox/events` | 跨 Run 待处理项 · 变化推送（SSE） |
+| POST | `/api/questions/:id/answer` | `AnswerQuestionRequest` |
+| POST | `/api/escalations/:id/resolve` | `ResolveEscalationRequest` |
+| GET/POST | `/api/permission-rules` | 列出 / 新建审批规则 |
+| DELETE | `/api/permission-rules/:id` | 删除规则 |
 | GET | `/api/delegations/:id` | 完整的委派记录和结果 |
 | POST | `/api/delegations/:id/reassign` | `ReassignRequest`，人工改派 |
 | POST | `/api/runs/:runId/team/members` | `AddMemberRequest`，人工加成员 |
@@ -260,6 +304,14 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
    - 被替换的节点置灰，标"已替换"，用虚线连到接手的节点。
    - 节点卡片和详情抽屉里有"改派"按钮。
    - 时间线根节点那一行标出团队变更。
+
+8. **待处理收件箱**：左侧导航最上方是"待处理"，带数字。按 Run 分组，每类有对应的卡片：
+   - 权限卡：允许一次 / 总是允许（可改作用域和 pattern）/ 拒绝；
+   - 名单提案卡：可以就地处理，也可以跳到 Run；
+   - 提问卡：有选项按钮和自由回答；
+   - 升级卡：延长 / 取消 / 忽略，可带留言。
+
+   节点卡片上的"等你回答"和"停滞"都有醒目标记。设置页可以管理审批规则，也可以开关浏览器通知。
 
 另有以下页面：
 - **Agents 页**：识别结果和刷新。

@@ -57,6 +57,12 @@ export function applyEvent(snapshot: RunSnapshot, event: RunEventEnvelope): RunS
     case "team.updated":
       next.run = { ...next.run, team: event.team };
       break;
+    case "question":
+      next.questions = upsert(next.questions ?? [], event.question);
+      break;
+    case "escalation":
+      next.escalations = upsert(next.escalations ?? [], event.escalation);
+      break;
     case "permission":
       next.permissions = upsert(next.permissions, event.permission);
       break;

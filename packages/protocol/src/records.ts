@@ -86,6 +86,12 @@ export interface RunPolicy {
    * always apply immediately.
    */
   teamApproval?: boolean;
+  /** Max active members on a team (form_team / additions beyond it are rejected). Default 5. */
+  maxTeamSize?: number;
+  /** A node with an active turn and no events for this long raises a "stall" escalation. Default 10. */
+  stallMinutes?: number;
+  /** A parent's `send` beyond this many rounds of one delegation is escalated to the human. Default 3. */
+  maxRoundsPerDelegation?: number;
   /** Optional run budget; exceeding it rejects new delegations and cancels nothing by itself. */
   budget?: { maxCostUsd?: number; maxTokens?: number; maxWallMinutes?: number };
 }
@@ -366,7 +372,9 @@ export interface PermissionRecord {
   request: PermissionRequest;
   status: "pending" | "resolved" | "expired";
   resolution?: PermissionResponse;
-  resolvedBy?: "human" | "policy" | "parent";
+  resolvedBy?: "human" | "policy" | "parent" | "rule";
+  /** PermissionRule that decided it (resolvedBy "rule"). */
+  ruleId?: string;
   requestedAt: IsoTime;
   resolvedAt?: IsoTime;
 }
@@ -381,6 +389,74 @@ export interface ItemRecord {
   item: import("./timeline.js").TimelineItem;
 }
 
+// ───────────────────────────── human-in-the-loop (inbox) ─────────────────────────────
+
+/** A question an agent asked the human with ask_human. */
+export interface QuestionRecord {
+  id: string;
+  runId: string;
+  nodeId: string;
+  question: string;
+  /** Suggested answers rendered as buttons; free text is always allowed. */
+  options?: string[];
+  /** True when the node stopped and waits for the answer (it ended its turn). */
+  blocking: boolean;
+  status: "pending" | "answered" | "canceled";
+  answer?: string;
+  askedAt: IsoTime;
+  answeredAt?: IsoTime;
+}
+
+/** Something the kernel hands to the human because agents should not decide it alone. */
+export interface EscalationRecord {
+  id: string;
+  runId: string;
+  nodeId: string;
+  delegationId?: string;
+  kind: "stall" | "round_limit";
+  /** Human-readable explanation (who, how long / how many rounds, last activity). */
+  detail: string;
+  /** round_limit: the follow-up message the parent tried to send (delivered if the human extends). */
+  pendingMessage?: string;
+  status: "pending" | "resolved";
+  resolution?: "extend" | "cancel" | "dismiss";
+  /** Optional note from the human, forwarded to the parent in a <baton-notice>. */
+  note?: string;
+  createdAt: IsoTime;
+  resolvedAt?: IsoTime;
+}
+
+/** A remembered permission decision, matched deterministically before asking the human. */
+export interface PermissionRule {
+  id: string;
+  /** Limit to one agent id; omitted = any agent. */
+  agentId?: string;
+  /** Permission request name (tool), exact match, case-insensitive; "*" = any. */
+  toolName: string;
+  /**
+   * Optional input matcher. Shell requests: command prefix after whitespace normalisation
+   * ("npm test" matches "npm test -- --watch"). File requests (read/edit/write): glob on the path
+   * relative to the run cwd ("src/**"). Omitted = any input.
+   */
+  pattern?: string;
+  decision: "allow" | "deny";
+  scope: "global" | "run";
+  /** Set when scope is "run". */
+  runId?: string;
+  /** Permission record the rule was created from. */
+  createdFrom?: string;
+  createdAt: IsoTime;
+  hits: number;
+  lastHitAt?: IsoTime;
+}
+
+/** One entry of the cross-run "待处理" inbox. */
+export type InboxItem =
+  | { kind: "permission"; runId: string; runTitle: string; permission: PermissionRecord }
+  | { kind: "proposal"; runId: string; runTitle: string; proposal: TeamProposal }
+  | { kind: "question"; runId: string; runTitle: string; question: QuestionRecord }
+  | { kind: "escalation"; runId: string; runTitle: string; escalation: EscalationRecord };
+
 export interface RunSnapshot {
   run: RunRecord;
   nodes: NodeRecord[];
@@ -388,6 +464,8 @@ export interface RunSnapshot {
   turns: TurnRecord[];
   toolSpans: ToolSpanRecord[];
   permissions: PermissionRecord[];
+  questions: QuestionRecord[];
+  escalations: EscalationRecord[];
   /** Last event seq included in this snapshot; subscribe with after=lastSeq. */
   lastSeq: number;
 }
@@ -402,6 +480,8 @@ export interface RunSummary {
   nodeCount: number;
   activeNodeCount: number;
   pendingPermissions: number;
+  /** Pending permissions + proposals + questions + escalations. */
+  pendingTotal: number;
   usage: UsageTotals;
   createdAt: IsoTime;
   updatedAt: IsoTime;
