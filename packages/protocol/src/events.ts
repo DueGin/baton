@@ -32,10 +32,11 @@ export type RunEvent =
   | { type: "permission"; permission: PermissionRecord }
   /**
    * A transcript row was appended (or, for merged assistant/reasoning text, replaced) on a node.
-   * `seq` is the node-local item seq; the same seq arriving again means "replace that row".
+   * `itemSeq` is the node-local item seq (ItemRecord.seq); the same itemSeq arriving again means
+   * "replace that row". The envelope's `seq` stays the run-level event seq.
    * Text rows are coalesced to ≈1 event per 100 ms per node.
    */
-  | { type: "item"; nodeId: string; seq: number; turnId?: string; ts: IsoTime; item: TimelineItem }
+  | { type: "item"; nodeId: string; itemSeq: number; turnId?: string; ts: IsoTime; item: TimelineItem }
   | { type: "log"; level: "debug" | "info" | "warn" | "error"; message: string; nodeId?: string };
 
 export type RunEventEnvelope = RunEvent & {
