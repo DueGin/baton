@@ -33,6 +33,7 @@ function DelegationEdge(props: EdgeProps) {
 }
 const nodeTypes = { agent: AgentCard };
 const edgeTypes = { delegation: DelegationEdge };
+const fitOptions = { padding: 0.06, minZoom: 0.85, maxZoom: 1.1, duration: 300 };
 
 export function graphPositions(snapshot: Pick<RunSnapshot, "nodes" | "delegations">): Map<string, { x: number; y: number }> {
   const graph = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
@@ -44,6 +45,8 @@ export function graphPositions(snapshot: Pick<RunSnapshot, "nodes" | "delegation
 }
 
 function GraphView({ snapshot, selected, inspect }: { snapshot: RunSnapshot; selected: string | null; inspect: (id: string) => void }) {
+  const canvas = useRef<HTMLDivElement>(null);
+  const [canvasWidth, setCanvasWidth] = useState(0);
   const [follow, setFollow] = useState(true);
   const [nodes, setNodes, onNodesChange] = useNodesState<AgentNode>([]);
   const { fitView } = useReactFlow();
@@ -55,15 +58,20 @@ function GraphView({ snapshot, selected, inspect }: { snapshot: RunSnapshot; sel
     const changed = previousStructure.current !== structure;
     if (changed) { positions.current = graphPositions(snapshot); previousStructure.current = structure; }
     setNodes(existing => snapshot.nodes.map(node => ({ id: node.id, type: "agent", data: { node }, position: changed ? positions.current.get(node.id)! : existing.find(entry => entry.id === node.id)?.position ?? positions.current.get(node.id)!, selected: node.id === selected })));
-    if (changed && follow) fitFrame.current = requestAnimationFrame(() => { void fitView({ padding: 0.15, duration: 400, maxZoom: 1 }); });
+    if (changed && follow) fitFrame.current = requestAnimationFrame(() => { void fitView(fitOptions); });
   }, [snapshot, selected, structure, follow, setNodes, fitView]);
+  useEffect(() => {
+    const observer = new ResizeObserver(entries => { setCanvasWidth(entries[0]?.contentRect.width ?? 0); });
+    if (canvas.current) observer.observe(canvas.current);
+    return () => observer.disconnect();
+  }, []);
   useEffect(() => () => cancelAnimationFrame(fitFrame.current), []);
   const edges = useMemo<Edge[]>(() => snapshot.delegations.map(edge => ({ id: edge.id, type: "delegation", source: edge.fromNodeId, target: edge.toNodeId, data: { status: edge.status }, label: `${edge.result ? edge.result.status === "success" ? "✓ " : edge.result.status === "partial" ? "◐ " : "✗ " : ""}${edge.brief.title}`, animated: edge.status === "running", style: { stroke: edge.status === "failed" ? "var(--red)" : edge.status === "completed" ? "var(--green)" : "var(--edge)", strokeWidth: 1.5 } })), [snapshot.delegations]);
-  return <div className="topology-view"><div className="view-toolbar"><span className="eyebrow">DELEGATION MAP</span><div className="toolbar-actions"><Toggle checked={follow} onChange={setFollow} label="跟随最新" /><button className="button small" onClick={() => { void fitView({ padding: 0.15, duration: 300 }); }}>适应画布</button></div></div>
-    <ReactFlow<AgentNode> nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodeClick={(_, node) => inspect(node.id)} fitView minZoom={0.18} maxZoom={1.8} proOptions={{ hideAttribution: true }} defaultEdgeOptions={{ type: "delegation" }}>
+  return <div className="topology-view" ref={canvas}><div className="view-toolbar"><span className="eyebrow">DELEGATION MAP</span><div className="toolbar-actions"><Toggle checked={follow} onChange={setFollow} label="跟随最新" /><button className="button small" onClick={() => { void fitView(fitOptions); }}>适应画布</button></div></div>
+    <ReactFlow<AgentNode> nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodeClick={(_, node) => inspect(node.id)} fitView fitViewOptions={fitOptions} minZoom={0.3} maxZoom={1.8} proOptions={{ hideAttribution: true }} defaultEdgeOptions={{ type: "delegation" }}>
       <Background gap={22} size={1} color="var(--grid)" />
-      <Controls showInteractive={false} />
-      <MiniMap nodeColor={node => agentColors[snapshot.nodes.find(entry => entry.id === node.id)?.agentId ?? ""] ?? "#758799"} maskColor="var(--minimap-mask)" pannable zoomable />
+      <Controls showInteractive={false} fitViewOptions={fitOptions} />
+      {canvasWidth >= 900 && !selected && <MiniMap nodeColor={node => agentColors[snapshot.nodes.find(entry => entry.id === node.id)?.agentId ?? ""] ?? "#758799"} maskColor="var(--minimap-mask)" pannable zoomable />}
     </ReactFlow>
     <div className="graph-legend"><span><i style={{ background: "var(--green)" }} />结果已送达</span><span><i style={{ background: "var(--amber)" }} />等待授权</span><span><i style={{ background: "var(--red)" }} />执行失败</span><span className="muted">点击节点查看详情</span></div>
   </div>;

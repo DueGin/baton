@@ -1,4 +1,5 @@
-import { applyEvent, emptyUsage, type AgentEntry, type ItemRecord, type NodeRecord, type RunEvent, type RunEventEnvelope, type RunSnapshot, type TimelineItem, type ToolCallDetail } from "@baton/protocol";
+import { applyEvent, emptyUsage, type AgentEntry, type DelegationRecord, type ItemRecord, type NodeRecord, type RunEvent, type RunEventEnvelope, type RunSnapshot, type TimelineItem, type ToolCallDetail } from "@baton/protocol";
+import { demoBriefPrompt, demoResultsPrompt } from "./prompts.js";
 
 export const demoAgents: AgentEntry[] = [
   { id: "claude", label: "Claude Code", version: "2.1.38", model: "claude-sonnet-4-6", modelLabel: "Sonnet 4.6" },
@@ -17,6 +18,7 @@ export function createScenario(base = Date.now() - 86000, id = "run-demo"): Demo
   const events: RunEventEnvelope[] = [];
   const items: Record<string, ItemRecord[]> = {};
   const itemCounters: Record<string, number> = {};
+  const delegations = new Map<string, DelegationRecord>();
   function emit(offset: number, event: RunEvent): void { events.push({ ...event, runId: id, seq: events.length + 1, ts: at(offset) }); }
   const nid = (key: string): string => `${id}:${key}`;
   function item(offset: number, key: string, content: TimelineItem, replace?: number): number {
@@ -28,7 +30,12 @@ export function createScenario(base = Date.now() - 86000, id = "run-demo"): Demo
   function node(offset: number, key: string, title: string, agentId: string, parent: string | null): void {
     const record: NodeRecord = { id: nid(key), runId: id, parentNodeId: parent ? nid(parent) : null, delegationId: parent ? `d-${nid(key)}` : null, depth: parent === "api" ? 2 : parent ? 1 : 0, agentId, model: demoAgents.find(agent => agent.id === agentId)?.models[0]?.id, modeId: key === "review" ? "plan" : "default", title, cwd: run.cwd, status: "running", activity: "思考中…", createdAt: at(offset), updatedAt: at(offset), usage: emptyUsage(), turns: 1 };
     emit(offset, { type: "node.created", node: record });
-    if (parent) emit(offset, { type: "delegation.created", delegation: { id: `d-${nid(key)}`, runId: id, kind: "delegate", fromNodeId: nid(parent), toNodeId: nid(key), brief: { title, task: key === "api" ? "实现 /api/search 接口与 SQLite FTS5 索引，补充单元测试。" : key === "ui" ? "实现全局搜索 Command Palette，支持键盘操作与搜索结果分组。" : key === "review" ? "独立审查搜索输入校验、SQL 注入和访问范围。" : "检查 FTS5 tokenizer 行为，提供中文搜索的可行方案。", context: "项目使用 React 19 + Node.js；保持现有 API 兼容。", acceptance: ["现有测试通过", "提供变更清单和验证结果"], readonly: key === "review" || key === "index", outputSchema: { type: "object", properties: { summary: { type: "string" } } } }, status: "running", round: 1, createdAt: at(offset), startedAt: at(offset), subtreeUsage: emptyUsage() } });
+    if (parent) {
+      const delegation: DelegationRecord = { id: `d-${nid(key)}`, runId: id, kind: "delegate", fromNodeId: nid(parent), toNodeId: nid(key), brief: { title, task: key === "api" ? "实现 /api/search 接口与 SQLite FTS5 索引，补充单元测试。" : key === "ui" ? "实现全局搜索 Command Palette，支持键盘操作与搜索结果分组。" : key === "review" ? "独立审查搜索输入校验、SQL 注入和访问范围。" : "检查 FTS5 tokenizer 行为，提供中文搜索的可行方案。", context: "项目使用 React 19 + Node.js；保持现有 API 兼容。", acceptance: ["现有测试通过", "提供变更清单和验证结果"], readonly: key === "review" || key === "index", outputSchema: { type: "object", properties: { summary: { type: "string" } } } }, status: "running", round: 1, createdAt: at(offset), startedAt: at(offset), subtreeUsage: emptyUsage() };
+      delegations.set(key, delegation);
+      emit(offset, { type: "delegation.created", delegation });
+      item(offset, key, { type: "user_message", text: demoBriefPrompt(delegation) });
+    }
     emit(offset, { type: "turn.started", turn: { id: `t-${nid(key)}-1`, runId: id, nodeId: nid(key), trigger: parent ? "delegation" : "user", status: "running", startedAt: at(offset), ...(parent ? { delegationId: `d-${nid(key)}` } : {}) } });
   }
   function tool(offset: number, key: string, detail: ToolCallDetail, seconds = 4, fail = false): void {
@@ -44,8 +51,12 @@ export function createScenario(base = Date.now() - 86000, id = "run-demo"): Demo
   function finish(offset: number, key: string, success = true): void {
     emit(offset, { type: "turn.updated", turnId: `t-${nid(key)}-${key === "api" ? 2 : 1}`, patch: { status: success ? "completed" : "failed", endedAt: at(offset) } });
     emit(offset, { type: "node.updated", nodeId: nid(key), patch: { status: success ? "completed" : "failed", activity: success ? "结果已交付" : "执行失败", endedAt: at(offset), updatedAt: at(offset), ...(!success ? { error: "FTS5 trigram tokenizer 在当前运行环境不可用" } : {}) } });
-    emit(offset, { type: "delegation.updated", delegationId: `d-${nid(key)}`, patch: { status: success ? "completed" : "failed", endedAt: at(offset), result: { status: success ? "success" : "failed", summary: success ? "已完成任务，测试通过。详见结构化结果与产出文件。" : "当前 SQLite 构建未启用 trigram tokenizer；建议短词回退到 LIKE。", result: { summary: success ? "实现完成" : "采用 LIKE 回退", tests: success ? 12 : 1 }, artifacts: success ? [{ kind: "file", value: key === "ui" ? "src/components/SearchPalette.tsx" : "src/search.ts", description: "实现与测试" }] : [], reported: true, finalText: "已完成检查，并将结果交回父节点。" } } });
+    const delegation: DelegationRecord = { ...delegations.get(key)!, status: success ? "completed" : "failed", endedAt: at(offset), result: { status: success ? "success" : "failed", summary: success ? "已完成任务，测试通过。详见结构化结果与产出文件。" : "当前 SQLite 构建未启用 trigram tokenizer；建议短词回退到 LIKE。", result: { summary: success ? "实现完成" : "采用 LIKE 回退", tests: success ? 12 : 1 }, artifacts: success ? [{ kind: "file", value: key === "ui" ? "src/components/SearchPalette.tsx" : "src/search.ts", description: "实现与测试" }] : [], reported: true, finalText: "已完成检查，并将结果交回父节点。" } };
+    delegations.set(key, delegation);
+    emit(offset, { type: "delegation.updated", delegationId: delegation.id, patch: { status: delegation.status, endedAt: delegation.endedAt, result: delegation.result } });
     emit(offset + 2, { type: "delegation.updated", delegationId: `d-${nid(key)}`, patch: { deliveredAt: at(offset + 2), deliveredVia: "turn" } });
+    const parent = delegation.fromNodeId.slice(id.length + 1);
+    item(offset + 2, parent, { type: "user_message", text: demoResultsPrompt([delegation]) });
   }
   emit(0, { type: "run.created", run }); node(0, "root", "协调全局搜索实现", "claude", null);
   item(0, "root", { type: "user_message", text: "为工作台添加全局搜索。支持 ⌘K 快捷键、按类型分组，覆盖中文检索，并补充测试。" });

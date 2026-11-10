@@ -2,6 +2,7 @@ import { applyEvent, emptyUsage, type CreateRunRequest, type DelegationRecord, t
 import type { BatonClient } from "../api.js";
 import { summarize, terminal } from "../lib/derive.js";
 import { createScenario, demoAgents } from "./scenario.js";
+import { demoResultsPrompt } from "./prompts.js";
 
 interface DemoRun { snapshot: RunSnapshot; remaining: RunEventEnvelope[]; log: RunEventEnvelope[] }
 export class DemoClient implements BatonClient {
@@ -129,7 +130,11 @@ export class DemoClient implements BatonClient {
       this.emit(data, { type: "node.updated", nodeId: permission.nodeId, patch: { status: "completed", activity: "结果已交付", endedAt: ts, updatedAt: ts } });
       for (const turn of data.snapshot.turns) if (turn.nodeId === permission.nodeId && turn.status === "running") this.emit(data, { type: "turn.updated", turnId: turn.id, patch: { status: "completed", endedAt: ts } });
       const edge = data.snapshot.delegations.find(entry => entry.toNodeId === permission.nodeId);
-      if (edge) this.emit(data, { type: "delegation.updated", delegationId: edge.id, patch: { status: "completed", endedAt: ts, deliveredAt: ts, deliveredVia: "turn", result: { status: decision.response.behavior === "allow" ? "success" : "partial", summary: "Command Palette 和键盘导航实现完成。", reported: true, finalText: "实现与验证完成。", artifacts: [{ kind: "file", value: "src/components/SearchPalette.tsx" }], result: { tests: 8, keyboardNavigation: true } } } });
+      if (edge) {
+        const delivered: DelegationRecord = { ...edge, status: "completed", endedAt: ts, deliveredAt: ts, deliveredVia: "turn", result: { status: decision.response.behavior === "allow" ? "success" : "partial", summary: "Command Palette 和键盘导航实现完成。", reported: true, finalText: "实现与验证完成。", artifacts: [{ kind: "file", value: "src/components/SearchPalette.tsx" }], result: { tests: 8, keyboardNavigation: true } } };
+        this.emit(data, { type: "delegation.updated", delegationId: edge.id, patch: delivered });
+        this.append(data, delivered.fromNodeId, { type: "user_message", text: demoResultsPrompt([delivered]) });
+      }
       const rootId = data.snapshot.run.rootNodeId;
       this.append(data, rootId, { type: "assistant_message", text: "所有委派结果已汇总。\n\n- 搜索 API 与中文兼容回退已完成，12 个测试通过。\n- Command Palette 与键盘导航已完成。\n- 安全审查建议均已纳入。\n\n索引子任务的环境问题已通过 LIKE 回退解决。可以继续发消息安排下一轮。" });
       this.emit(data, { type: "node.updated", nodeId: rootId, patch: { status: "idle", activity: "等待下一条消息", updatedAt: ts } });
