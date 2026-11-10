@@ -5,7 +5,7 @@ export const ASSIGNMENT_TAG = "baton-assignment";
 export const RESULTS_TAG = "baton-results";
 
 const BATON_TOOL_NAMES = [
-  "list_agents", "form_team", "get_team", "replace_member", "reassign", "delegate", "wait", "get_result", "send", "cancel", "status", "report_result",
+  "ask_human", "list_agents", "form_team", "get_team", "replace_member", "reassign", "delegate", "wait", "get_result", "send", "cancel", "status", "report_result",
 ] as const;
 
 function describeAgent(agent: AgentEntry): string {
@@ -26,12 +26,14 @@ export function systemPrompt(
   const isRoot = node.parentNodeId === null;
   const canDelegate = node.depth < policy.maxDepth;
   const mode = policy.mode ?? "dynamic";
-  if (mode === "solo") return "You are running inside baton in SOLO mode. Work alone: inspect, implement, verify and answer the human yourself. No baton MCP tools are injected. Do not delegate or form a team.";
+  if (mode === "solo") return "You are running inside baton in SOLO mode. Work alone: inspect, implement, verify and answer the human yourself. Only the baton ask_human tool is available: investigate first, then ask for human judgment calls or missing decisions. If a question is blocking, end your turn and wait for a <baton-answer>. Load mcp__baton__ask_human with tool search if needed. Do not delegate or form a team.";
   const roster = (team?.members ?? []).filter((m) => m.status === "active").map((m) => `- ${m.role}: ${m.agentId}${m.model ? ` / ${m.model}` : ""}. Responsibilities and file ownership: ${m.responsibilities ?? "See assignment"}`).join("\n");
   const lines = [
     "You are running inside baton, a local multi-agent workspace. Other coding agents on this machine — including agents from other vendors — can take work from you through the `baton` MCP tools.",
     "",
     "baton tools:",
+    "- ask_human: ask only for judgment calls, decisions or missing information you could not investigate yourself. Provide a clear question and useful options; if blocking, end your turn and wait for a <baton-answer>. Do not use the human as a search tool.",
+    "- If send returns status escalated, end your turn and wait for the human's round-limit decision.",
     "- list_agents: who you can delegate to (all models, modes, notes, current load).",
     "- form_team: lead only, dynamic runs; define the smallest useful team with roles, responsibilities and file ownership. get_team: current roster and assignments.",
     "- replace_member: lead only; swap a failing, stalled or poorly matched member and reassign its unfinished work. reassign: move one of your own assignments to another role or agent.",
@@ -63,6 +65,7 @@ export function systemPrompt(
       mode === "dynamic"
         ? "2. Call form_team first: choose the smallest team that parallelizes the work, pick agents and models by their strengths from list_agents, and give every role responsibilities, deliverables and exclusive file ownership. Then delegate by role in parallel."
         : "2. Use the preset roster below. Delegate only by role, at every depth; direct agent delegation is not allowed.",
+      `Team size limit: ${policy.maxTeamSize ?? 5}. Reuse existing members first before adding another role. Write responsibilities as routing contracts: "Send me: …; don't send me: …".`,
       "3. Coordinate while members work. Never assign overlapping files. End your turn when waiting; results arrive automatically.",
       "4. If a member fails, stalls, or is a poor fit, use replace_member or reassign proactively. Integrate the returned work, verify the whole, and use send for fixes. Answer the human with what was done by whom.",
     );
@@ -84,6 +87,8 @@ export function systemPrompt(
       "You are a delegate. Your assignment arrives in a <baton-assignment> message. Stay within its scope and the files it gives you.",
       "When done, call report_result exactly once (status success / partial / failed, a plain-text summary of what you did, what you found and what is left, plus `result` and `artifacts` when useful), then end your turn.",
       "If the assignment is read-only, do not modify files.",
+      "Modify only the files assigned to you. Do not run git commit, push, merge, rebase, checkout, reset or stash; the lead handles integration.",
+      "Investigate missing information in the workspace and available tools before using ask_human; ask only when a human judgment is needed.",
     );
   }
   return lines.join("\n");

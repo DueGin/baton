@@ -67,10 +67,10 @@ describe("teams over actual HTTP MCP", () => {
     await expect(s.kernel.tool(run.run.rootNodeId, "form_team", { rationale: "x", members: [{ role: "x", agent: "worker", responsibilities: "x" }] })).rejects.toThrow(/dynamic/);
     const override = await s.kernel.createRun({ agent: "replacement", teamPresetId: preset.id, cwd: tmpdir(), prompt: "override" }); expect(s.store.node(override.run.rootNodeId).agentId).toBe("replacement");
   });
-  it("solo omits MCP, prohibits delegation and rejects invalid modes", async () => {
+  it("solo injects only human questions, prohibits delegation and rejects invalid modes", async () => {
     const s = await setup(), run = await s.kernel.createRun({ agent: "lead", cwd: tmpdir(), prompt: "solo", policy: { mode: "solo" } });
     const session = (s.kernel.registry as FakeDriverRegistry).get("lead")!.sessions[0]!;
-    expect(session.spec.mcpServers).toEqual({}); expect(session.spec.systemPrompt).toContain("Work alone");
+    expect(session.spec.mcpServers.baton?.type).toBe("http"); expect(session.spec.systemPrompt).toContain("Work alone");
     await expect(s.kernel.delegate(run.run.rootNodeId, { agent: "worker", title: "x", task: "x" })).rejects.toThrow(/Solo/);
     await expect(s.kernel.tool(run.run.rootNodeId, "list_agents", {})).rejects.toThrow(/Solo/);
     await expect(api(s, "/api/runs", "POST", { agent: "lead", cwd: tmpdir(), prompt: "bad", policy: { mode: "bogus" } })).rejects.toThrow(/mode/);

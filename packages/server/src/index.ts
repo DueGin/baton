@@ -4,3 +4,5 @@ export { FakeDriver, FakeDriverRegistry, FakeSession, type FakeScript, type Fake
 export { Store } from "./store/index.js";
 export { Kernel, DEFAULT_POLICY } from "./kernel/index.js";
 export { exportRun } from "./telemetry/index.js";
+
+export type { Notifier, DesktopNotification } from "./notifications/index.js";

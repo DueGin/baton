@@ -8,6 +8,7 @@ export async function handleMcp(kernel: Kernel, token: string, request: Incoming
   if (!nodeId) { response.writeHead(404, { "content-type": "application/json" }).end(JSON.stringify({ error: "Invalid or expired node token" })); return; }
   const server = new McpServer({ name: "baton", version: "0.1.0" });
   for (const name of Object.keys(BATON_TOOLS) as BatonToolName[]) {
+    if (kernel.store.snapshot(kernel.store.node(nodeId).runId).run.policy.mode === "solo" && name !== "ask_human") continue;
     const tool = BATON_TOOLS[name];
     server.registerTool(name, { description: tool.description, inputSchema: tool.input }, async (args: Record<string, unknown>) => {
       try {
