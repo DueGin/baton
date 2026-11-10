@@ -84,7 +84,7 @@ export class Teams {
     const team = this.team(runId), s = this.store.snapshot(runId);
     return { ...team, members: team.members.map((m) => ({ ...m, delegations: s.delegations.filter((d) => d.memberId === m.id) })) };
   }
-  async resolve(runId: string, input: Pick<DelegateInput, "role" | "agent" | "model" | "mode"> & { thinking?: string; nodeId?: string; human?: boolean }): Promise<ResolvedMember> {
+  async resolve(runId: string, input: Pick<DelegateInput, "role" | "agent" | "model" | "mode"> & { thinking?: string; nodeId?: string; human?: boolean; /** Reassignment: role and responsibilities the ad-hoc member continues. */ basis?: { role: string; responsibilities?: string } }): Promise<ResolvedMember> {
     const run = this.store.snapshot(runId).run;
     if (run.policy.mode === "solo") throw new Error("Solo runs cannot delegate");
     if (input.role && input.agent) throw new Error("Specify either role or agent, not both");
@@ -103,9 +103,11 @@ export class Teams {
       if (run.policy.mode === "preset") throw new Error(`Preset runs require a role at every depth. Available roles: ${run.team?.members.filter((m) => m.status === "active").map((m) => m.role).join(", ") || "(none)"}`);
       if (!input.agent) throw new Error("Specify a team role or agent");
       await this.ready(input.agent);
-      const team = this.team(runId); let role = input.agent.slice(0, 32), suffix = 1;
-      while (team.members.some((m) => m.role === role)) role = `${input.agent.slice(0, 32)}-${++suffix}`;
-      const spec = { role, agentId: input.agent, model: input.model, modeId: input.mode, thinking: input.thinking, responsibilities: "Ad-hoc delegated task" };
+      // A reassigned task keeps its role lineage ("renderer" → "renderer-claude") and responsibilities.
+      const base = (input.basis ? `${input.basis.role}-${input.agent}` : input.agent).slice(0, 40);
+      const team = this.team(runId); let role = base, suffix = 1;
+      while (team.members.some((m) => m.role === role)) role = `${base}-${++suffix}`;
+      const spec = { role, agentId: input.agent, model: input.model, modeId: input.mode, thinking: input.thinking, responsibilities: input.basis?.responsibilities ?? "Ad-hoc delegated task" };
       if (!input.human && this.needsApproval(runId)) {
         const proposal = this.propose(runId, { kind: "addition", by: "agent", nodeId: input.nodeId ?? run.rootNodeId, members: [spec], rationale: "Ad-hoc member for direct agent delegation" });
         return { member: { ...spec, id: `${proposal.proposalId}:${role}`, status: "active", addedBy: "agent", addedAt: new Date().toISOString() }, model: spec.model, modeId: spec.modeId, thinking: spec.thinking, proposalId: proposal.proposalId };
@@ -149,7 +151,9 @@ export class Teams {
     if (old.status === "replaced" || old.status === "canceled") throw new Error(`Delegation is ${old.status}${old.replacedBy ? `; replacement: ${old.replacedBy}` : ""}`);
     if (input.memberId && input.agentId) throw new Error("Specify either memberId or agentId");
     const role = input.memberId ? this.member(old.runId, input.memberId).role : undefined;
-    const target = await this.resolve(old.runId, { role, agent: input.agentId, model: input.model, mode: input.modeId, thinking: input.thinking, nodeId: initiator ?? old.fromNodeId, human: initiator === undefined });
+    const previous = old.memberId ? this.team(old.runId).members.find((m) => m.id === old.memberId) : undefined;
+    const basis = old.role ? { role: old.role, responsibilities: previous?.responsibilities } : undefined;
+    const target = await this.resolve(old.runId, { role, agent: input.agentId, model: input.model, mode: input.modeId, thinking: input.thinking, nodeId: initiator ?? old.fromNodeId, human: initiator === undefined, basis });
     this.hooks.admission(old.fromNodeId, old.id);
     if (!old.blockedByProposal) this.hooks.flush(old.toNodeId);
     const rows = this.store.items(old.toNodeId), last = rows.filter((r) => r.item.type === "assistant_message").at(-1);
