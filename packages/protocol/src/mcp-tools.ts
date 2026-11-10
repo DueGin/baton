@@ -33,8 +33,11 @@ export const delegateInput = z.object({
 
 export const delegateOutput = z.object({
   delegationId: z.string(),
-  nodeId: z.string(),
-  status: z.enum(["queued", "running"]),
+  /** Absent while the delegation waits for a team proposal (no node exists yet). */
+  nodeId: z.string().optional(),
+  status: z.enum(["queued", "running", "pending_approval"]),
+  /** Set when the delegation waits for this team proposal to be approved. */
+  proposalId: z.string().optional(),
   note: z.string(),
 });
 
