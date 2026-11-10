@@ -1,0 +1,11 @@
+baton
+Copyright 2026 DueGin
+
+This product includes software derived from Paseo (https://github.com/getpaseo/paseo),
+Copyright (c) 2025-present Mohamed Boudra, licensed under the Apache License, Version 2.0.
+Derived files live mainly under packages/providers/ and carry a header naming the original
+path and stating that they were modified. Third-party components incorporated into Paseo remain
+licensed under the licenses provided by their respective copyright holders.
+
+The built-in ACP agent launch table is informed by acpx (https://github.com/openclaw/acpx),
+MIT License, Copyright (c) 2025 OpenClaw Team.

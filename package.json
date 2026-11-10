@@ -1,0 +1,23 @@
+{
+  "name": "baton",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local agent client with native delegation and observability: drives the agent CLIs you already have (Claude Code, Codex, pi, any ACP agent).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": { "node": ">=22.13" },
+  "workspaces": ["packages/protocol", "packages/providers", "packages/server", "packages/web"],
+  "scripts": {
+    "build": "tsc -b packages/protocol packages/providers packages/server && npm run build -w @baton/web --if-present",
+    "typecheck": "tsc -b packages/protocol packages/providers packages/server && npm run typecheck -w @baton/web --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "dev": "npm run dev -w @baton/server",
+    "dev:web": "npm run dev -w @baton/web"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "~5.9.3",
+    "vitest": "^4.1.6",
+    "tsx": "^4.20.0"
+  }
+}
