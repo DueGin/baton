@@ -1,0 +1,161 @@
+import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { AgentEntry, BatonToolName, JsonValue, PermissionRequest, PermissionResponse, TimelineItem, Usage } from "@baton/protocol";
+import type { AgentDriver, DriverEvent, DriverRegistry, DriverSession, OpenSessionSpec, SteerOutcome } from "./types.js";
+export interface FakeContext {
+  prompt: string; turn: number; spec: OpenSessionSpec; signal: AbortSignal;
+  text(text: string): void; reasoning(text: string): void; item(item: TimelineItem): void;
+  usage(usage: Usage): void; sleep(ms: number): Promise<void>;
+  call<T = unknown>(tool: BatonToolName, input: Record<string, unknown>): Promise<T>;
+  permission(request: PermissionRequest): Promise<PermissionResponse>;
+  steered: string[];
+}
+export type FakeScript = (context: FakeContext) => Promise<void> | void;
+export interface FakeDriverOptions { script?: FakeScript; scripts?: FakeScript[]; steer?: boolean; label?: string }
+const capabilities = { steer: true, resume: true, reasoning: true, mcp: true };
+export class FakeDriver implements AgentDriver {
+  readonly capabilities: AgentEntry["capabilities"];
+  readonly sessions: FakeSession[] = [];
+  constructor(readonly agentId: string, readonly options: FakeDriverOptions = {}) { this.capabilities = { ...capabilities, steer: options.steer ?? true }; }
+  async open(spec: OpenSessionSpec): Promise<FakeSession> {
+    const session = new FakeSession(this, spec); this.sessions.push(session); return session;
+  }
+  async resume(persistence: JsonValue, spec: OpenSessionSpec): Promise<FakeSession> {
+    const session = await this.open(spec);
+    if (persistence && typeof persistence === "object" && !Array.isArray(persistence)) {
+      if (typeof persistence.sessionId === "string") session.sessionId = persistence.sessionId;
+      if (typeof persistence.turns === "number") session.turns = persistence.turns;
+    }
+    return session;
+  }
+}
+export class FakeSession implements DriverSession {
+  sessionId: string = randomUUID(); turns = 0; closed = false;
+  readonly prompts: string[] = []; readonly steered: string[] = [];
+  private listeners = new Set<(event: DriverEvent) => void>();
+  private active?: { id: string; controller: AbortController; promise: Promise<void> };
+  private permissions = new Map<string, { request: PermissionRequest; resolve: (response: PermissionResponse) => void }>();
+  private client?: Client; private connecting?: Promise<Client>;
+  constructor(readonly driver: FakeDriver, readonly spec: OpenSessionSpec) {}
+  persistence(): JsonValue { return { sessionId: this.sessionId, turns: this.turns }; }
+  subscribe(listener: (event: DriverEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
+  private emit(event: DriverEvent): void { for (const listener of this.listeners) { try { listener(event); } catch { /* driver contract: never throw from listeners */ } } }
+  async runtimeInfo(): Promise<{ model: string; modeId: string }> { return { model: this.spec.model ?? "fake-model", modeId: this.spec.modeId ?? "default" }; }
+  async startTurn(prompt: string): Promise<{ turnId: string }> {
+    if (this.closed) throw new Error("Fake session is closed");
+    if (this.active) throw new Error("Fake session already has an active turn");
+    const id = randomUUID(), controller = new AbortController(); this.turns++; this.prompts.push(prompt);
+    const item = (value: TimelineItem): void => { controller.signal.throwIfAborted(); this.emit({ type: "item", turnId: id, item: value, timestamp: new Date().toISOString() }); };
+    const context: FakeContext = {
+      prompt, turn: this.turns, spec: this.spec, signal: controller.signal,
+      text: (text) => item({ type: "assistant_message", text }), reasoning: (text) => item({ type: "reasoning", text }), item,
+      usage: (usage) => this.emit({ type: "usage", turnId: id, usage }),
+      sleep: async (ms) => { await delay(ms, undefined, { signal: controller.signal }); },
+      steered: this.steered,
+      call: async <T>(tool: BatonToolName, input: Record<string, unknown>): Promise<T> => {
+        const callId = randomUUID(); item({ type: "tool_call", callId, name: `mcp__baton__${tool}`, status: "running", detail: { type: "unknown", input, output: undefined } });
+        try {
+          const client = await this.mcpClient(); controller.signal.throwIfAborted();
+          const response = await client.callTool({ name: tool, arguments: input }, undefined, { signal: controller.signal });
+          const content = response.content;
+          const text = Array.isArray(content) ? content.filter((v: unknown): v is { type: "text"; text: string } => !!v && typeof v === "object" && "type" in v && v.type === "text" && "text" in v && typeof v.text === "string").map((v) => v.text).join("\n") : "";
+          if (response.isError) throw new Error(text);
+          const output: unknown = response.structuredContent ?? (text ? JSON.parse(text) : null);
+          item({ type: "tool_call", callId, name: `mcp__baton__${tool}`, status: "completed", detail: { type: "unknown", input, output } }); return output as T;
+        } catch (error) {
+          if (!controller.signal.aborted) item({ type: "tool_call", callId, name: `mcp__baton__${tool}`, status: "failed", error: error instanceof Error ? error.message : String(error), detail: { type: "unknown", input, output: null } });
+          throw error;
+        }
+      },
+      permission: (request) => new Promise((resolve) => {
+        this.permissions.set(request.id, { request, resolve }); this.emit({ type: "permission_requested", turnId: id, request });
+      }),
+    };
+    const script = this.driver.options.scripts?.[this.turns - 1] ?? this.driver.options.script ?? demoScript;
+    const promise = new Promise<void>((resolve) => setImmediate(resolve)).then(async () => {
+      this.emit({ type: "session", sessionId: this.sessionId }); this.emit({ type: "turn_started", turnId: id });
+      try {
+        controller.signal.throwIfAborted(); await script(context); controller.signal.throwIfAborted();
+        this.active = undefined; this.emit({ type: "turn_completed", turnId: id, usage: { inputTokens: 200, outputTokens: 100, totalCostUsd: 0.002 } });
+      } catch (error) {
+        this.active = undefined;
+        this.emit(controller.signal.aborted ? { type: "turn_canceled", turnId: id, reason: "Interrupted" } : { type: "turn_failed", turnId: id, error: error instanceof Error ? error.message : String(error) });
+      }
+    });
+    this.active = { id, controller, promise }; return { turnId: id };
+  }
+  private async mcpClient(): Promise<Client> {
+    if (this.client) return this.client;
+    this.connecting ??= (async () => {
+      const config = this.spec.mcpServers.baton;
+      if (!config || config.type !== "http") throw new Error("FakeDriver requires baton HTTP MCP injection");
+      const client = new Client({ name: "baton-fake-agent", version: "0.1.0" });
+      await client.connect(new StreamableHTTPClientTransport(new URL(config.url))); this.client = client; return client;
+    })();
+    return this.connecting;
+  }
+  async steer(prompt: string): Promise<SteerOutcome> {
+    if (!this.driver.capabilities.steer) return "unsupported";
+    if (!this.active) return "no_active_turn";
+    this.steered.push(prompt); return "steered";
+  }
+  async interrupt(): Promise<void> {
+    const active = this.active; if (!active) return;
+    active.controller.abort();
+    for (const p of this.permissions.values()) p.resolve({ behavior: "deny", message: "Interrupted", interrupt: true }); this.permissions.clear();
+    await active.promise;
+  }
+  async respondToPermission(requestId: string, response: PermissionResponse): Promise<void> {
+    const pending = this.permissions.get(requestId); if (!pending) throw new Error("Fake permission not pending");
+    this.permissions.delete(requestId); pending.resolve(response); this.emit({ type: "permission_resolved", requestId, response, turnId: this.active?.id });
+  }
+  pendingPermissions(): PermissionRequest[] { return [...this.permissions.values()].map((p) => p.request); }
+  async close(): Promise<void> { if (this.closed) return; this.closed = true; await this.interrupt(); await this.client?.close(); this.listeners.clear(); }
+}
+export class FakeDriverRegistry implements DriverRegistry {
+  readonly drivers: Map<string, FakeDriver>;
+  constructor(scripts?: Record<string, FakeScript | FakeDriverOptions> | FakeDriver[]) {
+    const drivers = Array.isArray(scripts) ? scripts : Object.entries(scripts ?? { "fake-claude": { label: "Claude · demo" }, "fake-codex": { label: "Codex · demo" }, "fake-pi": { label: "Pi · demo" } }).map(([id, value]) => new FakeDriver(id, typeof value === "function" ? { script: value } : value));
+    this.drivers = new Map(drivers.map((d) => [d.agentId, d]));
+  }
+  async detect(): Promise<AgentEntry[]> {
+    return [...this.drivers.values()].map((d) => ({ id: d.agentId, label: d.options.label ?? d.agentId, kind: "native", status: "ready", enabled: true, version: "demo-1.0", models: [{ id: "fake-model", label: "Demo model", isDefault: true }], modes: [{ id: "default", label: "Default" }, { id: "plan", label: "Read only", isReadOnly: true }], defaultModeId: "default", notes: "Scripted demo agent. Exercises real baton MCP delegation over HTTP.", capabilities: d.capabilities, checkedAt: new Date().toISOString() }));
+  }
+  get(agentId: string): FakeDriver | undefined { return this.drivers.get(agentId); }
+  async shutdown(): Promise<void> { await Promise.all([...this.drivers.values()].flatMap((d) => d.sessions.map((s) => s.close()))); }
+}
+async function demoScript(c: FakeContext): Promise<void> {
+  c.reasoning("I will split the work into independent pieces and bring the findings together.");
+  c.usage({ inputTokens: 120, outputTokens: 25, totalCostUsd: 0.001 });
+  if (!c.prompt.includes("<baton-assignment") && c.turn === 1) {
+    c.text("I’m coordinating research, implementation review, and an integration check.\n");
+    await c.call("list_agents", {});
+    await Promise.all([
+      c.call("delegate", { agent: "fake-codex", title: "Review the implementation", task: "Review the proposed architecture and ask a specialist to check the tests.", acceptance: ["Identify the main risks", "Include test coverage"] }),
+      c.call("delegate", { agent: "fake-pi", title: "Research options", task: "Inspect the available options. Request permission before inspecting local configuration.", readonly: true }),
+      c.call("delegate", { agent: "fake-codex", title: "Integration check", task: "Simulate an integration failure so the coordinator can explain the recovery." }),
+    ]);
+    for (let i = 0; i < 8; i++) { await c.sleep(700); c.usage({ inputTokens: 130 + i * 10, outputTokens: 35 + i * 8, totalCostUsd: 0.001 + i * 0.0001 }); }
+    c.text("The work is underway. I will incorporate the delegated results as they arrive."); return;
+  }
+  if (!c.prompt.includes("<baton-assignment")) {
+    await c.sleep(450); c.text("The delegated work is complete. The architecture and tests look sound; the integration check exposed a configuration issue that should be fixed before release. The research result is available in the delegation details."); return;
+  }
+  if (c.spec.title === "Integration check") { await c.sleep(2100); throw new Error("Demo integration check: missing test fixture (simulated failure)"); }
+  if (c.spec.title === "Review the implementation") {
+    const d = await c.call<{ delegationId: string }>("delegate", { agent: "fake-claude", title: "Check test coverage", task: "Inspect the test plan and report a concise coverage assessment.", readonly: true });
+    await c.sleep(1300); c.text("Architecture review: the event log keeps the console and projections consistent.\n");
+    await c.call("wait", { delegationIds: [d.delegationId], mode: "all", timeoutSec: 10 });
+    await c.sleep(700); await c.call("report_result", { status: "success", summary: "Reviewed architecture and incorporated specialist test coverage. Recommend adding restart recovery checks.", result: { reviewed: true, risks: ["restart recovery"] } }); return;
+  }
+  if (c.spec.title === "Research options") {
+    await c.sleep(1100);
+    const permission = await c.permission({ id: "demo-inspect-config", kind: "tool", name: "Read local configuration", title: "Allow read-only configuration inspection?", description: "This is a simulated permission request; the fake agent will not read files.", detail: { type: "read", filePath: "./config.json" }, actions: [{ id: "allow", label: "Allow", behavior: "allow" }, { id: "deny", label: "Deny", behavior: "deny" }] });
+    await c.sleep(1200); c.text(permission.behavior === "allow" ? "Configuration inspected. The local provider adapters cover the required use cases." : "Inspection was declined. The public architecture still supports the required provider mix.");
+    await c.call("report_result", { status: permission.behavior === "allow" ? "success" : "partial", summary: "Compared the provider options and documented the permission decision.", artifacts: [{ kind: "note", value: "Claude, Codex and Pi can collaborate through the same delegation interface." }] }); return;
+  }
+  await c.sleep(900); c.text("Coverage includes delegation limits, result delivery, permissions and cancellation.");
+  await c.call("report_result", { status: "success", summary: "Test coverage assessed. Add a persistence restart test and a resumable SSE check.", result: { coverage: ["delegation", "permissions", "cancel", "SSE"] } });
+}
