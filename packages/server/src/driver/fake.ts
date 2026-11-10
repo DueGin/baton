@@ -126,7 +126,7 @@ export class FakeDriverRegistry implements DriverRegistry {
   get(agentId: string): FakeDriver | undefined { return this.drivers.get(agentId); }
   async shutdown(): Promise<void> { await Promise.all([...this.drivers.values()].flatMap((d) => d.sessions.map((s) => s.close()))); }
 }
-async function demoScript(c: FakeContext): Promise<void> {
+async function legacyDemoScript(c: FakeContext): Promise<void> {
   c.reasoning("I will split the work into independent pieces and bring the findings together.");
   c.usage({ inputTokens: 120, outputTokens: 25, totalCostUsd: 0.001 });
   if (!c.prompt.includes("<baton-assignment") && c.turn === 1) {
@@ -158,4 +158,45 @@ async function demoScript(c: FakeContext): Promise<void> {
   }
   await c.sleep(900); c.text("Coverage includes delegation limits, result delivery, permissions and cancellation.");
   await c.call("report_result", { status: "success", summary: "Test coverage assessed. Add a persistence restart test and a resumable SSE check.", result: { coverage: ["delegation", "permissions", "cancel", "SSE"] } });
+}
+
+/** The default console demo deliberately stops at the human approval gate. */
+async function demoScript(c: FakeContext): Promise<void> {
+  if (c.prompt === "legacy demo" || c.spec.title === "legacy demo" || ["Review the implementation", "Research options", "Integration check", "Check test coverage"].includes(c.spec.title ?? "")) return legacyDemoScript(c);
+  if (c.spec.systemPrompt?.includes("SOLO mode")) { c.text("I completed the demo request independently and verified the result."); return; }
+  if (c.prompt.includes("<baton-assignment")) {
+    c.reasoning("I will respect my team's file ownership and report a concise result.");
+    c.usage({ inputTokens: 120, outputTokens: 20, totalCostUsd: 0.001 });
+    if (c.spec.title === "Implement the feature" && c.spec.model === "demo-initial-builder") {
+      c.text("The initial implementation is drafted. A provider-specific integration mismatch needs a different specialist.");
+      c.item({ type: "tool_call", callId: "demo-edit", name: "edit", status: "completed", detail: { type: "edit", filePath: "src/demo-feature.ts" } });
+      await c.sleep(1400); throw new Error("Demo: integration mismatch; reassign to another member");
+    }
+    if (c.spec.title === "Research the options") {
+      await c.sleep(600);
+      await c.permission({ id: "demo-read", name: "Inspect configuration", kind: "tool", title: "Allow simulated read-only inspection?", description: "The fake agent will not read real files.", detail: { type: "read", filePath: "config.json" } });
+    }
+    await c.sleep(900); c.text(c.spec.title === "Implement the feature" ? "I resumed from the predecessor's progress, fixed the integration and verified it." : "The assigned review is complete. File ownership and interfaces are consistent.");
+    await c.call("report_result", { status: "success", summary: c.spec.title === "Implement the feature" ? "Replacement completed the implementation and integration checks." : `${c.spec.title} completed.`, result: { verified: true }, artifacts: [{ kind: "note", value: "Demo output only; no files were modified." }] }); return;
+  }
+  if (c.turn === 1 && !c.spec.systemPrompt?.includes("Collaboration mode: PRESET")) {
+    c.reasoning("Three independent responsibilities give us useful parallel work without overlapping files.");
+    const proposal = await c.call<{ status?: string }>("form_team", { rationale: "A small team separates implementation, review and research; each role owns different files.", members: [
+      { role: "builder", agent: "fake-codex", model: "demo-initial-builder", responsibilities: "Implement src/demo-feature.ts and preserve the agreed interfaces.", reason: "Codex handles implementation." },
+      { role: "reviewer", agent: "fake-claude", responsibilities: "Review architecture and own tests/demo-feature.test.ts.", reason: "Claude checks interfaces and edge cases." },
+      { role: "researcher", agent: "fake-pi", responsibilities: "Read-only research; own the findings in docs/demo-options.md.", reason: "Pi compares options quickly." },
+    ] });
+    if (proposal.status === "pending_approval") { c.text("I proposed three roles with separate file ownership. Please approve or edit the roster in the console; I will start after confirmation."); return; }
+  }
+  const team = await c.call<{ members: Array<{ role: string; agentId: string; status: string; delegations: Array<{ id: string; status: string }> }> }>("get_team", {});
+  for (const member of team.members.filter((m) => m.status === "active")) {
+    if (!member.delegations.length) {
+      const titles: Record<string, string> = { builder: "Implement the feature", reviewer: "Review the interfaces", researcher: "Research the options" };
+      await c.call("delegate", { role: member.role, title: titles[member.role] ?? `Work as ${member.role}`, task: `Complete the ${member.role} scope, respect team file ownership and report the result.`, readonly: member.role === "researcher" });
+    } else if (member.delegations.some((d) => d.status === "failed")) {
+      await c.call("replace_member", { role: member.role, agent: "fake-claude", model: "demo-replacement-builder", reason: "The first member hit an integration mismatch; a different agent will take over with its progress summary." });
+      c.text("The builder failed. I proposed a replacement; approving it transfers the existing task and recorded progress."); return;
+    }
+  }
+  c.text(team.members.some((m) => m.delegations.some((d) => ["queued", "running"].includes(d.status))) ? "The approved team is working in parallel. I will integrate its results." : "I have integrated the team results and verified the completed work, including the reassigned implementation.");
 }

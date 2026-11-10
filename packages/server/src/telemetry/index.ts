@@ -11,6 +11,12 @@ export function exportRun(store: Store, id: string, format: ExportFormat): strin
   const walk = (parent: string | null, depth: number): void => {
     for (const n of s.nodes.filter((n) => n.parentNodeId === parent)) { lines.push(`${"  ".repeat(depth)}- **${n.title}** (${n.agentId}) — ${n.status}`); walk(n.id, depth + 1); }
   }; walk(null, 0);
+  if (s.run.team) {
+    lines.push("", "## Team roster", "", `Mode: ${s.run.policy.mode ?? "dynamic"}${s.run.team.presetName ? ` · Preset: ${s.run.team.presetName}` : ""}`, "", "| Role | Agent / model | Status | Responsibilities |", "| --- | --- | --- | --- |");
+    for (const m of s.run.team.members) lines.push(`| ${m.role} | ${m.agentId}${m.model ? ` / ${m.model}` : ""} | ${m.status} | ${(m.responsibilities ?? "").replaceAll("|", "\\|").replaceAll("\n", " ")} |`);
+    lines.push("", "### Team change history", "");
+    for (const c of s.run.team.changes) lines.push(`- ${c.at} · ${c.kind} · ${c.by}${c.memberId ? ` · ${c.memberId}` : ""}${c.reason ? ` · ${c.reason}` : ""}`);
+  }
   for (const d of s.delegations) {
     lines.push("", `## ${d.brief.title}`, "", d.brief.task);
     if (d.brief.context) lines.push("", `Context: ${d.brief.context}`);
@@ -30,9 +36,9 @@ function otlp(s: RunSnapshot): unknown {
   const usage = (u: UsageTotals): Record<string, number> => ({ "gen_ai.usage.input_tokens": u.inputTokens, "gen_ai.usage.output_tokens": u.outputTokens, "gen_ai.usage.cached_input_tokens": u.cachedInputTokens, "baton.cost_usd": u.costUsd });
   const span = (id: string, parent: string | undefined, name: string, start: string, end: string | undefined, attrs: Record<string, string | number | boolean | undefined>, failed = false): unknown => ({ traceId, spanId: hash(id, 16), ...(parent ? { parentSpanId: hash(parent, 16) } : {}), name, kind: 1, startTimeUnixNano: nano(start), endTimeUnixNano: nano(end ?? timestamp), attributes: attributes(attrs), status: { code: failed ? 2 : end ? 1 : 0 } });
   const spans = [
-    ...s.nodes.map((n) => span(n.id, n.parentNodeId ?? undefined, `invoke_agent ${n.agentId}`, n.createdAt, n.endedAt, { "gen_ai.operation.name": "invoke_agent", "gen_ai.system": n.agentId, "gen_ai.request.model": n.model, "baton.node.id": n.id, "baton.status": n.status, ...usage(n.usage) }, n.status === "failed")),
+    ...s.nodes.map((n) => span(n.id, n.parentNodeId ?? undefined, `invoke_agent ${n.agentId}`, n.createdAt, n.endedAt, { "gen_ai.operation.name": "invoke_agent", "gen_ai.system": n.agentId, "gen_ai.request.model": n.model, "baton.node.id": n.id, "baton.team.role": n.role, "baton.team.member_id": n.memberId, "baton.status": n.status, ...usage(n.usage) }, n.status === "failed")),
     ...s.turns.map((t) => span(t.id, t.nodeId, `turn ${t.trigger}`, t.startedAt, t.endedAt, { "baton.turn.trigger": t.trigger, "gen_ai.usage.input_tokens": t.usage?.inputTokens, "gen_ai.usage.output_tokens": t.usage?.outputTokens, "baton.status": t.status }, t.status === "failed")),
     ...s.toolSpans.map((t) => span(t.id, t.turnId ?? t.nodeId, `execute_tool ${t.name}`, t.startedAt, t.endedAt, { "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": t.name, "gen_ai.tool.call.id": t.callId, "baton.status": t.status }, t.status === "failed")),
   ];
-  return { resourceSpans: [{ resource: { attributes: attributes({ "service.name": "baton", "service.version": "0.1.0" }) }, scopeSpans: [{ scope: { name: "baton", version: "0.1.0" }, spans }] }] };
+  return { resourceSpans: [{ resource: { attributes: attributes({ "service.name": "baton", "service.version": "0.1.0", "baton.team": s.run.team ? JSON.stringify(s.run.team) : undefined, "baton.collaboration.mode": s.run.policy.mode ?? "dynamic" }) }, scopeSpans: [{ scope: { name: "baton", version: "0.1.0" }, spans }] }] };
 }

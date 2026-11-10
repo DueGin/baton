@@ -17,7 +17,7 @@ async function setup(scripts: Record<string, FakeScript | FakeDriverOptions>, op
   const server = await startServer({ home, port: 0, registry: new FakeDriverRegistry(scripts), deliveryDebounceMs: 20, ...options }); servers.push(server); return server;
 }
 async function until(test: () => boolean, timeout = 4000): Promise<void> { const end = Date.now() + timeout; while (!test()) { if (Date.now() > end) throw new Error("Timed out waiting for condition"); await delay(10); } }
-async function create(server: BatonServer, agent = "root", policy = {}): Promise<RunSnapshot> { return server.kernel.createRun({ agent, cwd: tmpdir(), prompt: "start", policy }); }
+async function create(server: BatonServer, agent = "root", policy = {}): Promise<RunSnapshot> { return server.kernel.createRun({ agent, cwd: tmpdir(), prompt: "start", policy: { teamApproval: false, ...policy } }); }
 function children(server: BatonServer, id: string): DelegationRecord[] { return server.store.snapshot(id).delegations; }
 const idle: FakeScript = (c) => { c.text("Done."); };
 
@@ -137,8 +137,8 @@ describe("kernel over real HTTP MCP", () => {
     const server = await setup({ root: async (c) => { await c.call("delegate", { agent: "child", title: "child", task: "x" }); await c.sleep(10000); }, child: async (c) => { await c.call("delegate", { agent: "leaf", title: "leaf", task: "x" }); await c.sleep(10000); }, leaf: async (c) => { await c.sleep(10000); } });
     const run = await create(server); await until(() => children(server, run.run.id).length === 2);
     const [first, second] = children(server, run.run.id);
-    for (const tool of ["send", "cancel", "get_result", "wait"] as const) {
-      const args = tool === "wait" ? { delegationIds: [second!.id], timeoutSec: 1 } : { delegationId: second!.id, message: "x" };
+    for (const tool of ["send", "cancel", "get_result", "wait", "reassign"] as const) {
+      const args = tool === "wait" ? { delegationIds: [second!.id], timeoutSec: 1 } : { delegationId: second!.id, message: "x", role: "leaf", reason: "x" };
       await expect(server.kernel.tool(run.run.rootNodeId, tool, args)).rejects.toThrow(/direct child/);
     }
     await expect(server.kernel.tool(run.run.rootNodeId, "report_result", { status: "success", summary: "x" })).rejects.toThrow(/Root/);
@@ -189,7 +189,7 @@ describe("lifecycle and demo", () => {
   it("runs the shipped demo with parallel agents, grandchild, permission and failed child", async () => {
     const home = await mkdtemp(join(tmpdir(), "baton-test-")); homes.push(home);
     const server = await startServer({ home, port: 0, fake: true, deliveryDebounceMs: 30 }); servers.push(server);
-    const run = await server.kernel.createRun({ agent: "fake-claude", cwd: tmpdir(), prompt: "demo", policy: { autoApprove: true } });
+    const run = await server.kernel.createRun({ agent: "fake-claude", cwd: tmpdir(), prompt: "legacy demo", policy: { autoApprove: true, teamApproval: false } });
     await until(() => {
       const snapshot = server.store.snapshot(run.run.id);
       return snapshot.nodes.length === 5 && snapshot.delegations.every((d) => ["completed", "failed"].includes(d.status)) && snapshot.run.status === "idle";
