@@ -17,6 +17,14 @@ export function exportRun(store: Store, id: string, format: ExportFormat): strin
     lines.push("", "### Team change history", "");
     for (const c of s.run.team.changes) lines.push(`- ${c.at} · ${c.kind} · ${c.by}${c.memberId ? ` · ${c.memberId}` : ""}${c.reason ? ` · ${c.reason}` : ""}`);
   }
+  if (s.questions.length) {
+    lines.push("", "## Questions", "");
+    for (const q of s.questions) lines.push(`- ${q.askedAt} · ${q.nodeId} · ${q.status}${q.blocking ? " · blocking" : ""}: ${q.question}${q.answer ? `\n  Answer: ${q.answer}` : ""}`);
+  }
+  if (s.escalations.length) {
+    lines.push("", "## Escalations", "");
+    for (const e of s.escalations) lines.push(`- ${e.createdAt} · ${e.kind} · ${e.status}: ${e.detail}${e.resolution ? `\n  Resolution: ${e.resolution}${e.note ? ` · ${e.note}` : ""}` : ""}${e.pendingMessage ? `\n  Pending message: ${e.pendingMessage}` : ""}`);
+  }
   for (const d of s.delegations) {
     lines.push("", `## ${d.brief.title}`, "", d.brief.task);
     if (d.brief.context) lines.push("", `Context: ${d.brief.context}`);
@@ -40,5 +48,5 @@ function otlp(s: RunSnapshot): unknown {
     ...s.turns.map((t) => span(t.id, t.nodeId, `turn ${t.trigger}`, t.startedAt, t.endedAt, { "baton.turn.trigger": t.trigger, "gen_ai.usage.input_tokens": t.usage?.inputTokens, "gen_ai.usage.output_tokens": t.usage?.outputTokens, "baton.status": t.status }, t.status === "failed")),
     ...s.toolSpans.map((t) => span(t.id, t.turnId ?? t.nodeId, `execute_tool ${t.name}`, t.startedAt, t.endedAt, { "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": t.name, "gen_ai.tool.call.id": t.callId, "baton.status": t.status }, t.status === "failed")),
   ];
-  return { resourceSpans: [{ resource: { attributes: attributes({ "service.name": "baton", "service.version": "0.1.0", "baton.team": s.run.team ? JSON.stringify(s.run.team) : undefined, "baton.collaboration.mode": s.run.policy.mode ?? "dynamic" }) }, scopeSpans: [{ scope: { name: "baton", version: "0.1.0" }, spans }] }] };
+  return { resourceSpans: [{ resource: { attributes: attributes({ "service.name": "baton", "service.version": "0.1.0", "baton.questions": JSON.stringify(s.questions), "baton.escalations": JSON.stringify(s.escalations), "baton.team": s.run.team ? JSON.stringify(s.run.team) : undefined, "baton.collaboration.mode": s.run.policy.mode ?? "dynamic" }) }, scopeSpans: [{ scope: { name: "baton", version: "0.1.0" }, spans }] }] };
 }

@@ -44,3 +44,12 @@ describe("systemPrompt", () => {
     expect(text).not.toContain("Delegate when part of your work");
   });
 });
+
+it("keeps member routing and repository boundaries explicit", () => {
+  const text = systemPrompt(child, policy);
+  expect(text).toContain("Modify only the files assigned to you");
+  expect(text).toContain("git commit, push, merge, rebase, checkout, reset or stash");
+  expect(text).toContain("Investigate missing information");
+  expect(text).toContain("ask_human");
+  expect(systemPrompt(root, policy)).toContain("Team size limit: 5");
+});

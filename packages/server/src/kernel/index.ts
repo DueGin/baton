@@ -1,10 +1,12 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
-import { BATON_TOOLS, LEAD_ONLY_TOOLS, emptyUsage, type AgentEntry, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionRequest, type PermissionResponse, type ReportResultInput, type FormTeamInput, type ReplaceMemberInput, type ReassignInput, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
+import { BATON_TOOLS, LEAD_ONLY_TOOLS, emptyUsage, type AgentEntry, type AskHumanInput, type PermissionDecision, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionRequest, type PermissionResponse, type ReportResultInput, type FormTeamInput, type ReplaceMemberInput, type ReassignInput, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
 import type { DriverEvent, DriverRegistry, DriverSession, OpenSessionSpec } from "../driver/types.js";
 import { Store } from "../store/index.js";
 import { briefPrompt, correctionPrompt, resultsPrompt, systemPrompt } from "./prompts.js";
 import { Teams, type ResolvedMember } from "./teams.js";
+import { HumanInteraction } from "./human.js";
+import { PermissionRules, HUMAN_DENIAL } from "./permission-rules.js";
 import { validateSchema } from "./schema.js";
 
 /** True when a permission request is for one of baton's own MCP tools (Claude names them
@@ -15,7 +17,7 @@ export function isBatonToolPermission(request: PermissionRequest): boolean {
   const server = request.input?.serverName ?? request.input?.server_name ?? request.input?.server;
   return server === "baton";
 }
-export const DEFAULT_POLICY: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "dynamic", teamApproval: true };
+export const DEFAULT_POLICY: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "dynamic", teamApproval: true, maxTeamSize: 5, stallMinutes: 10, maxRoundsPerDelegation: 3 };
 const now = (): string => new Date().toISOString();
 const active = (status: string): boolean => ["starting", "running", "waiting_permission", "queued"].includes(status);
 const done = (d: DelegationRecord): boolean => ["completed", "failed", "canceled", "replaced"].includes(d.status);
@@ -25,9 +27,9 @@ interface Runtime {
   turnId?: string; driverTurnId?: string; report?: ReportResultInput; finalText: string; corrections: number;
   usage: UsageTotals; chain: Promise<void>; queued: Array<{ text: string; trigger: TurnTrigger }>;
   pendingItem?: ItemRecord; itemTimer?: NodeJS.Timeout; lastItem?: ItemRecord; closed: boolean;
-  idleTimer?: NodeJS.Timeout;
+  idleTimer?: NodeJS.Timeout; stallTimer?: NodeJS.Timeout;
 }
-export interface KernelOptions { baseUrl: string; maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number }
+export interface KernelOptions { baseUrl: string; maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number }
 export class Kernel {
   private runtimes = new Map<string, Runtime>();
   private identities = new Map<string, string>();
@@ -37,8 +39,18 @@ export class Kernel {
   private canceling = new Set<string>();
   private delivering = new Set<string>();
   private replacing = new Set<string>();
+  private decidingPermissions = new Set<string>();
   readonly teams: Teams;
+  readonly human: HumanInteraction;
+  readonly rules: PermissionRules;
   constructor(readonly store: Store, readonly registry: DriverRegistry, readonly options: KernelOptions) {
+    this.rules = new PermissionRules(store);
+    this.human = new HumanInteraction(store, {
+      activity: (id, activity) => this.patchNode(id, { activity }),
+      enqueue: (id, text) => this.enqueue(id, text),
+      cancel: (id, reason) => this.cancelNode(id, reason),
+      followup: (id, text) => this.sendFollowup(id, text),
+    });
     this.teams = new Teams(store, registry, {
       cancelForReplacement: (id, reason) => { const d = this.store.node(id).delegationId; if (d) this.replacing.add(d); return this.cancelNode(id, reason, true); },
       create: (id, input, target, replaces) => this.createDelegation(id, input, target, replaces),
@@ -49,9 +61,10 @@ export class Kernel {
         this.patchDelegation(old.id, { status: "replaced", replacedBy: replacement, replaceReason: reason, endedAt: now() });
       },
       release: (runId, proposalId) => this.releaseProposal(runId, proposalId),
-      notify: (id, text) => { this.store.queueNotice(randomUUID(), id, this.store.node(id).runId, text); this.scheduleDelivery(id); },
+      notify: (id, text) => this.enqueue(id, text),
     });
   }
+  private enqueue(id: string, text: string): void { this.store.queueNotice(randomUUID(), id, this.store.node(id).runId, text); this.scheduleDelivery(id); }
   private emit(runId: string, event: RunEvent): void { this.store.append(runId, event); }
   private patchNode(id: string, patch: Partial<NodeRecord>): void {
     const n = this.store.node(id);
@@ -62,6 +75,7 @@ export class Kernel {
     this.emit(n.runId, Object.values(patch).some((value) => value === undefined)
       ? { type: "node.created", node: next }
       : { type: "node.updated", nodeId: id, patch: { ...patch, updatedAt: next.updatedAt } });
+    if (patch.status && ["completed", "failed", "canceled", "replaced"].includes(patch.status)) this.human.cancelQuestions(id);
   }
   private patchDelegation(id: string, patch: Partial<DelegationRecord>): void {
     const d = this.store.delegation(id);
@@ -94,6 +108,7 @@ export class Kernel {
       for (const t of s.turns) if (t.status === "running") this.emit(run.id, { type: "turn.updated", turnId: t.id, patch: { status: "interrupted", endedAt: now(), error: "Daemon restarted" } });
       for (const p of s.permissions) if (p.status === "pending") this.emit(run.id, { type: "permission", permission: { ...p, status: "expired", resolvedAt: now() } });
       for (const span of s.toolSpans) if (span.status === "running") this.emit(run.id, { type: "tool.span", span: { ...span, status: "canceled", endedAt: now() } });
+      for (const n of s.nodes) this.human.refreshActivity(n.id);
       this.updateRun(run.id);
       for (const parentId of new Set(s.delegations.filter((d) => done(d) && d.result && !d.deliveredAt).map((d) => d.fromNodeId))) this.scheduleDelivery(parentId);
     }
@@ -122,6 +137,7 @@ export class Kernel {
     if (policy.mode === "preset" && !preset) throw new Error("Preset mode requires teamPresetId");
     if (input.team && policy.mode !== "dynamic") throw new Error("Initial team is only supported in dynamic mode");
     const members = await this.teams.validateMembers(preset?.members ?? input.team ?? []);
+    if (members.length > (policy.maxTeamSize ?? 5)) throw new Error(`Team size exceeds maxTeamSize (${policy.maxTeamSize ?? 5})`);
     await this.available(agent); this.checkGlobalLimit();
     const runId = randomUUID(), nodeId = randomUUID(), ts = now();
     this.emit(runId, { type: "run.created", run: { id: runId, rootNodeId: nodeId, title: input.title || input.prompt.slice(0, 100), cwd: input.cwd, status: "active", policy, createdAt: ts, updatedAt: ts, usage: emptyUsage() } });
@@ -136,12 +152,16 @@ export class Kernel {
     if (policy.mode !== undefined && !["dynamic", "preset", "solo"].includes(policy.mode)) throw new Error("Invalid collaboration mode");
     const { delegation: _legacy, ...normalized } = policy as RunPolicy & { delegation?: unknown };
     if (policy.teamApproval !== undefined && typeof policy.teamApproval !== "boolean") throw new Error("Invalid teamApproval policy");
-    return { ...normalized, mode: normalized.mode ?? "dynamic", teamApproval: normalized.teamApproval ?? true };
+    for (const key of ["maxTeamSize", "maxRoundsPerDelegation"] as const) if (policy[key] !== undefined && (!Number.isInteger(policy[key]) || policy[key]! < 1)) throw new Error(`Invalid ${key}`);
+    if (policy.stallMinutes !== undefined && (!Number.isFinite(policy.stallMinutes) || policy.stallMinutes <= 0)) throw new Error("Invalid stallMinutes");
+    return { ...DEFAULT_POLICY, ...normalized, mode: normalized.mode ?? "dynamic", teamApproval: normalized.teamApproval ?? true };
   }
   patchRun(id: string, input: PatchRunRequest): RunSnapshot {
     const s = this.store.snapshot(id);
     if (input.title !== undefined && (typeof input.title !== "string" || !input.title.trim())) throw new Error("Invalid title");
-    this.emit(id, { type: "run.updated", patch: { ...(input.title ? { title: input.title } : {}), policy: this.validatePolicy({ ...s.run.policy, ...input.policy, mode: s.run.policy.mode, teamApproval: s.run.policy.teamApproval }), updatedAt: now() } });
+    if (input.policy?.maxTeamSize !== undefined && input.policy.maxTeamSize < (s.run.team?.members.filter((m) => m.status === "active").length ?? 0)) throw new Error("maxTeamSize cannot be smaller than the active roster");
+    this.emit(id, { type: "run.updated", patch: { ...(input.title ? { title: input.title } : {}), policy: this.validatePolicy({ ...s.run.policy, ...input.policy, mode: s.run.policy.mode, teamApproval: input.policy?.teamApproval ?? s.run.policy.teamApproval }), updatedAt: now() } });
+    if (input.policy?.stallMinutes !== undefined) for (const n of s.nodes) if (this.runtimes.get(n.id)?.turnId) this.armStall(n.id);
     if (input.policy?.autoApprove) for (const p of s.permissions) if (p.status === "pending") void this.respondPermission(p.id, { behavior: "allow" }, "policy").catch((e: unknown) => this.log(id, e));
     return this.store.snapshot(id);
   }
@@ -158,13 +178,13 @@ export class Kernel {
       const n = this.store.node(id), driver = this.registry.get(n.agentId);
       if (!driver) throw new Error(`Agent unavailable: ${n.agentId}`);
       const run = this.store.snapshot(n.runId).run;
-      const solo = run.policy.mode === "solo";
-      if (solo) this.identities.delete(rt.token);
-      const spec: OpenSessionSpec = { cwd: n.cwd, model: n.model, modeId: n.modeId, thinking: n.thinking, title: n.title, systemPrompt: systemPrompt(n, run.policy, (await this.registry.detect()).filter((a) => a.status === "ready" && a.enabled), run.team), mcpServers: solo ? {} : { baton: { type: "http" as const, url: `${this.options.baseUrl}/mcp/n/${rt.token}` } } };
+
+      const spec: OpenSessionSpec = { cwd: n.cwd, model: n.model, modeId: n.modeId, thinking: n.thinking, title: n.title, systemPrompt: systemPrompt(n, run.policy, (await this.registry.detect()).filter((a) => a.status === "ready" && a.enabled), run.team), mcpServers: { baton: { type: "http" as const, url: `${this.options.baseUrl}/mcp/n/${rt.token}` } } };
       const session = n.persistence !== undefined && driver.capabilities.resume ? await driver.resume(n.persistence, spec) : await driver.open(spec);
       if (rt.closed) { await session.close(); throw new Error("Node session closed during startup"); }
       rt.session = session;
       rt.unsubscribe = session.subscribe((event) => {
+        if (!rt.closed && !this.stopped) this.armStall(id);
         rt.chain = rt.chain.then(() => this.onEvent(id, event)).catch((error: unknown) => { this.log(n.runId, error, id); this.failNode(id, error); });
       });
       const info = await session.runtimeInfo();
@@ -189,7 +209,7 @@ export class Kernel {
     this.patchNode(id, { status: "running", activity: "Thinking…", turns: n.turns + 1, error: undefined, endedAt: undefined });
     this.addItem(id, { type: "user_message", text });
     if (n.delegationId) this.patchDelegation(n.delegationId, { status: "running", startedAt: now(), endedAt: undefined, ...(n.status === "completed" || n.status === "failed" ? { deliveredAt: undefined, deliveredVia: undefined, result: undefined } : {}) });
-    this.updateRun(n.runId);
+    this.updateRun(n.runId); this.armStall(id);
     try {
       const started = await session.startTurn(text); rt.driverTurnId = started.turnId;
       this.emit(n.runId, { type: "turn.updated", turnId, patch: { driverTurnId: started.turnId } });
@@ -283,11 +303,12 @@ export class Kernel {
   async tool(nodeId: string, name: BatonToolName, raw: unknown): Promise<unknown> {
     if (this.canceling.has(nodeId) || this.stopped) throw new Error("Node is canceling or daemon is stopping");
     const node = this.store.node(nodeId);
-    if (this.store.snapshot(node.runId).run.policy.mode === "solo") throw new Error("Solo runs have no baton tools and cannot delegate");
+    if (name !== "ask_human" && this.store.snapshot(node.runId).run.policy.mode === "solo") throw new Error("Solo runs have no baton tools and cannot delegate");
     if (LEAD_ONLY_TOOLS.includes(name) && node.parentNodeId !== null) throw new Error(`${name} is lead only`);
     const input = BATON_TOOLS[name].input.parse(raw) as Record<string, unknown>;
     switch (name) {
       case "list_agents": return this.agents();
+      case "ask_human": { if (["completed", "failed", "canceled", "replaced"].includes(node.status)) throw new Error("Node is terminal"); return this.human.ask(node, input as unknown as AskHumanInput); }
       case "get_team": return this.teams.get(node.runId);
       case "form_team": {
         const form = input as unknown as FormTeamInput;
@@ -319,9 +340,9 @@ export class Kernel {
         if (d.blockedByProposal) throw new Error("Delegation is waiting for team approval");
         if (["canceled", "replaced"].includes(d.status)) throw new Error(`Delegation is ${d.status}${d.replacedBy ? `; replacement: ${d.replacedBy}` : ""}`);
         this.budget(d.runId);
-        this.patchDelegation(d.id, { round: d.round + 1, result: undefined, status: "running", deliveredAt: undefined, deliveredVia: undefined, endedAt: undefined });
-        this.runtime(d.toNodeId).corrections = 0;
-        await this.message(d.toNodeId, String(input.message), "followup"); return { sent: true, round: d.round + 1 };
+        const maximum = (this.store.snapshot(d.runId).run.policy.maxRoundsPerDelegation ?? 3) + this.store.extraRounds(d.id);
+        if (d.round + 1 > maximum) return this.human.limit(d.id, String(input.message), maximum);
+        await this.sendFollowup(d.id, String(input.message)); return { sent: true, round: d.round + 1 };
       }
       case "cancel": {
         const d = this.own(nodeId, String(input.delegationId));
@@ -338,6 +359,21 @@ export class Kernel {
       }
       case "wait": return this.wait(nodeId, input);
     }
+  }
+  private async sendFollowup(id: string, message: string): Promise<void> {
+    const d = this.store.delegation(id); this.budget(d.runId);
+    if (["canceled", "replaced"].includes(d.status)) throw new Error(`Delegation is ${d.status}`);
+    this.patchDelegation(d.id, { round: d.round + 1, result: undefined, status: "running", deliveredAt: undefined, deliveredVia: undefined, endedAt: undefined });
+    this.runtime(d.toNodeId).corrections = 0;
+    await this.message(d.toNodeId, message, "followup");
+  }
+  private armStall(id: string): void {
+    const rt = this.runtime(id); clearTimeout(rt.stallTimer);
+    if (!rt.turnId || this.stopped) return;
+    const n = this.store.node(id);
+    const ms = this.options.stallTimeoutMs ?? (this.store.snapshot(n.runId).run.policy.stallMinutes ?? 10) * 60000;
+    rt.stallTimer = setTimeout(() => { rt.stallTimer = undefined; if (rt.turnId && !rt.closed && !this.canceling.has(id) && !this.stopped) this.human.stall(this.store.node(id), ms); }, ms);
+    rt.stallTimer.unref();
   }
   private wait(nodeId: string, input: Record<string, unknown>): Promise<unknown> {
     const n = this.store.node(nodeId), s = this.store.snapshot(n.runId);
@@ -370,12 +406,13 @@ export class Kernel {
     if (this.stopped) return;
     const rt = this.runtime(id), n = this.store.node(id);
     if (rt.closed || ["canceled", "replaced"].includes(n.status) || this.canceling.has(id)) return;
+    this.armStall(id);
     if ((event.type === "turn_completed" || event.type === "turn_failed" || event.type === "turn_canceled" || event.type === "item" || event.type === "usage") && "turnId" in event && event.turnId && rt.driverTurnId && event.turnId !== rt.driverTurnId) return;
     switch (event.type) {
       case "session": this.patchNode(id, { persistence: rt.session?.persistence() ?? undefined }); break;
       case "turn_started": if (rt.turnId) { rt.driverTurnId = event.turnId; this.emit(n.runId, { type: "turn.updated", turnId: rt.turnId, patch: { driverTurnId: event.turnId } }); } break;
       // The kernel records every prompt it sends as a user_message itself; drop provider echoes.
-      case "item": if (event.item.type !== "user_message") this.addItem(id, event.item, event.timestamp); break;
+      case "item": if (event.item.type !== "user_message") this.addItem(id, event.item, event.timestamp); this.human.refreshActivity(id); break;
       case "usage": this.usage(id, event.usage); break;
       case "turn_completed": await this.finishTurn(id, "completed", event.usage); break;
       case "turn_failed": await this.finishTurn(id, "failed", undefined, event.error); break;
@@ -384,7 +421,13 @@ export class Kernel {
         const p: PermissionRecord = { id: `${id}:${event.request.id}`, runId: n.runId, nodeId: id, requestId: event.request.id, request: event.request, status: "pending", requestedAt: now() };
         this.emit(n.runId, { type: "permission", permission: p }); this.patchNode(id, { status: "waiting_permission", activity: event.request.title || event.request.name });
         // baton's own delegation tools never need a human: they only act on this node's own delegations.
-        if (isBatonToolPermission(event.request) || this.store.snapshot(n.runId).run.policy.autoApprove) await this.respondPermission(p.id, { behavior: "allow" }, "policy"); break;
+        if (isBatonToolPermission(event.request)) await this.respondPermission(p.id, { behavior: "allow" }, "policy");
+        else {
+          const rule = this.rules.match(event.request, n);
+          if (rule) await this.respondPermission(p.id, { behavior: rule.decision }, "rule", undefined, rule.id);
+          else if (this.store.snapshot(n.runId).run.policy.autoApprove) await this.respondPermission(p.id, { behavior: "allow" }, "policy");
+        }
+        break;
       }
       case "permission_resolved": {
         const p = this.store.snapshot(n.runId).permissions.find((p) => p.id === `${id}:${event.requestId}`);
@@ -463,10 +506,14 @@ export class Kernel {
     if (usage) this.usage(id, usage);
     this.flushItem(id);
     this.patchNode(id, { persistence: rt.session?.persistence() ?? undefined });
-    const turnId = rt.turnId; rt.turnId = undefined;
+    const turnId = rt.turnId; rt.turnId = undefined; clearTimeout(rt.stallTimer);
     this.emit(n.runId, { type: "turn.updated", turnId, patch: { status, endedAt: now(), usage: { inputTokens: rt.usage.inputTokens, cachedInputTokens: rt.usage.cachedInputTokens, outputTokens: rt.usage.outputTokens, totalCostUsd: rt.usage.costUsd }, error } });
     for (const p of this.store.snapshot(n.runId).permissions) if (p.nodeId === id && p.status === "pending") this.emit(n.runId, { type: "permission", permission: { ...p, status: "expired", resolvedAt: now() } });
     for (const span of this.store.snapshot(n.runId).toolSpans) if (span.nodeId === id && span.status === "running") this.emit(n.runId, { type: "tool.span", span: { ...span, status: status === "completed" ? "completed" : status, endedAt: now() } });
+    const blocking = this.store.snapshot(n.runId).questions.find((q) => q.nodeId === id && q.blocking && q.status === "pending");
+    if (status === "completed" && blocking && !rt.report) {
+      this.patchNode(id, { status: "idle", activity: `等你回答: ${blocking.question}` }); this.updateRun(n.runId); this.armIdle(id); await this.deliver(id); return;
+    }
     if (n.delegationId) {
       const d = this.store.delegation(n.delegationId);
       const result: DelegationResult = { status: status === "completed" ? rt.report?.status ?? "success" : "failed", summary: rt.report?.summary ?? (rt.finalText || error || "No final response"), result: rt.report?.result as JsonValue | undefined, artifacts: rt.report?.artifacts, reported: !!rt.report, finalText: rt.finalText, error };
@@ -480,6 +527,7 @@ export class Kernel {
       this.patchNode(id, { status: finalStatus, endedAt: now(), activity: result.summary.slice(0, 120), error: result.error });
       this.patchDelegation(d.id, { status: finalStatus, result, endedAt: now() }); this.scheduleDelivery(d.fromNodeId);
     } else this.patchNode(id, { status: status === "completed" ? "idle" : status, activity: status === "completed" ? "Idle" : error, error });
+    this.human.refreshActivity(id);
     this.updateRun(n.runId);
     this.armIdle(id);
     if (rt.queued.length && !rt.closed) {
@@ -490,7 +538,7 @@ export class Kernel {
   private failNode(id: string, error: unknown): void {
     const n = this.store.node(id); if (["canceled", "replaced"].includes(n.status) || this.canceling.has(id) || this.stopped) return;
     const message = error instanceof Error ? error.message : String(error);
-    const rt = this.runtime(id);
+    const rt = this.runtime(id); clearTimeout(rt.stallTimer);
     if (rt.turnId) { this.emit(n.runId, { type: "turn.updated", turnId: rt.turnId, patch: { status: "failed", error: message, endedAt: now() } }); rt.turnId = undefined; }
     this.patchNode(id, { status: "failed", error: message, activity: message, endedAt: now() });
     if (n.delegationId) { const d = this.store.delegation(n.delegationId); this.patchDelegation(d.id, { status: "failed", result: { status: "failed", summary: message, finalText: "", reported: false, error: message }, endedAt: now() }); this.scheduleDelivery(d.fromNodeId); }
@@ -502,7 +550,7 @@ export class Kernel {
       if (rt.turnId) return;
       const n = this.store.node(id);
       const s = this.store.snapshot(n.runId);
-      if (s.run.team?.proposals.some((p) => p.status === "pending") || this.store.notices(id).length || s.nodes.some((node) => active(node.status)) || s.delegations.some((d) => !done(d) || (d.status !== "replaced" && !d.deliveredAt))) { this.armIdle(id); return; }
+      if (s.questions.some((q) => q.nodeId === id && q.status === "pending") || s.run.team?.proposals.some((p) => p.status === "pending") || this.store.notices(id).length || s.nodes.some((node) => active(node.status)) || s.delegations.some((d) => !done(d) || (d.status !== "replaced" && !d.deliveredAt))) { this.armIdle(id); return; }
       void this.closeSession(id).then(() => {
         if (!n.parentNodeId && n.status === "idle") { this.patchNode(id, { status: "completed", endedAt: now() }); this.updateRun(n.runId); }
       }).catch((e: unknown) => this.log(n.runId, e));
@@ -528,7 +576,7 @@ export class Kernel {
     this.delivering.add(parentId);
     try {
     const parent = this.store.node(parentId), rt = this.runtime(parentId);
-    if (parent.status === "canceled" || parent.status === "failed") return;
+    if (["canceled", "failed", "replaced"].includes(parent.status)) return;
     const pending = this.store.snapshot(parent.runId).delegations.filter((d) => d.fromNodeId === parentId && done(d) && d.status !== "replaced" && !this.replacing.has(d.id) && d.result && !d.deliveredAt);
     const notices = this.store.notices(parentId);
     if (!pending.length && !notices.length) return;
@@ -550,23 +598,32 @@ export class Kernel {
     } else {
       // Mark before starting a new provider turn, which can synchronously call get_result.
       for (const d of pending) this.delivered(d, "turn");
-      try { await this.startTurn(parentId, text, "result"); this.store.deleteNotices(notices.map((notice) => notice.id)); }
+      try { await this.startTurn(parentId, text, text.includes("<baton-answer ") ? "user" : "result"); this.store.deleteNotices(notices.map((notice) => notice.id)); }
       catch (error) { for (const d of pending) this.patchDelegation(d.id, { deliveredAt: undefined, deliveredVia: undefined }); throw error; }
     }
     } finally { this.delivering.delete(parentId); }
   }
-  async respondPermission(id: string, response: PermissionResponse, by: "human" | "policy" = "human"): Promise<void> {
+  async respondPermission(id: string, response: PermissionResponse, by: "human" | "policy" | "rule" = "human", remember?: PermissionDecision["remember"], ruleId?: string): Promise<void> {
     const nodeId = id.includes(":") ? id.slice(0, id.indexOf(":")) : undefined;
     const p = nodeId ? this.store.snapshot(this.store.node(nodeId).runId).permissions.find((p) => p.id === id) : this.store.list().flatMap((r) => this.store.snapshot(r.id).permissions).find((p) => p.requestId === id && p.status === "pending");
     if (!p || p.status !== "pending") throw new Error("Pending permission not found");
     if (!response || !["allow", "deny"].includes(response.behavior)) throw new Error("Invalid permission response");
     const session = this.runtime(p.nodeId).session; if (!session) throw new Error("Session unavailable");
-    await session.respondToPermission(p.requestId, response); this.resolvePermission(p, response, by);
+    if (this.decidingPermissions.has(p.id)) throw new Error("Permission decision is already in progress");
+    this.decidingPermissions.add(p.id);
+    try {
+    if (by === "human" && response.behavior === "deny") response = { ...response, message: HUMAN_DENIAL };
+    if (by === "human" && remember) this.rules.remember(p, remember, this.store.node(p.nodeId), response.behavior, false);
+    await session.respondToPermission(p.requestId, response);
+    if (by === "human" && remember) this.rules.remember(p, remember, this.store.node(p.nodeId), response.behavior);
+    this.resolvePermission(p, response, by, ruleId);
+    } finally { this.decidingPermissions.delete(p.id); }
   }
-  private resolvePermission(p: PermissionRecord, response: PermissionResponse, by: "human" | "policy"): void {
-    this.emit(p.runId, { type: "permission", permission: { ...p, status: "resolved", resolution: response, resolvedBy: by, resolvedAt: now() } });
+  private resolvePermission(p: PermissionRecord, response: PermissionResponse, by: "human" | "policy" | "rule", ruleId?: string): void {
+    this.emit(p.runId, { type: "permission", permission: { ...p, status: "resolved", resolution: response, resolvedBy: by, ruleId, resolvedAt: now() } });
     const pending = this.store.snapshot(p.runId).permissions.some((other) => other.nodeId === p.nodeId && other.status === "pending");
     this.patchNode(p.nodeId, { status: pending ? "waiting_permission" : "running", activity: pending ? "Waiting for permission" : "Thinking…" });
+    this.human.refreshActivity(p.nodeId);
   }
   async cancelNode(id: string, reason = "Canceled by human", replacing = false): Promise<void> {
     const n = this.store.node(id), s = this.store.snapshot(n.runId);
@@ -590,7 +647,7 @@ export class Kernel {
   }
   async cancelRun(id: string): Promise<void> { await this.cancelNode(this.store.snapshot(id).run.rootNodeId); }
   private async closeSession(id: string): Promise<void> {
-    const rt = this.runtime(id); clearTimeout(rt.idleTimer); this.identities.delete(rt.token); rt.unsubscribe?.(); rt.closed = true;
+    const rt = this.runtime(id); clearTimeout(rt.idleTimer); clearTimeout(rt.stallTimer); this.identities.delete(rt.token); rt.unsubscribe?.(); rt.closed = true;
     await rt.opening?.catch(() => {});
     await rt.session?.close(); rt.session = undefined;
     for (const finish of this.waits.get(id) ?? []) finish(); this.waits.delete(id);

@@ -4,16 +4,17 @@ import { mkdir, readFile, writeFile, chmod, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ApproveTeamProposalRequest, AddMemberRequest, ReplaceMemberRequest, ReassignRequest, SaveTeamPresetRequest, TeamPresetInput, CreateRunRequest, PatchRunRequest, PermissionDecision, RunEventEnvelope } from "@baton/protocol";
+import type { CreatePermissionRuleRequest, ResolveEscalationRequest, ApproveTeamProposalRequest, AddMemberRequest, ReplaceMemberRequest, ReassignRequest, SaveTeamPresetRequest, TeamPresetInput, CreateRunRequest, PatchRunRequest, PermissionDecision, RunEventEnvelope } from "@baton/protocol";
 import type { DriverRegistry } from "../driver/types.js";
 import { FakeDriverRegistry } from "../driver/fake.js";
 import { Store } from "../store/index.js";
 import { DEFAULT_POLICY, Kernel } from "../kernel/index.js";
 import { handleMcp } from "../mcp/index.js";
+import { Notifications, desktopNotifier, type Notifier } from "../notifications/index.js";
 import { exportRun, type ExportFormat } from "../telemetry/index.js";
 export interface StartServerOptions {
   home?: string; port?: number; registry?: DriverRegistry; fake?: boolean; webDist?: string;
-  maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number;
+  maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; notifier?: Notifier; notificationCoalesceMs?: number;
 }
 export interface BatonServer {
   home: string; port: number; token: string; url: string; server: Server; store: Store; kernel: Kernel;
@@ -50,6 +51,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
   let registry = options.registry;
   if (!registry) registry = options.fake ? new FakeDriverRegistry() : (await import("../driver/paseo-adapter.js")).createPaseoDriverRegistry({ home });
   const store = new Store(join(home, "baton.db"));
+  let desktop = process.platform === "darwin";
+  try { const config = JSON.parse(await readFile(join(home, "config.json"), "utf8")) as { notifications?: { desktop?: boolean } }; if (typeof config.notifications?.desktop === "boolean") desktop = config.notifications.desktop; }
+  catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) { store.close(); throw error; } }
+  const notifications = new Notifications(store, options.notifier ?? (desktop ? desktopNotifier : () => {}), options.notificationCoalesceMs);
   let kernel: Kernel, port = 0;
   const streams = new Set<ServerResponse>();
   const webDist = resolve(options.webDist ?? fileURLToPath(new URL("../../../web/dist", import.meta.url)));
@@ -61,6 +66,17 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
       json(response, status, { error: { code: `HTTP_${status}`, message } });
     });
   });
+  function inboxStream(response: ServerResponse): void {
+    response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache, no-transform", connection: "keep-alive" }); response.flushHeaders(); streams.add(response);
+    let previous = JSON.stringify(store.inbox()), timer: NodeJS.Timeout | undefined;
+    const unsubscribe = store.subscribe(() => {
+      // Coalesce without postponing forever while providers continuously stream items.
+      if (timer) return;
+      timer = setTimeout(() => { timer = undefined; const current = JSON.stringify(store.inbox()); if (current !== previous) { previous = current; response.write('event: changed\ndata: {}\n\n'); } }, 50);
+    });
+    const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), 15000); heartbeat.unref();
+    response.once("close", () => { clearTimeout(timer); clearInterval(heartbeat); unsubscribe(); streams.delete(response); });
+  }
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const host = request.headers.host;
     if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) throw new HttpError(403, "Host not allowed");
@@ -71,6 +87,18 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
     if (path.startsWith("/api/")) {
       const provided = request.headers.authorization?.startsWith("Bearer ") ? request.headers.authorization.slice(7) : (method === "GET" && path.endsWith("/events") ? url.searchParams.get("token") : null);
       if (!provided || Buffer.byteLength(provided) !== Buffer.byteLength(token) || !timingSafeEqual(Buffer.from(provided), Buffer.from(token))) throw new HttpError(401, "Bearer token required");
+      if (method === "GET" && path === "/api/inbox") { json(response, 200, store.inbox()); return; }
+      if (method === "GET" && path === "/api/inbox/events") { inboxStream(response); return; }
+      if (path === "/api/permission-rules") {
+        if (method === "GET") { json(response, 200, store.rules()); return; }
+        if (method === "POST") { json(response, 201, kernel.rules.create(record(await body(request)) as unknown as CreatePermissionRuleRequest)); return; }
+      }
+      const permissionRule = /^\/api\/permission-rules\/([^/]+)$/.exec(path);
+      if (method === "DELETE" && permissionRule) { store.deleteRule(permissionRule[1]!); json(response, 200, { deleted: true }); return; }
+      const question = /^\/api\/questions\/([^/]+)\/answer$/.exec(path);
+      if (method === "POST" && question) { const input = record(await body(request)); json(response, 200, kernel.human.answer(question[1]!, input.answer as string)); return; }
+      const escalation = /^\/api\/escalations\/([^/]+)\/resolve$/.exec(path);
+      if (method === "POST" && escalation) { json(response, 200, await kernel.human.resolve(escalation[1]!, record(await body(request)) as unknown as ResolveEscalationRequest)); return; }
       if (method === "GET" && path === "/api/info") { json(response, 200, { name: "baton", version: "0.1.0", home, port, defaults: DEFAULT_POLICY }); return; }
       if (method === "GET" && path === "/api/agents") { json(response, 200, await kernel.agents()); return; }
       if (method === "POST" && path === "/api/agents/refresh") { await body(request); json(response, 200, await kernel.agents(true)); return; }
@@ -136,7 +164,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
         if (method === "POST" && node[2] === "cancel") { await body(request); await kernel.cancelNode(id); json(response, 200, store.node(id)); return; }
       }
       const permission = /^\/api\/permissions\/([^/]+)$/.exec(path);
-      if (method === "POST" && permission) { const input = record(await body(request)) as unknown as PermissionDecision; await kernel.respondPermission(decodeURIComponent(permission[1]!), input.response); json(response, 200, { accepted: true }); return; }
+      if (method === "POST" && permission) { const input = record(await body(request)) as unknown as PermissionDecision; await kernel.respondPermission(decodeURIComponent(permission[1]!), input.response, "human", input.remember); json(response, 200, { accepted: true }); return; }
       const delegation = /^\/api\/delegations\/([^/]+)$/.exec(path);
       if (method === "GET" && delegation) { json(response, 200, store.delegation(delegation[1]!)); return; }
       throw new HttpError(404, "API route not found");
@@ -154,13 +182,13 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
   }
   try {
     await new Promise<void>((resolveListening, reject) => { server.once("error", reject); server.listen(options.port ?? 7433, "127.0.0.1", () => { server.off("error", reject); resolveListening(); }); });
-  } catch (error) { store.close(); await registry.shutdown(); throw error; }
+  } catch (error) { notifications.close(); store.close(); await registry.shutdown(); throw error; }
   const address = server.address(); if (!address || typeof address === "string") throw new Error("Invalid server address"); port = address.port;
   const url = `http://127.0.0.1:${port}`;
   kernel = new Kernel(store, registry, { ...options, baseUrl: url }); kernel.recover();
   await writeFile(join(home, "daemon.json"), JSON.stringify({ url, port, pid: process.pid }), { mode: 0o600 });
   let closing: Promise<void> | undefined;
   return { home, token, port, url, server, store, kernel, close() {
-    closing ??= (async () => { await kernel.shutdown(); for (const stream of streams) stream.end(); const closed = new Promise<void>((resolveClosed, reject) => server.close((error) => error ? reject(error) : resolveClosed())); server.closeAllConnections(); await closed; store.close(); })(); return closing;
+    closing ??= (async () => { notifications.close(); await kernel.shutdown(); for (const stream of streams) stream.end(); const closed = new Promise<void>((resolveClosed, reject) => server.close((error) => error ? reject(error) : resolveClosed())); server.closeAllConnections(); await closed; store.close(); })(); return closing;
   } };
 }

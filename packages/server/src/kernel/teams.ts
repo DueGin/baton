@@ -37,6 +37,10 @@ export class Teams {
     const a = (await this.registry.detect()).find((a) => a.id === agentId);
     if (!a || a.status !== "ready" || !a.enabled || !this.registry.get(agentId)) throw new Error(`Agent unavailable: ${agentId}`);
   }
+  private checkSize(runId: string, additions: number): void {
+    const run = this.store.snapshot(runId).run;
+    if ((run.team?.members.filter((m) => m.status === "active").length ?? 0) + additions > (run.policy.maxTeamSize ?? 5)) throw new Error(`Team size exceeds maxTeamSize (${run.policy.maxTeamSize ?? 5}); reuse existing members`);
+  }
   async validateMembers(specs: TeamMemberSpec[]): Promise<TeamMemberSpec[]> {
     const entries = z.array(specSchema).max(12).parse(specs);
     if (new Set(entries.map((m) => m.role)).size !== entries.length) throw new Error("Duplicate active roles; use replace_member to change a role");
@@ -52,6 +56,7 @@ export class Teams {
       if ((this.store.snapshot(runId).run.policy.mode ?? "dynamic") !== "dynamic") throw new Error("form_team is only available in dynamic runs");
       const valid = await this.validateMembers(specs), team = this.team(runId);
       if (valid.some((m) => team.members.some((old) => old.status === "active" && old.role === m.role))) throw new Error("Duplicate active role; use replace_member instead");
+      this.checkSize(runId, valid.length);
       if (this.needsApproval(runId)) return this.propose(runId, { kind: team.members.length ? "addition" : "formation", by: "lead", nodeId, rationale, members: valid });
       const first = team.members.length === 0; let next: TeamRecord = { ...team, rationale };
       for (const [index, spec] of valid.entries()) {
@@ -66,7 +71,7 @@ export class Teams {
     return this.addReady(runId, spec, by, input.reason);
   }
   private addReady(runId: string, spec: TeamMemberSpec, by: TeamActor, reason?: string): TeamMember {
-    const team = this.team(runId);
+    const team = this.team(runId); this.checkSize(runId, 1);
     if (team.members.some((m) => m.status === "active" && m.role === spec.role)) throw new Error("Duplicate active role; use replace_member instead");
     const member: TeamMember = { ...spec, id: randomUUID(), status: "active", addedBy: by, reason, addedAt: new Date().toISOString() };
     this.change(runId, { ...team, members: [...team.members, member] }, { kind: "member_added", by, memberId: member.id, reason }); return member;
@@ -109,6 +114,7 @@ export class Teams {
       while (team.members.some((m) => m.role === role)) role = `${base}-${++suffix}`;
       const spec = { role, agentId: input.agent, model: input.model, modeId: input.mode, thinking: input.thinking, responsibilities: input.basis?.responsibilities ?? "Ad-hoc delegated task" };
       if (!input.human && this.needsApproval(runId)) {
+        this.checkSize(runId, 1);
         const proposal = this.propose(runId, { kind: "addition", by: "agent", nodeId: input.nodeId ?? run.rootNodeId, members: [spec], rationale: "Ad-hoc member for direct agent delegation" });
         return { member: { ...spec, id: `${proposal.proposalId}:${role}`, status: "active", addedBy: "agent", addedAt: new Date().toISOString() }, model: spec.model, modeId: spec.modeId, thinking: spec.thinking, proposalId: proposal.proposalId };
       }
@@ -189,6 +195,7 @@ export class Teams {
       const replacement = proposal.replace ? specSchema.parse(request.replacement ?? proposal.replace.with) : undefined;
       if (replacement) { await this.ready(replacement.agentId); if (replacement.role !== proposal.replace?.with.role) throw new Error("Replacement must preserve the existing role; add a new role separately"); }
       const current = this.team(runId);
+      if (approved) this.checkSize(runId, approved.length);
       if (proposal.replace) this.member(runId, proposal.replace.memberId);
       if (approved?.some((spec) => current.members.some((m) => m.status === "active" && m.role === spec.role))) throw new Error("Approved role conflicts with an active member; use replace_member");
       const decision: TeamProposal = { ...proposal, status: "approved", approvedMembers: approved, approvedReplacement: replacement, feedback: request.note, decidedAt: new Date().toISOString() };

@@ -34,7 +34,7 @@ describe("kernel over real HTTP MCP", () => {
     await until(() => children(server, run.run.id).length === 3 && children(server, run.run.id).every((d) => d.status === "completed"));
     await delay(100);
     const snapshot = server.store.snapshot(run.run.id), events = server.store.events(run.run.id);
-    const replay = events.reduce(applyEvent, { run: snapshot.run, nodes: [], delegations: [], turns: [], toolSpans: [], permissions: [], lastSeq: 0 });
+    const replay = events.reduce(applyEvent, { run: snapshot.run, nodes: [], delegations: [], turns: [], toolSpans: [], permissions: [], questions: [], escalations: [], lastSeq: 0 });
     expect(replay).toEqual(snapshot); expect(snapshot.nodes.map((n) => n.depth)).toEqual([0, 1, 2, 3]);
     const rows = snapshot.nodes.flatMap((n) => server.store.items(n.id)); expect(rows.every((r) => r.seq > 0)).toBe(true);
     expect(rows.some((r) => r.item.type === "tool_call" && r.item.detail.type === "baton" && !!r.item.detail.delegationId)).toBe(true);
