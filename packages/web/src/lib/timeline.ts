@@ -21,9 +21,20 @@ export function niceTicks(view: TimeViewport, width: number): number[] {
   for (let value = Math.ceil(view.start / step) * step; value <= view.end; value += step) ticks.push(value);
   return ticks;
 }
+/** Latest timestamp anything happened in the run (used to fit idle runs without stretching to now). */
+function lastActivity(snapshot: RunSnapshot, fallback: number): number {
+  let latest = fallback;
+  const take = (value: string | undefined): void => { if (value) latest = Math.max(latest, Date.parse(value)); };
+  for (const turn of snapshot.turns) { take(turn.startedAt); take(turn.endedAt); }
+  for (const span of snapshot.toolSpans) { take(span.startedAt); take(span.endedAt); }
+  for (const edge of snapshot.delegations) { take(edge.endedAt); take(edge.deliveredAt); }
+  for (const node of snapshot.nodes) take(node.endedAt);
+  return latest;
+}
 export function fitTime(snapshot: RunSnapshot, now: number): TimeViewport {
   const start = Date.parse(snapshot.run.createdAt);
-  const end = snapshot.run.endedAt ? Date.parse(snapshot.run.endedAt) : now;
+  const live = snapshot.nodes.some((node) => node.status === "starting" || node.status === "running" || node.status === "waiting_permission");
+  const end = snapshot.run.endedAt ? Date.parse(snapshot.run.endedAt) : live ? now : lastActivity(snapshot, start);
   const pad = Math.max(1500, (end - start) * 0.04);
   return { start: start - pad, end: Math.max(start + 10000, end) + pad };
 }

@@ -33,7 +33,7 @@ function DelegationEdge(props: EdgeProps) {
 }
 const nodeTypes = { agent: AgentCard };
 const edgeTypes = { delegation: DelegationEdge };
-const fitOptions = { padding: 0.06, minZoom: 0.85, maxZoom: 1.1, duration: 300 };
+const fitOptions = { padding: 0.08, minZoom: 0.45, maxZoom: 1.1, duration: 300 };
 
 export function graphPositions(snapshot: Pick<RunSnapshot, "nodes" | "delegations">): Map<string, { x: number; y: number }> {
   const graph = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
