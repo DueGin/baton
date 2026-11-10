@@ -146,6 +146,7 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
 ## 6. 事件与存储
 
 - **事件信封**：`{ runId, seq, ts, type, ...payload }`，`seq` 在一个 Run 内单调递增。事件类型清单见 `protocol/src/events.ts`。
+- **清空字段**：JSON 里的 `undefined` 会被丢掉，浅 patch 删不掉可选字段。需要清空字段时（例如追问后清掉旧 result），改发对应的 `*.created` 事件整条覆盖，`applyEvent` 对它按 upsert 处理。
 - **写入**：一个事件 = 一个 SQLite 事务，同时完成两件事：①追加到 `events` 表；②更新投影表（`runs`、`nodes`、`delegations`、`turns`、`tool_spans`、`permissions`、`items`）。
 - **assistant 文本**：provider 发来的是增量或"不断增长的整条消息"。内核把它们合并进同一条 item，并按约 100ms 一次合并发出 `item.delta` 事件，避免事件爆炸。
 - **快照**：`GET /api/runs/:id` 从投影表读出 `RunSnapshot`，其中带 `lastSeq`。客户端之后用 SSE 从 `lastSeq` 续订。
@@ -226,6 +227,6 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
 
 | 阶段 | 内容 |
 |---|---|
-| P1（本期） | providers 移植（ACP、Claude、Codex、Pi）；识别本机 agent；内核（委派全流程、级联取消、上限、预算）；MCP；事件存储；REST/SSE；CLI；控制台三个视图和详情；JSON/Markdown 导出 |
+| P1（本期） | providers 移植（ACP、Claude、Codex、Pi）；识别本机 agent；内核（委派全流程、级联取消、上限；超预算时拒绝新的委派和追问，不自动取消）；MCP；事件存储；REST/SSE；CLI；控制台三个视图和详情；JSON/Markdown 导出 |
 | P2 | OTLP 实时推送、父 agent 代审权限、worktree 隔离、profile 能力卡、原生 subagent（Claude Task）显示为虚线节点 |
 | P3 | 协作模式库（MA-00..MA-09）作为跑在内核上的编排程序 |

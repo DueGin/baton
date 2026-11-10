@@ -216,6 +216,8 @@ export interface ToolSpanRecord {
   callId: string;
   name: string;
   kind: string;
+  /** Set when the call is one of baton's own tools acting on a delegation. */
+  delegationId?: string;
   status: "running" | "completed" | "failed" | "canceled";
   /** One-line summary for timeline tooltips (command, file path, query, …). */
   summary?: string;
