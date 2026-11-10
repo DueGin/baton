@@ -1,11 +1,19 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
-import { BATON_TOOLS, emptyUsage, type AgentEntry, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionResponse, type ReportResultInput, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
+import { BATON_TOOLS, emptyUsage, type AgentEntry, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionRequest, type PermissionResponse, type ReportResultInput, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
 import type { DriverEvent, DriverRegistry, DriverSession } from "../driver/types.js";
 import { Store } from "../store/index.js";
 import { briefPrompt, correctionPrompt, resultsPrompt, systemPrompt } from "./prompts.js";
 import { validateSchema } from "./schema.js";
 
+/** True when a permission request is for one of baton's own MCP tools (Claude names them
+ * mcp__baton__*, Codex asks via an MCP elicitation carrying serverName "baton"). */
+export function isBatonToolPermission(request: PermissionRequest): boolean {
+  if (/^(mcp__baton__|baton__|baton\.)/.test(request.name)) return true;
+  if (request.detail?.type === "baton") return true;
+  const server = request.input?.serverName ?? request.input?.server_name ?? request.input?.server;
+  return server === "baton";
+}
 export const DEFAULT_POLICY: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false };
 const now = (): string => new Date().toISOString();
 const active = (status: string): boolean => ["starting", "running", "waiting_permission", "queued"].includes(status);
@@ -263,7 +271,8 @@ export class Kernel {
     switch (event.type) {
       case "session": this.patchNode(id, { persistence: rt.session?.persistence() ?? undefined }); break;
       case "turn_started": if (rt.turnId) { rt.driverTurnId = event.turnId; this.emit(n.runId, { type: "turn.updated", turnId: rt.turnId, patch: { driverTurnId: event.turnId } }); } break;
-      case "item": this.addItem(id, event.item, event.timestamp); break;
+      // The kernel records every prompt it sends as a user_message itself; drop provider echoes.
+      case "item": if (event.item.type !== "user_message") this.addItem(id, event.item, event.timestamp); break;
       case "usage": this.usage(id, event.usage); break;
       case "turn_completed": await this.finishTurn(id, "completed", event.usage); break;
       case "turn_failed": await this.finishTurn(id, "failed", undefined, event.error); break;
@@ -271,7 +280,8 @@ export class Kernel {
       case "permission_requested": {
         const p: PermissionRecord = { id: `${id}:${event.request.id}`, runId: n.runId, nodeId: id, requestId: event.request.id, request: event.request, status: "pending", requestedAt: now() };
         this.emit(n.runId, { type: "permission", permission: p }); this.patchNode(id, { status: "waiting_permission", activity: event.request.title || event.request.name });
-        if (this.store.snapshot(n.runId).run.policy.autoApprove) await this.respondPermission(p.id, { behavior: "allow" }, "policy"); break;
+        // baton's own delegation tools never need a human: they only act on this node's own delegations.
+        if (isBatonToolPermission(event.request) || this.store.snapshot(n.runId).run.policy.autoApprove) await this.respondPermission(p.id, { behavior: "allow" }, "policy"); break;
       }
       case "permission_resolved": {
         const p = this.store.snapshot(n.runId).permissions.find((p) => p.id === `${id}:${event.requestId}`);

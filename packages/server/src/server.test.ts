@@ -115,6 +115,24 @@ describe("kernel over real HTTP MCP", () => {
     const auto = await create(server, "root", { autoApprove: true }); await until(() => server.store.node(auto.run.rootNodeId).status === "idle");
     expect(server.store.snapshot(auto.run.id).permissions[0]).toMatchObject({ resolvedBy: "policy", status: "resolved" });
   });
+  it("auto-allows permission requests for baton's own tools without autoApprove", async () => {
+    const script: FakeScript = async (c) => {
+      await c.permission({ id: "claude-style", name: "mcp__baton__delegate", kind: "tool" });
+      await c.permission({ id: "codex-style", name: "mcp_elicitation", kind: "tool", input: { serverName: "baton" } });
+      c.text("both allowed");
+    };
+    const server = await setup({ root: script }); const run = await create(server);
+    await until(() => server.store.node(run.run.rootNodeId).status === "idle");
+    const permissions = server.store.snapshot(run.run.id).permissions;
+    expect(permissions.map((p) => [p.requestId, p.status, p.resolvedBy])).toEqual([["claude-style", "resolved", "policy"], ["codex-style", "resolved", "policy"]]);
+  });
+  it("ignores provider echoes of user messages (the kernel records prompts itself)", async () => {
+    const script: FakeScript = (c) => { c.item({ type: "user_message", text: "start" }); c.text("ok"); };
+    const server = await setup({ root: script }); const run = await create(server);
+    await until(() => server.store.node(run.run.rootNodeId).status === "idle");
+    const items = server.store.items(run.run.rootNodeId, 0).map((row) => row.item.type);
+    expect(items.filter((type) => type === "user_message")).toHaveLength(1);
+  });
   it("validates ownership, rejects root reports, cascades cancellation and closes all sessions", async () => {
     const server = await setup({ root: async (c) => { await c.call("delegate", { agent: "child", title: "child", task: "x" }); await c.sleep(10000); }, child: async (c) => { await c.call("delegate", { agent: "leaf", title: "leaf", task: "x" }); await c.sleep(10000); }, leaf: async (c) => { await c.sleep(10000); } });
     const run = await create(server); await until(() => children(server, run.run.id).length === 2);
