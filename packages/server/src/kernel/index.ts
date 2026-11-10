@@ -1,0 +1,489 @@
+import { randomBytes, randomUUID } from "node:crypto";
+import { isAbsolute } from "node:path";
+import { BATON_TOOLS, emptyUsage, type AgentEntry, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionResponse, type ReportResultInput, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
+import type { DriverEvent, DriverRegistry, DriverSession } from "../driver/types.js";
+import { Store } from "../store/index.js";
+import { briefPrompt, correctionPrompt, resultsPrompt, SYSTEM_PROMPT } from "./prompts.js";
+import { validateSchema } from "./schema.js";
+
+export const DEFAULT_POLICY: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false };
+const now = (): string => new Date().toISOString();
+const active = (status: string): boolean => ["starting", "running", "waiting_permission", "queued"].includes(status);
+const done = (d: DelegationRecord): boolean => ["completed", "failed", "canceled"].includes(d.status);
+const addUsage = (a: UsageTotals, b: UsageTotals): UsageTotals => ({ inputTokens: a.inputTokens + b.inputTokens, cachedInputTokens: a.cachedInputTokens + b.cachedInputTokens, outputTokens: a.outputTokens + b.outputTokens, costUsd: a.costUsd + b.costUsd });
+interface Runtime {
+  token: string; session?: DriverSession; opening?: Promise<DriverSession>; unsubscribe?: () => void;
+  turnId?: string; driverTurnId?: string; report?: ReportResultInput; finalText: string; corrections: number;
+  usage: UsageTotals; chain: Promise<void>; queued: Array<{ text: string; trigger: TurnTrigger }>;
+  pendingItem?: ItemRecord; itemTimer?: NodeJS.Timeout; lastItem?: ItemRecord; closed: boolean;
+  idleTimer?: NodeJS.Timeout;
+}
+export interface KernelOptions { baseUrl: string; maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number }
+export class Kernel {
+  private runtimes = new Map<string, Runtime>();
+  private identities = new Map<string, string>();
+  private deliveryTimers = new Map<string, NodeJS.Timeout>();
+  private stopped = false;
+  private waits = new Map<string, Set<() => void>>();
+  private canceling = new Set<string>();
+  private delivering = new Set<string>();
+  constructor(readonly store: Store, readonly registry: DriverRegistry, readonly options: KernelOptions) {}
+  private emit(runId: string, event: RunEvent): void { this.store.append(runId, event); }
+  private patchNode(id: string, patch: Partial<NodeRecord>): void {
+    const n = this.store.node(id);
+    if (Object.entries(patch).every(([key, value]) => JSON.stringify(n[key as keyof NodeRecord]) === JSON.stringify(value))) return;
+    const next = { ...n, ...patch, updatedAt: now() };
+    // JSON cannot encode undefined in a shallow patch. The existing upsert events can replace
+    // a record when optional fields must be removed (follow-up / resume).
+    this.emit(n.runId, Object.values(patch).some((value) => value === undefined)
+      ? { type: "node.created", node: next }
+      : { type: "node.updated", nodeId: id, patch: { ...patch, updatedAt: next.updatedAt } });
+  }
+  private patchDelegation(id: string, patch: Partial<DelegationRecord>): void {
+    const d = this.store.delegation(id);
+    this.emit(d.runId, Object.values(patch).some((value) => value === undefined)
+      ? { type: "delegation.created", delegation: { ...d, ...patch } }
+      : { type: "delegation.updated", delegationId: id, patch });
+  }
+  private runtime(id: string): Runtime {
+    let rt = this.runtimes.get(id);
+    if (!rt) {
+      rt = { token: randomBytes(32).toString("hex"), finalText: "", corrections: 0, usage: emptyUsage(), chain: Promise.resolve(), queued: [], closed: false };
+      this.runtimes.set(id, rt); this.identities.set(rt.token, id);
+    }
+    return rt;
+  }
+  identify(token: string): string | undefined { return this.identities.get(token); }
+  async agents(force = false): Promise<Array<AgentEntry & { load: number }>> {
+    const entries = await this.registry.detect({ force });
+    const nodes = this.store.list().flatMap((r) => this.store.snapshot(r.id).nodes);
+    return entries.map((a) => ({ ...a, load: nodes.filter((n) => n.agentId === a.id && active(n.status)).length }));
+  }
+  recover(): void {
+    for (const run of this.store.list()) {
+      const s = this.store.snapshot(run.id);
+      for (const n of s.nodes) if (active(n.status)) this.patchNode(n.id, { status: "interrupted", activity: "Interrupted by daemon restart", error: "Daemon restarted" });
+      for (const d of s.delegations) if (active(d.status)) this.patchDelegation(d.id, { status: "interrupted" });
+      for (const t of s.turns) if (t.status === "running") this.emit(run.id, { type: "turn.updated", turnId: t.id, patch: { status: "interrupted", endedAt: now(), error: "Daemon restarted" } });
+      for (const p of s.permissions) if (p.status === "pending") this.emit(run.id, { type: "permission", permission: { ...p, status: "expired", resolvedAt: now() } });
+      for (const span of s.toolSpans) if (span.status === "running") this.emit(run.id, { type: "tool.span", span: { ...span, status: "canceled", endedAt: now() } });
+      this.updateRun(run.id);
+      for (const parentId of new Set(s.delegations.filter((d) => done(d) && d.result && !d.deliveredAt).map((d) => d.fromNodeId))) this.scheduleDelivery(parentId);
+    }
+  }
+  private async available(agent: string): Promise<AgentEntry> {
+    const entry = (await this.registry.detect()).find((a) => a.id === agent);
+    if (!entry || entry.status !== "ready" || !entry.enabled || !this.registry.get(agent)) throw new Error(`Agent unavailable: ${agent}`);
+    return entry;
+  }
+  private checkGlobalLimit(): void {
+    const count = this.store.list().reduce((sum, r) => sum + this.store.snapshot(r.id).nodes.filter((n) => active(n.status)).length, 0);
+    if (count >= (this.options.maxActiveNodes ?? 12)) throw new Error("Global active node limit reached");
+  }
+  private budget(runId: string): void {
+    const r = this.store.snapshot(runId).run, b = r.policy.budget;
+    if (!b) return;
+    if ((b.maxCostUsd !== undefined && r.usage.costUsd >= b.maxCostUsd) || (b.maxTokens !== undefined && r.usage.inputTokens + r.usage.outputTokens >= b.maxTokens) || (b.maxWallMinutes !== undefined && Date.now() - Date.parse(r.createdAt) >= b.maxWallMinutes * 60000)) throw new Error("Run budget exceeded");
+  }
+  async createRun(input: CreateRunRequest): Promise<RunSnapshot> {
+    if (!input || typeof input.agent !== "string" || typeof input.prompt !== "string" || !input.prompt.trim() || typeof input.cwd !== "string" || !isAbsolute(input.cwd)) throw new Error("agent, nonempty prompt and absolute cwd are required");
+    await this.available(input.agent); this.checkGlobalLimit();
+    const policy = this.validatePolicy({ ...DEFAULT_POLICY, ...input.policy });
+    const runId = randomUUID(), nodeId = randomUUID(), ts = now();
+    this.emit(runId, { type: "run.created", run: { id: runId, rootNodeId: nodeId, title: input.title || input.prompt.slice(0, 100), cwd: input.cwd, status: "active", policy, createdAt: ts, updatedAt: ts, usage: emptyUsage() } });
+    this.emit(runId, { type: "node.created", node: { id: nodeId, runId, parentNodeId: null, delegationId: null, depth: 0, agentId: input.agent, model: input.model, modeId: input.modeId, thinking: input.thinking, title: input.title || input.prompt.slice(0, 100), cwd: input.cwd, status: "starting", createdAt: ts, updatedAt: ts, usage: emptyUsage(), turns: 0 } });
+    try { await this.startTurn(nodeId, input.prompt, "user"); } catch (error) { this.failNode(nodeId, error); }
+    return this.store.snapshot(runId);
+  }
+  private validatePolicy(policy: RunPolicy): RunPolicy {
+    if (!Number.isInteger(policy.maxDepth) || policy.maxDepth < 0 || !Number.isInteger(policy.maxActiveChildren) || policy.maxActiveChildren < 1 || typeof policy.autoApprove !== "boolean") throw new Error("Invalid run policy");
+    if (policy.budget) for (const [key, value] of Object.entries(policy.budget)) if (!["maxCostUsd", "maxTokens", "maxWallMinutes"].includes(key) || typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error("Invalid run budget");
+    return policy;
+  }
+  patchRun(id: string, input: PatchRunRequest): RunSnapshot {
+    const s = this.store.snapshot(id);
+    if (input.title !== undefined && (typeof input.title !== "string" || !input.title.trim())) throw new Error("Invalid title");
+    this.emit(id, { type: "run.updated", patch: { ...(input.title ? { title: input.title } : {}), policy: this.validatePolicy({ ...s.run.policy, ...input.policy }), updatedAt: now() } });
+    if (input.policy?.autoApprove) for (const p of s.permissions) if (p.status === "pending") void this.respondPermission(p.id, { behavior: "allow" }, "policy").catch((e: unknown) => this.log(id, e));
+    return this.store.snapshot(id);
+  }
+  private async session(id: string): Promise<DriverSession> {
+    const rt = this.runtime(id);
+    if (this.stopped) throw new Error("Daemon is shutting down");
+    if (rt.closed) {
+      if (this.store.node(id).status === "canceled") throw new Error("Node session has been closed");
+      rt.closed = false; rt.token = randomBytes(32).toString("hex"); this.identities.set(rt.token, id);
+    }
+    if (rt.session) return rt.session;
+    if (rt.opening) return rt.opening;
+    rt.opening = (async () => {
+      const n = this.store.node(id), driver = this.registry.get(n.agentId);
+      if (!driver) throw new Error(`Agent unavailable: ${n.agentId}`);
+      const spec = { cwd: n.cwd, model: n.model, modeId: n.modeId, thinking: n.thinking, title: n.title, systemPrompt: SYSTEM_PROMPT, mcpServers: { baton: { type: "http" as const, url: `${this.options.baseUrl}/mcp/n/${rt.token}` } } };
+      const session = n.persistence !== undefined && driver.capabilities.resume ? await driver.resume(n.persistence, spec) : await driver.open(spec);
+      if (rt.closed) { await session.close(); throw new Error("Node session closed during startup"); }
+      rt.session = session;
+      rt.unsubscribe = session.subscribe((event) => {
+        rt.chain = rt.chain.then(() => this.onEvent(id, event)).catch((error: unknown) => { this.log(n.runId, error, id); this.failNode(id, error); });
+      });
+      const info = await session.runtimeInfo();
+      this.patchNode(id, { ...(info.model ? { model: info.model } : {}), ...(info.modeId ? { modeId: info.modeId } : {}), persistence: session.persistence() ?? undefined });
+      return session;
+    })();
+    try { return await rt.opening; } finally { rt.opening = undefined; }
+  }
+  private async startTurn(id: string, text: string, trigger: TurnTrigger): Promise<void> {
+    if (this.stopped) return;
+    const rt = this.runtime(id), n = this.store.node(id);
+    if (rt.turnId) { rt.queued.push({ text, trigger }); return; }
+    if (n.status === "canceled" || this.canceling.has(id)) throw new Error("Node is canceled");
+    const session = await this.session(id);
+    if (rt.turnId) { rt.queued.push({ text, trigger }); return; }
+    const current = this.store.node(id);
+    if (current.status === "canceled" || this.canceling.has(id) || this.stopped) throw new Error("Node has been canceled or daemon stopped");
+    if (!active(current.status)) this.checkGlobalLimit();
+    clearTimeout(rt.idleTimer);
+    const turnId = randomUUID(); rt.turnId = turnId; rt.driverTurnId = undefined; rt.report = undefined; rt.finalText = ""; rt.usage = emptyUsage(); rt.lastItem = undefined;
+    this.emit(n.runId, { type: "turn.started", turn: { id: turnId, runId: n.runId, nodeId: id, trigger, delegationId: n.delegationId ?? undefined, status: "running", startedAt: now() } });
+    this.patchNode(id, { status: "running", activity: "Thinking…", turns: n.turns + 1, error: undefined, endedAt: undefined });
+    this.addItem(id, { type: "user_message", text });
+    if (n.delegationId) this.patchDelegation(n.delegationId, { status: "running", startedAt: now(), endedAt: undefined, ...(n.status === "completed" || n.status === "failed" ? { deliveredAt: undefined, deliveredVia: undefined, result: undefined } : {}) });
+    this.updateRun(n.runId);
+    try {
+      const started = await session.startTurn(text); rt.driverTurnId = started.turnId;
+      this.emit(n.runId, { type: "turn.updated", turnId, patch: { driverTurnId: started.turnId } });
+      this.patchNode(id, { persistence: session.persistence() ?? undefined });
+    } catch (error) {
+      await this.finishTurn(id, "failed", undefined, error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+  }
+  async message(id: string, text: string, trigger: TurnTrigger = "user"): Promise<void> {
+    if (typeof text !== "string" || !text.trim()) throw new Error("Nonempty text is required");
+    const n = this.store.node(id), rt = this.runtime(id);
+    if (n.status === "canceled" || this.canceling.has(id)) throw new Error("Node is canceled");
+    if (rt.turnId) {
+      const outcome = await rt.session?.steer(text);
+      if (outcome === "steered") { this.addItem(id, { type: "user_message", text }); return; }
+      rt.queued.push({ text, trigger }); return;
+    }
+    await this.startTurn(id, text, trigger);
+  }
+  async delegate(parentId: string, input: DelegateInput): Promise<{ delegationId: string; nodeId: string; status: "queued"; note: string }> {
+    const entry = await this.available(input.agent);
+    const parent = this.store.node(parentId), s = this.store.snapshot(parent.runId);
+    if (parent.status === "canceled" || this.canceling.has(parentId) || this.runtime(parentId).closed) throw new Error("Parent node is closed");
+    if (parent.depth + 1 > s.run.policy.maxDepth) throw new Error(`Maximum delegation depth ${s.run.policy.maxDepth} exceeded`);
+    if (s.delegations.filter((d) => d.fromNodeId === parentId && active(d.status)).length >= s.run.policy.maxActiveChildren) throw new Error("Active child fan-out limit reached");
+    this.checkGlobalLimit(); this.budget(parent.runId);
+    const nodeId = randomUUID(), delegationId = randomUUID(), ts = now();
+    const d: DelegationRecord = { id: delegationId, runId: parent.runId, kind: "delegate", fromNodeId: parentId, toNodeId: nodeId, brief: { title: input.title, task: input.task, context: input.context, acceptance: input.acceptance, readonly: input.readonly, outputSchema: input.outputSchema as Record<string, JsonValue> | undefined }, round: 1, status: "queued", createdAt: ts, subtreeUsage: emptyUsage() };
+    this.emit(parent.runId, { type: "node.created", node: { id: nodeId, runId: parent.runId, parentNodeId: parentId, delegationId, depth: parent.depth + 1, agentId: input.agent, model: input.model, modeId: input.readonly ? entry.modes.find((m) => m.isReadOnly)?.id ?? input.mode : input.mode, title: input.title, cwd: parent.cwd, status: "starting", createdAt: ts, updatedAt: ts, usage: emptyUsage(), turns: 0 } });
+    this.emit(parent.runId, { type: "delegation.created", delegation: d });
+    // Return immediately; opening a provider must never block the delegate MCP response.
+    setImmediate(() => { void this.startTurn(nodeId, briefPrompt(d), "delegation").catch((e: unknown) => this.failNode(nodeId, e)); });
+    return { delegationId, nodeId, status: "queued", note: "Result will be delivered automatically. Do not poll." };
+  }
+  private own(nodeId: string, delegationId: string): DelegationRecord {
+    const d = this.store.delegation(delegationId);
+    if (d.fromNodeId !== nodeId) throw new Error("Only your own direct child delegations may be accessed");
+    return d;
+  }
+  async tool(nodeId: string, name: BatonToolName, raw: unknown): Promise<unknown> {
+    if (this.canceling.has(nodeId) || this.stopped) throw new Error("Node is canceling or daemon is stopping");
+    const input = BATON_TOOLS[name].input.parse(raw) as Record<string, unknown>;
+    switch (name) {
+      case "list_agents": return this.agents();
+      case "delegate": return this.delegate(nodeId, input as unknown as DelegateInput);
+      case "report_result": {
+        const n = this.store.node(nodeId), rt = this.runtime(nodeId);
+        if (!n.delegationId) throw new Error("Root nodes cannot report_result; answer the human");
+        if (!rt.turnId) throw new Error("No active assignment");
+        if (rt.report) throw new Error("report_result already called for this turn");
+        rt.report = input as unknown as ReportResultInput; return { accepted: true, note: "End your turn now." };
+      }
+      case "get_result": {
+        const d = this.own(nodeId, String(input.delegationId));
+        if (done(d) && d.result) this.delivered(d, "get_result");
+        return { ...this.store.delegation(d.id), usage: d.subtreeUsage };
+      }
+      case "send": {
+        const d = this.own(nodeId, String(input.delegationId));
+        if (d.status === "canceled") throw new Error("Delegation is canceled");
+        this.budget(d.runId);
+        this.patchDelegation(d.id, { round: d.round + 1, result: undefined, status: "running", deliveredAt: undefined, deliveredVia: undefined, endedAt: undefined });
+        this.runtime(d.toNodeId).corrections = 0;
+        await this.message(d.toNodeId, String(input.message), "followup"); return { sent: true, round: d.round + 1 };
+      }
+      case "cancel": {
+        const d = this.own(nodeId, String(input.delegationId)); await this.cancelNode(d.toNodeId, typeof input.reason === "string" ? input.reason : "Canceled by parent"); return { canceled: true };
+      }
+      case "status": {
+        const n = this.store.node(nodeId), s = this.store.snapshot(n.runId);
+        const roots = input.delegationId ? [this.own(nodeId, String(input.delegationId))] : s.delegations.filter((d) => d.fromNodeId === nodeId);
+        const ids = new Set(roots.map((d) => d.toNodeId));
+        for (const n of [...s.nodes].sort((a, b) => a.depth - b.depth)) if (n.parentNodeId && ids.has(n.parentNodeId)) ids.add(n.id);
+        return { delegations: s.delegations.filter((d) => ids.has(d.toNodeId)), nodes: s.nodes.filter((n) => ids.has(n.id)) };
+      }
+      case "wait": return this.wait(nodeId, input);
+    }
+  }
+  private wait(nodeId: string, input: Record<string, unknown>): Promise<unknown> {
+    const n = this.store.node(nodeId), s = this.store.snapshot(n.runId);
+    const ids = Array.isArray(input.delegationIds) ? input.delegationIds.map(String) : s.delegations.filter((d) => d.fromNodeId === nodeId && !d.deliveredAt).map((d) => d.id);
+    ids.forEach((id) => this.own(nodeId, id));
+    return new Promise((resolve) => {
+      let timer: NodeJS.Timeout | undefined, unsubscribe: (() => void) | undefined, finished = false;
+      const cancel = (): void => finish(true);
+      const finish = (timedOut: boolean): void => {
+        if (finished) return; finished = true;
+        clearTimeout(timer); unsubscribe?.(); this.waits.get(nodeId)?.delete(cancel);
+        const completed = ids.map((id) => this.store.delegation(id)).filter(done);
+        for (const d of completed) this.delivered(d, "wait");
+        resolve({ timedOut, results: completed.map((d) => this.store.delegation(d.id)) });
+      };
+      const ready = (): boolean => {
+        const completed = ids.map((id) => this.store.delegation(id)).filter(done);
+        return ids.length === 0 || (input.mode === "all" ? completed.length === ids.length : completed.length > 0);
+      };
+      const waiting = this.waits.get(nodeId) ?? new Set<() => void>(); waiting.add(cancel); this.waits.set(nodeId, waiting);
+      unsubscribe = this.store.subscribe((event) => { if (event.runId === n.runId && ready()) finish(false); });
+      timer = setTimeout(() => finish(true), Number(input.timeoutSec) * 1000);
+      if (ready()) finish(false);
+    });
+  }
+  private log(runId: string, error: unknown, nodeId?: string): void {
+    if (!this.stopped) this.emit(runId, { type: "log", level: "error", message: error instanceof Error ? error.message : String(error), nodeId });
+  }
+  private async onEvent(id: string, event: DriverEvent): Promise<void> {
+    if (this.stopped) return;
+    const rt = this.runtime(id), n = this.store.node(id);
+    if (rt.closed || n.status === "canceled" || this.canceling.has(id)) return;
+    if ((event.type === "turn_completed" || event.type === "turn_failed" || event.type === "turn_canceled" || event.type === "item" || event.type === "usage") && "turnId" in event && event.turnId && rt.driverTurnId && event.turnId !== rt.driverTurnId) return;
+    switch (event.type) {
+      case "session": this.patchNode(id, { persistence: rt.session?.persistence() ?? undefined }); break;
+      case "turn_started": if (rt.turnId) { rt.driverTurnId = event.turnId; this.emit(n.runId, { type: "turn.updated", turnId: rt.turnId, patch: { driverTurnId: event.turnId } }); } break;
+      case "item": this.addItem(id, event.item, event.timestamp); break;
+      case "usage": this.usage(id, event.usage); break;
+      case "turn_completed": await this.finishTurn(id, "completed", event.usage); break;
+      case "turn_failed": await this.finishTurn(id, "failed", undefined, event.error); break;
+      case "turn_canceled": await this.finishTurn(id, "canceled", undefined, event.reason); break;
+      case "permission_requested": {
+        const p: PermissionRecord = { id: `${id}:${event.request.id}`, runId: n.runId, nodeId: id, requestId: event.request.id, request: event.request, status: "pending", requestedAt: now() };
+        this.emit(n.runId, { type: "permission", permission: p }); this.patchNode(id, { status: "waiting_permission", activity: event.request.title || event.request.name });
+        if (this.store.snapshot(n.runId).run.policy.autoApprove) await this.respondPermission(p.id, { behavior: "allow" }, "policy"); break;
+      }
+      case "permission_resolved": {
+        const p = this.store.snapshot(n.runId).permissions.find((p) => p.id === `${id}:${event.requestId}`);
+        if (p?.status === "pending") this.resolvePermission(p, event.response, "human"); break;
+      }
+      case "mode_changed": this.patchNode(id, { modeId: event.modeId ?? undefined }); break;
+      case "model_changed": this.patchNode(id, { model: event.model ?? undefined }); break;
+      case "closed": if (rt.turnId) await this.finishTurn(id, "failed", undefined, event.error || "Agent session closed"); this.identities.delete(rt.token); rt.closed = true; rt.session = undefined; break;
+    }
+  }
+  private addItem(id: string, incoming: TimelineItem, ts = now()): void {
+    const n = this.store.node(id), rt = this.runtime(id);
+    let item = incoming;
+    if (item.type === "tool_call") {
+      const name = item.detail.type === "baton" ? item.detail.tool : item.name.replace(/^.*(?:mcp__baton__|baton__|baton\.|baton_)/, "");
+      if (name in BATON_TOOLS) {
+        const detail = item.detail;
+        const output = detail.type === "baton" ? detail.output : detail.type === "unknown" ? detail.output : undefined;
+        const input = detail.type === "baton" ? detail.input : detail.type === "unknown" ? detail.input : undefined;
+        const getId = (value: unknown): string | undefined => {
+          if (typeof value === "string") { try { return getId(JSON.parse(value) as unknown); } catch { return undefined; } }
+          if (!value || typeof value !== "object") return undefined;
+          if ("delegationId" in value && typeof value.delegationId === "string") return value.delegationId;
+          if ("structuredContent" in value) return getId(value.structuredContent);
+          if ("content" in value && Array.isArray(value.content)) for (const entry of value.content) { const id = entry && typeof entry === "object" && "text" in entry ? getId(entry.text) : undefined; if (id) return id; }
+          return undefined;
+        };
+        item = { ...item, detail: { type: "baton", tool: name, delegationId: getId(output) ?? getId(input), input: input as JsonValue | undefined, output: output as JsonValue | undefined } };
+      }
+      const old = this.store.snapshot(n.runId).toolSpans.find((s) => s.id === `${id}:${item.type === "tool_call" ? item.callId : ""}`);
+      // Additive runtime metadata until ToolSpanRecord exposes delegationId in the contract.
+      const span: ToolSpanRecord & { delegationId?: string } = { id: `${id}:${item.callId}`, runId: n.runId, nodeId: id, turnId: rt.turnId, callId: item.callId, name: item.name, kind: item.detail.type, status: item.status, summary: item.detail.type === "shell" ? item.detail.command : item.name, startedAt: old?.startedAt ?? ts, ...(item.status !== "running" ? { endedAt: old?.endedAt ?? ts } : {}), ...(item.detail.type === "baton" && item.detail.delegationId ? { delegationId: item.detail.delegationId } : {}) };
+      this.emit(n.runId, { type: "tool.span", span });
+      this.patchNode(id, { activity: item.status === "running" ? item.name : "Thinking…" });
+    } else if (item.type === "reasoning" || item.type === "assistant_message") this.patchNode(id, { activity: item.type === "reasoning" ? "Thinking…" : "Writing…" });
+    const last = rt.lastItem;
+    const text = item.type === "assistant_message" || item.type === "reasoning";
+    const merge = text && last !== undefined && last.turnId === rt.turnId && last.item.type === item.type && (!("messageId" in item) || !("messageId" in last.item) || !item.messageId || !last.item.messageId || item.messageId === last.item.messageId);
+    let row: ItemRecord;
+    if (merge && last && (last.item.type === "assistant_message" || last.item.type === "reasoning") && (item.type === "assistant_message" || item.type === "reasoning")) {
+      const mergedText = item.text.startsWith(last.item.text) ? item.text : last.item.text + item.text;
+      row = { ...last, item: { ...item, text: mergedText } };
+    } else {
+      this.flushItem(id);
+      const existing = this.store.items(id);
+      // Tool updates replace their row instead of adding duplicate calls to the transcript.
+      const previous = item.type === "tool_call" ? existing.find((r) => r.item.type === "tool_call" && r.item.callId === (item.type === "tool_call" ? item.callId : "")) : undefined;
+      row = { nodeId: id, seq: previous?.seq ?? (existing.at(-1)?.seq ?? 0) + 1, turnId: rt.turnId, ts: previous?.ts ?? ts, item };
+    }
+    rt.lastItem = row;
+    if (row.item.type === "assistant_message") rt.finalText = row.item.text;
+    if (text) { rt.pendingItem = row; rt.itemTimer ??= setTimeout(() => this.flushItem(id), 100); }
+    else this.store.appendItem(n.runId, row);
+  }
+  private flushItem(id: string): void {
+    const rt = this.runtimes.get(id); if (!rt) return;
+    clearTimeout(rt.itemTimer); rt.itemTimer = undefined;
+    if (rt.pendingItem) { this.store.appendItem(this.store.node(id).runId, rt.pendingItem); rt.pendingItem = undefined; }
+  }
+  private usage(id: string, usage: Usage): void {
+    const rt = this.runtime(id), n = this.store.node(id);
+    const next = { inputTokens: usage.inputTokens ?? rt.usage.inputTokens, cachedInputTokens: usage.cachedInputTokens ?? rt.usage.cachedInputTokens, outputTokens: usage.outputTokens ?? rt.usage.outputTokens, costUsd: usage.totalCostUsd ?? rt.usage.costUsd };
+    const delta = { inputTokens: Math.max(0, next.inputTokens - rt.usage.inputTokens), cachedInputTokens: Math.max(0, next.cachedInputTokens - rt.usage.cachedInputTokens), outputTokens: Math.max(0, next.outputTokens - rt.usage.outputTokens), costUsd: Math.max(0, next.costUsd - rt.usage.costUsd) };
+    rt.usage = next;
+    this.patchNode(id, { usage: addUsage(n.usage, delta) });
+    const s = this.store.snapshot(n.runId);
+    this.emit(n.runId, { type: "run.updated", patch: { usage: addUsage(s.run.usage, delta), updatedAt: now() } });
+    let current: NodeRecord | undefined = n;
+    while (current?.delegationId) {
+      const d = this.store.delegation(current.delegationId); this.patchDelegation(d.id, { subtreeUsage: addUsage(d.subtreeUsage, delta) });
+      current = current.parentNodeId ? this.store.node(current.parentNodeId) : undefined;
+    }
+  }
+  private async finishTurn(id: string, status: "completed" | "failed" | "canceled", usage?: Usage, error?: string): Promise<void> {
+    const rt = this.runtime(id), n = this.store.node(id); if (!rt.turnId) return;
+    if (usage) this.usage(id, usage);
+    this.flushItem(id);
+    this.patchNode(id, { persistence: rt.session?.persistence() ?? undefined });
+    const turnId = rt.turnId; rt.turnId = undefined;
+    this.emit(n.runId, { type: "turn.updated", turnId, patch: { status, endedAt: now(), usage: { inputTokens: rt.usage.inputTokens, cachedInputTokens: rt.usage.cachedInputTokens, outputTokens: rt.usage.outputTokens, totalCostUsd: rt.usage.costUsd }, error } });
+    for (const p of this.store.snapshot(n.runId).permissions) if (p.nodeId === id && p.status === "pending") this.emit(n.runId, { type: "permission", permission: { ...p, status: "expired", resolvedAt: now() } });
+    for (const span of this.store.snapshot(n.runId).toolSpans) if (span.nodeId === id && span.status === "running") this.emit(n.runId, { type: "tool.span", span: { ...span, status: status === "completed" ? "completed" : status, endedAt: now() } });
+    if (n.delegationId) {
+      const d = this.store.delegation(n.delegationId);
+      const result: DelegationResult = { status: status === "completed" ? rt.report?.status ?? "success" : "failed", summary: rt.report?.summary ?? (rt.finalText || error || "No final response"), result: rt.report?.result as JsonValue | undefined, artifacts: rt.report?.artifacts, reported: !!rt.report, finalText: rt.finalText, error };
+      const errors = d.brief.outputSchema && status === "completed" ? validateSchema(d.brief.outputSchema, result.result) : [];
+      if (errors.length && rt.corrections < 2) {
+        rt.corrections++; this.patchNode(id, { status: "idle", activity: "Correcting result" });
+        await this.startTurn(id, correctionPrompt(errors), "correction"); return;
+      }
+      if (errors.length) { result.status = "failed"; result.error = `Output schema invalid after 2 corrections: ${errors.join("; ")}`; }
+      const finalStatus = status === "canceled" ? "canceled" : result.status === "failed" ? "failed" : "completed";
+      this.patchNode(id, { status: finalStatus, endedAt: now(), activity: result.summary.slice(0, 120), error: result.error });
+      this.patchDelegation(d.id, { status: finalStatus, result, endedAt: now() }); this.scheduleDelivery(d.fromNodeId);
+    } else this.patchNode(id, { status: status === "completed" ? "idle" : status, activity: status === "completed" ? "Idle" : error, error });
+    this.updateRun(n.runId);
+    this.armIdle(id);
+    if (rt.queued.length && !rt.closed) {
+      const queued = rt.queued.splice(0); await this.startTurn(id, queued.map((q) => q.text).join("\n\n"), queued[0]!.trigger);
+    }
+    await this.deliver(id);
+  }
+  private failNode(id: string, error: unknown): void {
+    const n = this.store.node(id); if (n.status === "canceled" || this.canceling.has(id) || this.stopped) return;
+    const message = error instanceof Error ? error.message : String(error);
+    const rt = this.runtime(id);
+    if (rt.turnId) { this.emit(n.runId, { type: "turn.updated", turnId: rt.turnId, patch: { status: "failed", error: message, endedAt: now() } }); rt.turnId = undefined; }
+    this.patchNode(id, { status: "failed", error: message, activity: message, endedAt: now() });
+    if (n.delegationId) { const d = this.store.delegation(n.delegationId); this.patchDelegation(d.id, { status: "failed", result: { status: "failed", summary: message, finalText: "", reported: false, error: message }, endedAt: now() }); this.scheduleDelivery(d.fromNodeId); }
+    this.updateRun(n.runId);
+  }
+  private armIdle(id: string): void {
+    const rt = this.runtime(id); clearTimeout(rt.idleTimer);
+    rt.idleTimer = setTimeout(() => {
+      if (rt.turnId) return;
+      const n = this.store.node(id);
+      const s = this.store.snapshot(n.runId);
+      if (s.nodes.some((node) => active(node.status)) || s.delegations.some((d) => !done(d) || !d.deliveredAt)) { this.armIdle(id); return; }
+      void this.closeSession(id).then(() => {
+        if (!n.parentNodeId && n.status === "idle") { this.patchNode(id, { status: "completed", endedAt: now() }); this.updateRun(n.runId); }
+      }).catch((e: unknown) => this.log(n.runId, e));
+    }, this.options.idleTimeoutMs ?? 30 * 60 * 1000); rt.idleTimer.unref();
+  }
+  private updateRun(runId: string): void {
+    const s = this.store.snapshot(runId), root = s.nodes.find((n) => n.id === s.run.rootNodeId);
+    if (!root) return;
+    const status: RunStatus = root.status === "canceled" ? "canceled" : s.nodes.some((n) => active(n.status)) ? "active" : root.status === "failed" ? "failed" : root.status === "completed" ? "completed" : "idle";
+    const patch = { status, updatedAt: now(), endedAt: ["completed", "failed", "canceled"].includes(status) ? now() : undefined };
+    if (s.run.endedAt && patch.endedAt === undefined) this.emit(runId, { type: "run.created", run: { ...s.run, ...patch } });
+    else this.emit(runId, { type: "run.updated", patch });
+  }
+  private scheduleDelivery(parentId: string): void {
+    clearTimeout(this.deliveryTimers.get(parentId));
+    this.deliveryTimers.set(parentId, setTimeout(() => { this.deliveryTimers.delete(parentId); void this.deliver(parentId).catch((e: unknown) => this.log(this.store.node(parentId).runId, e)); }, this.options.deliveryDebounceMs ?? 1500));
+  }
+  private delivered(d: DelegationRecord, via: NonNullable<DelegationRecord["deliveredVia"]>): void {
+    if (!d.deliveredAt) this.patchDelegation(d.id, { deliveredAt: now(), deliveredVia: via });
+  }
+  private async deliver(parentId: string): Promise<void> {
+    if (this.stopped || this.deliveryTimers.has(parentId) || this.delivering.has(parentId) || this.canceling.has(parentId)) return;
+    this.delivering.add(parentId);
+    try {
+    const parent = this.store.node(parentId), rt = this.runtime(parentId);
+    if (parent.status === "canceled" || parent.status === "failed") return;
+    const pending = this.store.snapshot(parent.runId).delegations.filter((d) => d.fromNodeId === parentId && done(d) && d.result && !d.deliveredAt);
+    if (!pending.length) return;
+    const text = resultsPrompt(pending);
+    if (rt.turnId) {
+      // Reserve before awaiting the provider so a concurrent delivery cannot enqueue the
+      // same results. A failed/unsupported steer releases the reservation.
+      for (const d of pending) this.delivered(d, "steer");
+      let outcome: Awaited<ReturnType<DriverSession["steer"]>> | undefined;
+      try { outcome = await rt.session?.steer(text); }
+      catch (error) { for (const d of pending) this.patchDelegation(d.id, { deliveredAt: undefined, deliveredVia: undefined }); throw error; }
+      if (outcome !== "steered") {
+        for (const d of pending) this.patchDelegation(d.id, { deliveredAt: undefined, deliveredVia: undefined });
+        if (!rt.turnId) this.scheduleDelivery(parentId);
+        return;
+      }
+      this.addItem(parentId, { type: "user_message", text });
+    } else {
+      // Mark before starting a new provider turn, which can synchronously call get_result.
+      for (const d of pending) this.delivered(d, "turn");
+      try { await this.startTurn(parentId, text, "result"); }
+      catch (error) { for (const d of pending) this.patchDelegation(d.id, { deliveredAt: undefined, deliveredVia: undefined }); throw error; }
+    }
+    } finally { this.delivering.delete(parentId); }
+  }
+  async respondPermission(id: string, response: PermissionResponse, by: "human" | "policy" = "human"): Promise<void> {
+    const nodeId = id.includes(":") ? id.slice(0, id.indexOf(":")) : undefined;
+    const p = nodeId ? this.store.snapshot(this.store.node(nodeId).runId).permissions.find((p) => p.id === id) : this.store.list().flatMap((r) => this.store.snapshot(r.id).permissions).find((p) => p.requestId === id && p.status === "pending");
+    if (!p || p.status !== "pending") throw new Error("Pending permission not found");
+    if (!response || !["allow", "deny"].includes(response.behavior)) throw new Error("Invalid permission response");
+    const session = this.runtime(p.nodeId).session; if (!session) throw new Error("Session unavailable");
+    await session.respondToPermission(p.requestId, response); this.resolvePermission(p, response, by);
+  }
+  private resolvePermission(p: PermissionRecord, response: PermissionResponse, by: "human" | "policy"): void {
+    this.emit(p.runId, { type: "permission", permission: { ...p, status: "resolved", resolution: response, resolvedBy: by, resolvedAt: now() } });
+    const pending = this.store.snapshot(p.runId).permissions.some((other) => other.nodeId === p.nodeId && other.status === "pending");
+    this.patchNode(p.nodeId, { status: pending ? "waiting_permission" : "running", activity: pending ? "Waiting for permission" : "Thinking…" });
+  }
+  async cancelNode(id: string, reason = "Canceled by human"): Promise<void> {
+    const n = this.store.node(id), s = this.store.snapshot(n.runId);
+    const subtree = new Set([id]);
+    for (const node of [...s.nodes].sort((a, b) => a.depth - b.depth)) if (node.parentNodeId && subtree.has(node.parentNodeId)) subtree.add(node.id);
+    for (const descendant of subtree) this.canceling.add(descendant);
+    for (const child of s.nodes.filter((child) => child.parentNodeId === id)) await this.cancelNode(child.id, reason);
+    const rt = this.runtime(id); rt.closed = true; rt.queued = [];
+    clearTimeout(this.deliveryTimers.get(id)); this.deliveryTimers.delete(id);
+    if (rt.session) await rt.session.interrupt().catch((error: unknown) => this.log(n.runId, error, id));
+    this.flushItem(id);
+    if (rt.turnId) { this.emit(n.runId, { type: "turn.updated", turnId: rt.turnId, patch: { status: "canceled", endedAt: now(), error: reason } }); rt.turnId = undefined; }
+    await this.closeSession(id).catch((error: unknown) => this.log(n.runId, error, id));
+    for (const p of this.store.snapshot(n.runId).permissions) if (p.nodeId === id && p.status === "pending") this.emit(n.runId, { type: "permission", permission: { ...p, status: "expired", resolvedAt: now() } });
+    for (const span of this.store.snapshot(n.runId).toolSpans) if (span.nodeId === id && span.status === "running") this.emit(n.runId, { type: "tool.span", span: { ...span, status: "canceled", endedAt: now() } });
+    this.patchNode(id, { status: "canceled", activity: reason, endedAt: now() });
+    if (n.delegationId) { const d = this.store.delegation(n.delegationId); this.patchDelegation(d.id, { status: "canceled", endedAt: now(), result: { status: "failed", summary: reason, finalText: "", reported: false } }); this.scheduleDelivery(d.fromNodeId); }
+    this.updateRun(n.runId);
+  }
+  async cancelRun(id: string): Promise<void> { await this.cancelNode(this.store.snapshot(id).run.rootNodeId); }
+  private async closeSession(id: string): Promise<void> {
+    const rt = this.runtime(id); clearTimeout(rt.idleTimer); this.identities.delete(rt.token); rt.unsubscribe?.(); rt.closed = true;
+    await rt.opening?.catch(() => {});
+    await rt.session?.close(); rt.session = undefined;
+    for (const finish of this.waits.get(id) ?? []) finish(); this.waits.delete(id);
+  }
+  async shutdown(): Promise<void> {
+    this.stopped = true;
+    for (const waits of this.waits.values()) for (const finish of waits) finish(); this.waits.clear();
+    for (const timer of this.deliveryTimers.values()) clearTimeout(timer); this.deliveryTimers.clear();
+    for (const [id, rt] of this.runtimes) { this.flushItem(id); rt.unsubscribe?.(); clearTimeout(rt.idleTimer); await rt.session?.interrupt(); await this.closeSession(id); }
+    await this.registry.shutdown();
+    await Promise.all([...this.runtimes.values()].map((rt) => rt.chain));
+  }
+}
