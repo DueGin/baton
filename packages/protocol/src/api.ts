@@ -21,7 +21,7 @@ export interface CreateRunRequest {
 
 export interface PatchRunRequest {
   title?: string;
-  policy?: Partial<Pick<RunPolicy, "autoApprove" | "maxDepth" | "maxActiveChildren" | "budget">>;
+  policy?: Partial<Pick<RunPolicy, "autoApprove" | "maxDepth" | "maxActiveChildren" | "budget" | "teamApproval">>;
 }
 
 export interface SendMessageRequest {
@@ -92,4 +92,18 @@ export type ListTeamPresetsResponse = TeamPreset[];
 export interface SaveTeamPresetRequest {
   name: string;
   description?: string;
+}
+
+/** POST /api/runs/:runId/team/proposals/:proposalId/approve — optionally with the human's edits. */
+export interface ApproveTeamProposalRequest {
+  /** formation / addition: the roster to apply instead of the proposed one (roles may be added, dropped or changed). */
+  members?: TeamMemberSpec[];
+  /** replacement: the member spec to apply instead of the proposed one. */
+  replacement?: TeamMemberSpec;
+  note?: string;
+}
+
+/** POST /api/runs/:runId/team/proposals/:proposalId/reject */
+export interface RejectTeamProposalRequest {
+  feedback: string;
 }

@@ -156,6 +156,14 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
   2. 生成"前任进展摘要"：旧节点最后一条 assistant 回复（≤2000 字）、它改过的文件列表（来自 edit/write 工具调用）。摘要追加到任务书的 `context`。
   3. 由同一个父节点新建委派，记下 `replaces`，用新成员的配置开节点，立即开始。
   4. 如果改派不是父节点自己发起的（人工或换人连带），给父节点送一条 `<baton-notice>`，告诉它旧 id → 新 id。送达方式和结果送达相同。
+- **名单确认**（`RunPolicy.teamApproval`，默认开）：agent 发起的名单变化都先变成一份待确认的提案（`TeamProposal`），不立即生效。包括 `form_team`、`replace_member`、按 agent 直接派活时产生的临时成员。
+  - 工具返回 `pending_approval` 和提案 id。提示词要求主导者此时结束本轮，等通知。
+  - 提案待定期间，派给提案中角色的委派处于 `queued` 状态，并记下 `blockedByProposal`，批准后自动开工。同一时刻只允许一份待定提案，再提交会报错。
+  - 人在控制台可以直接批准、修改后批准，或者驳回并写明理由。
+    - 修改后批准时，按人改过的名单生效。被删掉的角色，其排队中的委派会被取消。
+    - 驳回时，排队中的委派全部取消。
+  - 无论批准还是驳回，都给发起提案的节点送一条 `<baton-notice>`，包含结论、人做的改动和留言。主导者据此继续派活或重新组队。
+  - 人自己在控制台做的名单改动立即生效，不走提案。
 - **名单变化**都发 `team.updated` 事件（带完整名单和这次的 `TeamChange`），`TeamRecord.changes` 保留历史，时间线据此画标记。
 - **预设团队**（`TeamPreset`）存在 SQLite，用 `/api/teams` 增删改查；也可以把某个 Run 当前的名单"另存为预设"。
 - **提示词**：
@@ -207,6 +215,8 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
 | POST | `/api/runs/:runId/team/members` | `AddMemberRequest`，人工加成员 |
 | POST | `/api/runs/:runId/team/members/:memberId/replace` | `ReplaceMemberRequest`，人工换人 |
 | DELETE | `/api/runs/:runId/team/members/:memberId` | 移除成员（未完成的委派不受影响） |
+| POST | `/api/runs/:runId/team/proposals/:proposalId/approve` | `ApproveTeamProposalRequest`，批准（可带修改） |
+| POST | `/api/runs/:runId/team/proposals/:proposalId/reject` | `RejectTeamProposalRequest`，驳回并说明理由 |
 | POST | `/api/runs/:runId/team/save-preset` | `SaveTeamPresetRequest`，当前名单另存为预设 |
 | GET/POST | `/api/teams` | 列出 / 新建预设团队（`TeamPresetInput`） |
 | PUT/DELETE | `/api/teams/:id` | 修改 / 删除预设团队 |
@@ -237,11 +247,15 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
    - 内容：任务书、结果（含 JSON）、transcript（消息、思考、工具调用的输入输出可折叠）、用量、权限记录。
    - 操作：发消息、取消。
 
-5. **团队面板**（Run 视图里的第四个标签"团队"，拓扑图顶部也有简版名单条）：
+5. **名单确认**：有待定提案时，顶栏"待处理"计数会算上它，拓扑图上方出现醒目的确认卡片，团队标签上有红点。确认卡片里：
+   - 能看到主导者的理由，以及每个角色的 agent、模型、职责。
+   - 可以就地改 agent、模型、职责，删除或增加角色。
+   - 操作有"批准""修改后批准""驳回（写理由）"。
+6. **团队面板**（Run 视图里的第四个标签"团队"，拓扑图顶部也有简版名单条）：
    - 名单：角色、担任者（agent + 模型）、职责、谁加的、理由、当前委派数和状态。
    - 操作：加成员、换人（可选"同时改派未完成的任务"）、移除、另存为预设。
    - 变更历史：组队、加人、换人、移除，带时间和理由。
-6. **拓扑图和时间线中的团队信息**：
+7. **拓扑图和时间线中的团队信息**：
    - 节点卡片显示角色标签。
    - 被替换的节点置灰，标"已替换"，用虚线连到接手的节点。
    - 节点卡片和详情抽屉里有"改派"按钮。

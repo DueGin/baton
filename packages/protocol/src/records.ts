@@ -80,6 +80,12 @@ export interface RunPolicy {
   autoApprove: boolean;
   /** Collaboration mode; default "dynamic". */
   mode?: CollaborationMode;
+  /**
+   * Roster changes proposed by agents (form_team, replace_member, ad-hoc members) wait for the
+   * human to approve them in the console before they take effect. Default true. Human changes
+   * always apply immediately.
+   */
+  teamApproval?: boolean;
   /** Optional run budget; exceeding it rejects new delegations and cancels nothing by itself. */
   budget?: { maxCostUsd?: number; maxTokens?: number; maxWallMinutes?: number };
 }
@@ -121,12 +127,42 @@ export interface TeamMember extends TeamMemberSpec {
   replaces?: string;
 }
 
+/** A roster change an agent asked for, waiting for (or decided by) the human. */
+export interface TeamProposal {
+  id: string;
+  kind: "formation" | "addition" | "replacement";
+  status: "pending" | "approved" | "rejected";
+  by: "lead" | "agent";
+  /** Node that proposed it. */
+  nodeId: string;
+  proposedAt: IsoTime;
+  rationale?: string;
+  /** formation / addition: the proposed members. */
+  members?: TeamMemberSpec[];
+  /** replacement: which member, by whom, and whether its unfinished work moves along. */
+  replace?: { memberId: string; with: TeamMemberSpec; reassignActive: boolean; reason: string };
+  decidedAt?: IsoTime;
+  /** What the human actually approved when they edited the proposal (same shape as members/replace.with). */
+  approvedMembers?: TeamMemberSpec[];
+  approvedReplacement?: TeamMemberSpec;
+  /** Human note on approval, or the reason for rejection; forwarded to the proposing node. */
+  feedback?: string;
+}
+
 export interface TeamChange {
-  kind: "formed" | "member_added" | "member_replaced" | "member_removed";
+  kind:
+    | "proposed"
+    | "approved"
+    | "rejected"
+    | "formed"
+    | "member_added"
+    | "member_replaced"
+    | "member_removed";
   by: TeamActor;
   at: IsoTime;
   memberId?: string;
   previousMemberId?: string;
+  proposalId?: string;
   reason?: string;
 }
 
@@ -140,6 +176,8 @@ export interface TeamRecord {
   members: TeamMember[];
   /** Roster history, oldest first. */
   changes: TeamChange[];
+  /** Agent-proposed changes (all of them; at most one is "pending" at a time). */
+  proposals: TeamProposal[];
   updatedAt: IsoTime;
 }
 
@@ -261,6 +299,8 @@ export interface DelegationRecord {
   /** Team role / member the work was delegated to, if delegated by role. */
   role?: string;
   memberId?: string;
+  /** Set while a "queued" delegation waits for a pending team proposal to be approved. */
+  blockedByProposal?: string;
   /** Delegation this one took over from (reassignment), and the one that took over from it. */
   replaces?: string;
   replacedBy?: string;
