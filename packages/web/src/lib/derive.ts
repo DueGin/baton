@@ -2,9 +2,10 @@ import type { NodeRecord, NodeStatus, RunSnapshot, RunStatus, RunSummary } from 
 
 export const agentColors: Record<string, string> = { claude: "#cc795a", codex: "#22a584", pi: "#8c7ce9", gemini: "#5989dc" };
 export const statusLabels: Record<string, string> = {
-  starting: "启动中", running: "运行中", idle: "空闲", waiting_permission: "等待授权", waiting_children: "等待子节点", completed: "已完成", failed: "失败", canceled: "已取消", interrupted: "已中断", active: "进行中", queued: "排队中", ready: "可用", unavailable: "不可用", error: "异常", loading: "检测中",
+  member_active: "在队",
+  starting: "启动中", running: "运行中", idle: "空闲", waiting_permission: "等待授权", waiting_children: "等待子节点", completed: "已完成", failed: "失败", canceled: "已取消", replaced: "已替换", removed: "已移除", interrupted: "已中断", active: "进行中", queued: "排队中", ready: "可用", unavailable: "不可用", error: "异常", loading: "检测中",
 };
-export const terminal = (status: string): boolean => ["completed", "failed", "canceled"].includes(status);
+export const terminal = (status: string): boolean => ["completed", "failed", "canceled", "replaced"].includes(status);
 export function displayStatus(node: NodeRecord, snapshot: RunSnapshot): NodeStatus | "waiting_children" {
   if (["running", "idle"].includes(node.status) && snapshot.delegations.some(edge => edge.fromNodeId === node.id && !terminal(edge.status))) return "waiting_children";
   return node.status;
@@ -30,7 +31,7 @@ export function treeOrder(nodes: NodeRecord[]): NodeRecord[] {
 }
 export function summarize(snapshot: RunSnapshot): RunSummary {
   const { run, nodes } = snapshot;
-  return { ...run, status: displayRunStatus(snapshot), rootAgentId: nodes.find(node => node.id === run.rootNodeId)?.agentId ?? "unknown", agents: [...new Set(nodes.map(node => node.agentId))], nodeCount: nodes.length, activeNodeCount: nodes.filter(node => !terminal(node.status) && node.status !== "idle").length, pendingPermissions: snapshot.permissions.filter(permission => permission.status === "pending").length };
+  return { ...run, status: displayRunStatus(snapshot), rootAgentId: nodes.find(node => node.id === run.rootNodeId)?.agentId ?? "unknown", agents: [...new Set(nodes.map(node => node.agentId))], nodeCount: nodes.length, activeNodeCount: nodes.filter(node => !terminal(node.status) && node.status !== "idle").length, pendingPermissions: snapshot.permissions.filter(permission => permission.status === "pending").length + (snapshot.run.team?.proposals?.filter(proposal => proposal.status === "pending").length ?? 0) };
 }
 export const tokens = (value: number): string => value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 1 : 2)}k` : String(Math.round(value));
 export const cost = (value: number): string => `$${value.toFixed(value < 1 ? 3 : 2)}`;

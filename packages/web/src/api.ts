@@ -1,7 +1,11 @@
 import type {
   AgentEntry, CreateRunRequest, DelegationRecord, GetItemsResponse, PatchRunRequest,
-  PermissionDecision, RunEventEnvelope, RunSnapshot, RunSummary,
+  PermissionDecision, RunEventEnvelope, RunSnapshot, RunSummary, AddMemberRequest, ReplaceMemberRequest,
+  ReassignRequest, TeamPreset, TeamPresetInput, SaveTeamPresetRequest, ApproveTeamProposalRequest, RejectTeamProposalRequest,
 } from "@baton/protocol";
+
+/** The server may attach availability warnings to successful preset mutations. */
+export type TeamPresetResult = TeamPreset & { warnings?: string[] };
 
 export interface BatonClient {
   readonly demo: boolean;
@@ -16,6 +20,17 @@ export interface BatonClient {
   cancelNode(nodeId: string): Promise<void>;
   decide(requestId: string, decision: PermissionDecision): Promise<void>;
   delegation(id: string): Promise<DelegationRecord>;
+  teams(): Promise<TeamPreset[]>;
+  createTeam(request: TeamPresetInput): Promise<TeamPresetResult>;
+  updateTeam(id: string, request: TeamPresetInput): Promise<TeamPresetResult>;
+  deleteTeam(id: string): Promise<void>;
+  addMember(runId: string, request: AddMemberRequest): Promise<void>;
+  replaceMember(runId: string, memberId: string, request: ReplaceMemberRequest): Promise<void>;
+  removeMember(runId: string, memberId: string): Promise<void>;
+  saveTeam(runId: string, request: SaveTeamPresetRequest): Promise<TeamPresetResult>;
+  reassign(id: string, request: ReassignRequest): Promise<void>;
+  approveTeam(runId: string, proposalId: string, request: ApproveTeamProposalRequest): Promise<void>;
+  rejectTeam(runId: string, proposalId: string, request: RejectTeamProposalRequest): Promise<void>;
   /** A connection lasts until aborted or disconnected. The store owns reconnects. */
   events(runId: string, after: number, onEvent: (event: RunEventEnvelope) => void, signal: AbortSignal): Promise<void>;
 }
@@ -60,6 +75,17 @@ export class ApiClient implements BatonClient {
   cancelNode = (id: string) => this.request<void>(`/nodes/${encodeURIComponent(id)}/cancel`, "POST", {});
   decide = (id: string, body: PermissionDecision) => this.request<void>(`/permissions/${encodeURIComponent(id)}`, "POST", body);
   delegation = (id: string) => this.request<DelegationRecord>(`/delegations/${encodeURIComponent(id)}`);
+  teams = () => this.request<TeamPreset[]>("/teams");
+  createTeam = (body: TeamPresetInput) => this.request<TeamPresetResult>("/teams", "POST", body);
+  updateTeam = (id: string, body: TeamPresetInput) => this.request<TeamPresetResult>(`/teams/${encodeURIComponent(id)}`, "PUT", body);
+  deleteTeam = (id: string) => this.request<void>(`/teams/${encodeURIComponent(id)}`, "DELETE");
+  addMember = (id: string, body: AddMemberRequest) => this.request<void>(`/runs/${encodeURIComponent(id)}/team/members`, "POST", body);
+  replaceMember = (id: string, memberId: string, body: ReplaceMemberRequest) => this.request<void>(`/runs/${encodeURIComponent(id)}/team/members/${encodeURIComponent(memberId)}/replace`, "POST", body);
+  removeMember = (id: string, memberId: string) => this.request<void>(`/runs/${encodeURIComponent(id)}/team/members/${encodeURIComponent(memberId)}`, "DELETE");
+  saveTeam = (id: string, body: SaveTeamPresetRequest) => this.request<TeamPresetResult>(`/runs/${encodeURIComponent(id)}/team/save-preset`, "POST", body);
+  reassign = (id: string, body: ReassignRequest) => this.request<void>(`/delegations/${encodeURIComponent(id)}/reassign`, "POST", body);
+  approveTeam = (id: string, proposalId: string, body: ApproveTeamProposalRequest) => this.request<void>(`/runs/${encodeURIComponent(id)}/team/proposals/${encodeURIComponent(proposalId)}/approve`, "POST", body);
+  rejectTeam = (id: string, proposalId: string, body: RejectTeamProposalRequest) => this.request<void>(`/runs/${encodeURIComponent(id)}/team/proposals/${encodeURIComponent(proposalId)}/reject`, "POST", body);
 
   async events(id: string, after: number, onEvent: (event: RunEventEnvelope) => void, signal: AbortSignal): Promise<void> {
     const response = await fetch(`/api/runs/${encodeURIComponent(id)}/events?after=${after}`, {

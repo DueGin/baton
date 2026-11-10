@@ -1,4 +1,4 @@
-import { applyEvent, emptyUsage, type AgentEntry, type DelegationRecord, type ItemRecord, type NodeRecord, type RunEvent, type RunEventEnvelope, type RunSnapshot, type TimelineItem, type ToolCallDetail } from "@baton/protocol";
+import { applyEvent, emptyUsage, type AgentEntry, type DelegationRecord, type ItemRecord, type NodeRecord, type RunEvent, type RunEventEnvelope, type RunSnapshot, type TeamMember, type TeamRecord, type TimelineItem, type ToolCallDetail } from "@baton/protocol";
 import { demoBriefPrompt, demoResultsPrompt } from "./prompts.js";
 
 export const demoAgents: AgentEntry[] = [
@@ -13,12 +13,15 @@ export interface DemoScenario { initial: RunSnapshot; events: RunEventEnvelope[]
 /** Deterministic event fixture; the UI starts midway and streams the remaining events. */
 export function createScenario(base = Date.now() - 86000, id = "run-demo"): DemoScenario {
   const at = (offset: number): string => new Date(base + offset * 1000).toISOString();
-  const run = { id, title: "为工作台添加全局搜索", cwd: "/workspace/atlas", rootNodeId: `${id}:root`, status: "active" as const, policy: { maxDepth: 3, maxActiveChildren: 6, autoApprove: false }, createdAt: at(0), updatedAt: at(0), usage: emptyUsage() };
+  const run = { id, title: "为工作台添加全局搜索", cwd: "/workspace/atlas", rootNodeId: `${id}:root`, status: "active" as const, policy: { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "dynamic" as const, teamApproval: false }, createdAt: at(0), updatedAt: at(0), usage: emptyUsage() };
   const initial: RunSnapshot = { run, nodes: [], delegations: [], turns: [], toolSpans: [], permissions: [], lastSeq: 0 };
   const events: RunEventEnvelope[] = [];
   const items: Record<string, ItemRecord[]> = {};
   const itemCounters: Record<string, number> = {};
   const delegations = new Map<string, DelegationRecord>();
+  const memberFor: Record<string, TeamMember> = Object.fromEntries(([['api', 'backend', 'codex', '搜索 API、中文索引与测试'], ['ui', 'frontend', 'claude', 'Command Palette 和键盘交互'], ['review', 'reviewer', 'pi', '安全审查与边界验证'], ['index', 'indexing', 'pi', '索引环境验证']] as const).map(([key, role, agentId, responsibilities]) => [key, { id: `${id}:m-${key}`, role, agentId, model: demoAgents.find(agent => agent.id === agentId)?.models[0]?.id, responsibilities, status: "active", addedBy: "lead", addedAt: at(6), reason: `按 ${role} 职责选择合适的 agent` }]));
+  const rationale = "把 API、界面和独立审查分开并行推进；索引环境单独验证，避免影响主线。";
+  const team: TeamRecord = { source: "dynamic", rationale, members: Object.values(memberFor), proposals: [], changes: [{ kind: "formed", by: "lead", at: at(6), reason: rationale }], updatedAt: at(6) };
   function emit(offset: number, event: RunEvent): void { events.push({ ...event, runId: id, seq: events.length + 1, ts: at(offset) }); }
   const nid = (key: string): string => `${id}:${key}`;
   function item(offset: number, key: string, content: TimelineItem, replace?: number): number {
@@ -28,10 +31,12 @@ export function createScenario(base = Date.now() - 86000, id = "run-demo"): Demo
     emit(offset, { type: "item", nodeId, itemSeq: seq, ts: at(offset), item: content }); return seq;
   }
   function node(offset: number, key: string, title: string, agentId: string, parent: string | null): void {
-    const record: NodeRecord = { id: nid(key), runId: id, parentNodeId: parent ? nid(parent) : null, delegationId: parent ? `d-${nid(key)}` : null, depth: parent === "api" ? 2 : parent ? 1 : 0, agentId, model: demoAgents.find(agent => agent.id === agentId)?.models[0]?.id, modeId: key === "review" ? "plan" : "default", title, cwd: run.cwd, status: "running", activity: "思考中…", createdAt: at(offset), updatedAt: at(offset), usage: emptyUsage(), turns: 1 };
+    const member = memberFor[key];
+    const record: NodeRecord = { id: nid(key), runId: id, parentNodeId: parent ? nid(parent) : null, delegationId: parent ? `d-${nid(key)}` : null, depth: parent === "api" ? 2 : parent ? 1 : 0, agentId, role: member?.role, memberId: member?.id, model: demoAgents.find(agent => agent.id === agentId)?.models[0]?.id, modeId: key === "review" ? "plan" : "default", title, cwd: run.cwd, status: "running", activity: "思考中…", createdAt: at(offset), updatedAt: at(offset), usage: emptyUsage(), turns: 1 };
     emit(offset, { type: "node.created", node: record });
     if (parent) {
       const delegation: DelegationRecord = { id: `d-${nid(key)}`, runId: id, kind: "delegate", fromNodeId: nid(parent), toNodeId: nid(key), brief: { title, task: key === "api" ? "实现 /api/search 接口与 SQLite FTS5 索引，补充单元测试。" : key === "ui" ? "实现全局搜索 Command Palette，支持键盘操作与搜索结果分组。" : key === "review" ? "独立审查搜索输入校验、SQL 注入和访问范围。" : "检查 FTS5 tokenizer 行为，提供中文搜索的可行方案。", context: "项目使用 React 19 + Node.js；保持现有 API 兼容。", acceptance: ["现有测试通过", "提供变更清单和验证结果"], readonly: key === "review" || key === "index", outputSchema: { type: "object", properties: { summary: { type: "string" } } } }, status: "running", round: 1, createdAt: at(offset), startedAt: at(offset), subtreeUsage: emptyUsage() };
+      delegation.role = member?.role; delegation.memberId = member?.id;
       delegations.set(key, delegation);
       emit(offset, { type: "delegation.created", delegation });
       item(offset, key, { type: "user_message", text: demoBriefPrompt(delegation) });
@@ -63,6 +68,7 @@ export function createScenario(base = Date.now() - 86000, id = "run-demo"): Demo
   item(2, "root", { type: "reasoning", text: "先理解代码结构，然后把 API、交互和独立审查并行委派给不同 agent。索引方案存在环境风险，需要单独验证。" });
   item(4, "root", { type: "assistant_message", text: "我会把工作分成三个并行任务：\n\n- **Codex**：搜索 API 和索引\n- **Claude Code**：Command Palette 交互\n- **pi**：独立审查边界与安全\n\n结果会自动回到这里，我会整合并验证。" });
   tool(5, "root", { type: "baton", tool: "list_agents", input: {}, output: ["claude", "codex", "pi"] }, 1);
+  emit(6, { type: "team.updated", team, change: team.changes[0]! });
   node(8, "api", "实现搜索 API", "codex", "root");
   node(11, "ui", "构建 Command Palette", "claude", "root");
   node(14, "review", "审查搜索边界与安全", "pi", "root");
@@ -95,6 +101,23 @@ export function createScenario(base = Date.now() - 86000, id = "run-demo"): Demo
   item(70, "root", { type: "assistant_message", text: "安全审查已完成。中文检索将使用兼容回退方案；API 测试已经通过。UI 节点正等待你的授权。" });
   tool(74, "api", { type: "baton", tool: "report_result", input: { status: "success", summary: "搜索 API、中文回退和 12 个测试完成" }, output: { delivered: true } }, 2);
   finish(79, "api");
+  const previousMember = memberFor.review!;
+  const successor: TeamMember = { ...previousMember, id: `${id}:m-review-v2`, agentId: "codex", model: demoAgents.find(agent => agent.id === "codex")?.models[0]?.id, replaces: previousMember.id, addedAt: at(83), reason: "安全审查完成后由 Codex 接手集成回归，复用实现上下文。" };
+  const change = { kind: "member_replaced" as const, by: "lead" as const, at: at(83), memberId: successor.id, previousMemberId: previousMember.id, reason: successor.reason };
+  emit(83, { type: "team.updated", team: { ...team, members: team.members.map(member => member.id === previousMember.id ? { ...member, status: "replaced" as const, replacedBy: successor.id, reason: successor.reason } : member).concat(successor), changes: [...team.changes, change], updatedAt: at(83) }, change });
+  memberFor.regression = successor;
+  node(84, "regression", "验证集成回归", "codex", "root");
+  item(84, "regression", { type: "assistant_message", text: "已完成核心路径检查，接下来需要前端交互测试经验更丰富的 agent 继续验证。" });
+  const replacementId = `d-${nid("regression-v2")}`;
+  emit(85, { type: "node.updated", nodeId: nid("regression"), patch: { status: "replaced", endedAt: at(85), updatedAt: at(85), activity: "任务已改派" } });
+  emit(85, { type: "turn.updated", turnId: `t-${nid("regression")}-1`, patch: { status: "canceled", endedAt: at(85) } });
+  emit(85, { type: "delegation.updated", delegationId: `d-${nid("regression")}`, patch: { status: "replaced", replacedBy: replacementId, replaceReason: "交互回归交给 frontend 成员接手", endedAt: at(85) } });
+  memberFor['regression-v2'] = memberFor.ui!;
+  node(85, "regression-v2", "验证集成回归", "claude", "root");
+  emit(85, { type: "delegation.updated", delegationId: replacementId, patch: { replaces: `d-${nid("regression")}` } });
+  item(85, "root", { type: "user_message", text: `<baton-notice>\n任务已改派：d-${nid("regression")} → ${replacementId}\n原因：交互回归交给 frontend 成员接手；前任进展已附入任务书。\n</baton-notice>` });
+  tool(86, "regression-v2", { type: "shell", command: "npm test -- integration", output: "8 integration tests passed", exitCode: 0 }, 7);
+  finish(95, "regression-v2");
   const liveMessage = item(88, "root", { type: "assistant_message", text: "API 结果已经收到。我正在核对最终变更" });
   item(92, "root", { type: "assistant_message", text: "API 结果已经收到。我正在核对最终变更，并准备集成验证。" }, liveMessage);
   item(96, "root", { type: "assistant_message", text: "API 结果已经收到。我正在核对最终变更，并准备集成验证。\n\nUI 节点仍在等待授权；你可以在节点卡片上直接处理。" }, liveMessage);
@@ -122,6 +145,16 @@ export function createScenario(base = Date.now() - 86000, id = "run-demo"): Demo
   }
   // Schedule order is independent of fixture declaration order. Reassign run sequence after sort.
   events.sort((a, b) => a.ts.localeCompare(b.ts) || a.seq - b.seq);
+  // Fixture helpers may schedule delivery after a later-declared message. Allocate local item
+  // sequences on first chronological appearance while preserving chunk replacements.
+  const localSequences = new Map<string, Map<number, number>>();
+  for (const event of events) if (event.type === "item") {
+    const sequences = localSequences.get(event.nodeId) ?? new Map<number, number>();
+    if (!sequences.has(event.itemSeq)) sequences.set(event.itemSeq, sequences.size + 1);
+    event.itemSeq = sequences.get(event.itemSeq)!;
+    localSequences.set(event.nodeId, sequences);
+  }
+  for (const [nodeId, rows] of Object.entries(items)) items[nodeId] = rows.map(row => ({ ...row, seq: localSequences.get(nodeId)!.get(row.seq)! })).sort((a, b) => a.seq - b.seq);
   events.forEach((event, index) => { event.seq = index + 1; });
   return { initial, events, items, at };
 }

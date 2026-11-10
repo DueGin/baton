@@ -29,4 +29,31 @@ describe("API transport", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: "UNAUTHORIZED", message: "invalid token" } }), { status: 401 })));
     await expect(new ApiClient("bad").runs()).rejects.toThrow("401");
   });
+  it("retains additive availability warnings from preset mutations", async () => {
+    const saved = { id: "team-1", name: "Preset", lead: { agentId: "gemini" }, members: [], createdAt: "2026-11-10T00:00:00Z", updatedAt: "2026-11-10T00:00:00Z", warnings: ["gemini is currently unavailable"] };
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => Response.json(saved)));
+    const client = new ApiClient("token");
+    const input = { name: saved.name, lead: saved.lead, members: saved.members };
+    expect((await client.createTeam(input)).warnings).toEqual(saved.warnings);
+    expect((await client.updateTeam(saved.id, input)).warnings).toEqual(saved.warnings);
+    expect((await client.saveTeam("run-1", { name: saved.name })).warnings).toEqual(saved.warnings);
+  });
+  it("uses the team, proposal and reassignment routes with JSON and encoded identifiers", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(null, { status: 204 })); vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("token");
+    await client.addMember("run/1", { role: "api", agentId: "codex" });
+    await client.replaceMember("run/1", "member/2", { agentId: "pi", reassignActive: true });
+    await client.removeMember("run/1", "member/2");
+    await client.approveTeam("run/1", "p/3", { members: [{ role: "api", agentId: "pi" }], note: "edited" });
+    await client.rejectTeam("run/1", "p/4", { feedback: "smaller team" });
+    await client.reassign("d/5", { memberId: "member/2", reason: "handoff" });
+    await client.saveTeam("run/1", { name: "Preset" });
+    await client.createTeam({ name: "Preset", lead: { agentId: "claude" }, members: [] });
+    await client.updateTeam("t/6", { name: "New name", lead: { agentId: "pi" }, members: [] });
+    await client.deleteTeam("t/6");
+    expect(fetchMock.mock.calls.map(call => [call[0], (call[1] as RequestInit).method])).toEqual([
+      ["/api/runs/run%2F1/team/members", "POST"], ["/api/runs/run%2F1/team/members/member%2F2/replace", "POST"], ["/api/runs/run%2F1/team/members/member%2F2", "DELETE"], ["/api/runs/run%2F1/team/proposals/p%2F3/approve", "POST"], ["/api/runs/run%2F1/team/proposals/p%2F4/reject", "POST"], ["/api/delegations/d%2F5/reassign", "POST"], ["/api/runs/run%2F1/team/save-preset", "POST"], ["/api/teams", "POST"], ["/api/teams/t%2F6", "PUT"], ["/api/teams/t%2F6", "DELETE"],
+    ]);
+    expect(JSON.parse((fetchMock.mock.calls[3]![1] as RequestInit).body as string)).toMatchObject({ note: "edited", members: [{ role: "api", agentId: "pi" }] });
+  });
 });

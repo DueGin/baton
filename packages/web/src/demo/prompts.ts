@@ -2,7 +2,7 @@ import type { DelegationRecord } from "@baton/protocol";
 
 /** Browser-only mirrors of server/kernel/prompts.ts; parity is verified in web tests. */
 export function demoBriefPrompt(d: DelegationRecord): string {
-  const parts = [`<baton-assignment delegation="${d.id}">`, `Title: ${d.brief.title}`, "", "Task:", d.brief.task];
+  const parts = [`<baton-assignment delegation="${d.id}">`, `Title: ${d.brief.title}`, ...(d.role ? [`Role: ${d.role}`] : []), "", "Task:", d.brief.task];
   if (d.brief.context) parts.push("", "Context:", d.brief.context);
   if (d.brief.acceptance?.length) parts.push("", "Acceptance criteria:", ...d.brief.acceptance.map(value => `- ${value}`));
   if (d.brief.readonly) parts.push("", "READ ONLY: do not modify any files. Inspect, analyse and report only.");

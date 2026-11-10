@@ -71,4 +71,15 @@ describe("RunStore and protocol integration", () => {
     const row = (seq: number, text: string) => ({ seq, nodeId, ts, item: { type: "assistant_message" as const, text } });
     expect(mergeItems([row(3, "old"), row(1, "one")], [row(2, "two"), row(3, "new")]).map(entry => [entry.seq, "text" in entry.item ? entry.item.text : ""])).toEqual([[1, "one"], [2, "two"], [3, "new"]]);
   });
+  it("keeps approval notices when closing and reopening the durable transcript", async () => {
+    const client = new DemoClient(() => base); const store = new RunStore(client);
+    const before = await client.run("run-local-1");
+    await client.approveTeam(before.run.id, before.run.team!.proposals[0]!.id, { note: "独立审查后再交付" });
+    for (let round = 0; round < 2; round++) {
+      await store.open(before.run.id); await store.loadItems(before.run.rootNodeId);
+      const rows = store.getSnapshot().items[before.run.rootNodeId]!;
+      expect(rows.some(row => row.item.type === "user_message" && row.item.text.includes("<baton-notice>") && row.item.text.includes("独立审查后再交付"))).toBe(true);
+      store.close();
+    }
+  });
 });

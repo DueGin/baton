@@ -1,8 +1,9 @@
-import { applyEvent, emptyUsage, type CreateRunRequest, type DelegationRecord, type GetItemsResponse, type PatchRunRequest, type PermissionDecision, type RunEvent, type RunEventEnvelope, type RunSnapshot, type TimelineItem } from "@baton/protocol";
-import type { BatonClient } from "../api.js";
+import { applyEvent, emptyUsage, type CreateRunRequest, type DelegationRecord, type GetItemsResponse, type PatchRunRequest, type PermissionDecision, type RunEvent, type RunEventEnvelope, type RunSnapshot, type TimelineItem, type AddMemberRequest, type ReplaceMemberRequest, type ReassignRequest, type TeamPreset, type TeamPresetInput, type SaveTeamPresetRequest, type TeamRecord, type TeamMember, type TeamMemberSpec, type TeamChange, type TeamProposal, type ApproveTeamProposalRequest, type RejectTeamProposalRequest } from "@baton/protocol";
+import type { BatonClient, TeamPresetResult } from "../api.js";
 import { summarize, terminal } from "../lib/derive.js";
 import { createScenario, demoAgents } from "./scenario.js";
-import { demoResultsPrompt } from "./prompts.js";
+import { demoBriefPrompt, demoResultsPrompt } from "./prompts.js";
+import { activeMembers, cleanMember, defaultAgentSpec, pendingProposals, validateMembers, validatePreset } from "../lib/teams.js";
 
 interface DemoRun { snapshot: RunSnapshot; remaining: RunEventEnvelope[]; log: RunEventEnvelope[] }
 export class DemoClient implements BatonClient {
@@ -10,6 +11,8 @@ export class DemoClient implements BatonClient {
   private data = new Map<string, DemoRun>();
   private listeners = new Set<(event: RunEventEnvelope) => void>();
   private counter = 0;
+  private serial = 0;
+  private presets = new Map<string, TeamPreset>();
   constructor(private readonly now: () => number = Date.now) {
     const scenario = createScenario(now() - 86000);
     let snapshot = scenario.initial;
@@ -27,6 +30,10 @@ export class DemoClient implements BatonClient {
       permissions: previous.permissions.map(permission => ({ ...permission, status: "resolved", resolution: { behavior: "allow" }, resolvedBy: "human", resolvedAt: archived.at(90) })),
     };
     this.data.set(previous.run.id, { snapshot: previous, log: archived.events, remaining: [] });
+    const ts = new Date(now()).toISOString();
+    this.presets.set("preset-product", { id: "preset-product", name: "产品交付小队", description: "Lead 协调，Codex 实现，pi 独立审查。", lead: defaultAgentSpec(demoAgents, "claude"), members: [{ role: "engineer", ...defaultAgentSpec(demoAgents, "codex"), responsibilities: "代码实现和测试" }, { role: "reviewer", ...defaultAgentSpec(demoAgents, "pi"), responsibilities: "只读审查与边界验证" }], createdAt: ts, updatedAt: ts });
+    // Keep a second live Run at the approval gate until the human decides.
+    void this.createRun({ agent: "claude", cwd: "/workspace/atlas", title: "待确认团队 · 实现登录流程", prompt: "实现登录流程，并独立审查会话安全。", policy: { mode: "dynamic", teamApproval: true } });
   }
   agents = async () => structuredClone(demoAgents);
   runs = async () => { this.advance(); return [...this.data.values()].map(data => summarize(data.snapshot)).reverse(); };
@@ -56,12 +63,21 @@ export class DemoClient implements BatonClient {
       for (const event of ready) {
         if (terminal(data.snapshot.run.status)) continue;
         this.emit(data, event);
+        if (event.seq === 0 && event.type === "delegation.updated" && event.patch.deliveredAt) {
+          const edge = data.snapshot.delegations.find(entry => entry.id === event.delegationId);
+          if (edge && edge.result) this.append(data, edge.fromNodeId, { type: "user_message", text: demoResultsPrompt([edge]) });
+        }
       }
+      if (ready.some(event => event.seq === 0) && data.snapshot.nodes.every(node => node.status === "idle" || terminal(node.status))) this.emit(data, { type: "run.updated", patch: { status: "idle", updatedAt: new Date(this.now()).toISOString() } });
     }
   }
   async createRun(request: CreateRunRequest): Promise<RunSnapshot> {
     const id = `run-local-${++this.counter}`; const ts = new Date(this.now()).toISOString(); const rootNodeId = `${id}:root`;
-    const snapshot: RunSnapshot = { run: { id, title: request.title || request.prompt.slice(0, 28), status: "active", cwd: request.cwd, rootNodeId, createdAt: ts, updatedAt: ts, policy: { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, ...request.policy }, usage: emptyUsage() }, nodes: [{ id: rootNodeId, runId: id, parentNodeId: null, delegationId: null, depth: 0, agentId: request.agent, model: request.model, modeId: request.modeId, thinking: request.thinking, title: request.title || "处理用户请求", status: "running", activity: "分析任务", cwd: request.cwd, usage: emptyUsage(), turns: 1, createdAt: ts, updatedAt: ts }], turns: [{ id: `${id}:t1`, runId: id, nodeId: rootNodeId, status: "running", trigger: "user", startedAt: ts }], delegations: [], permissions: [], toolSpans: [], lastSeq: 0 };
+    const preset = request.teamPresetId ? this.presets.get(request.teamPresetId) : undefined;
+    if (request.teamPresetId && !preset) throw new Error("团队预设不存在");
+    const lead = preset?.lead ?? { agentId: request.agent ?? "claude", model: request.model, modeId: request.modeId, thinking: request.thinking };
+    const mode = preset ? "preset" : request.policy?.mode ?? "dynamic";
+    const snapshot: RunSnapshot = { run: { id, title: request.title || request.prompt.slice(0, 28), status: "active", cwd: request.cwd, rootNodeId, createdAt: ts, updatedAt: ts, policy: { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, teamApproval: true, ...request.policy, mode }, usage: emptyUsage() }, nodes: [{ id: rootNodeId, runId: id, parentNodeId: null, delegationId: null, depth: 0, ...lead, title: request.title || "处理用户请求", status: "running", activity: "分析任务", cwd: request.cwd, usage: emptyUsage(), turns: 1, createdAt: ts, updatedAt: ts }], turns: [{ id: `${id}:t1`, runId: id, nodeId: rootNodeId, status: "running", trigger: "user", startedAt: ts }], delegations: [], permissions: [], toolSpans: [], lastSeq: 0 };
     const data = { snapshot, log: [], remaining: [] }; this.data.set(id, data);
     this.append(data, rootNodeId, { type: "user_message", text: request.prompt });
     this.append(data, rootNodeId, { type: "notice", level: "info", message: "这是浏览器内 demo。消息与操作保存在本次会话中，不会调用本机 agent。" });
@@ -69,7 +85,176 @@ export class DemoClient implements BatonClient {
     this.emit(data, { type: "node.updated", nodeId: rootNodeId, patch: { status: "idle", activity: "等待下一条消息" } });
     this.emit(data, { type: "turn.updated", turnId: `${id}:t1`, patch: { status: "completed", endedAt: ts } });
     this.emit(data, { type: "run.updated", patch: { status: "idle" } });
+    if (mode !== "solo") {
+      const specs = preset?.members ?? request.team;
+      if (specs?.length) {
+        const issues = validateMembers(specs); if (issues.length) throw new Error(issues.join("；"));
+        const members = specs.map(spec => this.member(spec, preset ? "preset" : "human", "由创建 Run 时指定"));
+        const team: TeamRecord = { source: preset ? "preset" : "dynamic", ...(preset ? { presetId: preset.id, presetName: preset.name } : {}), members, proposals: [], changes: [], updatedAt: ts };
+        this.teamUpdate(data, team, { kind: "formed", by: preset ? "preset" : "human", at: ts, reason: "创建 Run 时带入名单" });
+      } else if (!preset) this.proposeTeam(id, [{ role: "engineer", ...defaultAgentSpec(demoAgents, "codex"), responsibilities: "实现功能与测试" }, { role: "reviewer", ...defaultAgentSpec(demoAgents, "pi"), responsibilities: "独立检查安全和边界" }], "实现与审查分开，由两名成员并行推进；名单确认后开工。");
+      else this.teamUpdate(data, { source: "preset", presetId: preset.id, presetName: preset.name, members: [], proposals: [], changes: [], updatedAt: ts }, { kind: "formed", by: "preset", at: ts, reason: "使用无成员预设，由 lead 处理任务" });
+    }
     return structuredClone(data.snapshot);
+  }
+  teams = async (): Promise<TeamPreset[]> => structuredClone([...this.presets.values()]);
+  async createTeam(request: TeamPresetInput): Promise<TeamPresetResult> {
+    const warnings = this.checkPreset(request); const ts = new Date(this.now()).toISOString(); const id = `preset-${++this.serial}`;
+    const preset = { ...structuredClone(request), id, createdAt: ts, updatedAt: ts };
+    this.presets.set(id, preset); return { ...structuredClone(preset), warnings };
+  }
+  async updateTeam(id: string, request: TeamPresetInput): Promise<TeamPresetResult> {
+    const warnings = this.checkPreset(request); const old = this.presets.get(id); if (!old) throw new Error("预设不存在");
+    const preset = { ...structuredClone(request), id, createdAt: old.createdAt, updatedAt: new Date(this.now()).toISOString() };
+    this.presets.set(id, preset); return { ...structuredClone(preset), warnings };
+  }
+  deleteTeam = async (id: string): Promise<void> => { this.presets.delete(id); };
+  private checkPreset(request: TeamPresetInput): string[] {
+    const issues = validatePreset(request); if (issues.length) throw new Error(issues.join("；"));
+    const warnings: string[] = [];
+    for (const id of new Set([request.lead.agentId, ...request.members.map(member => member.agentId)])) {
+      const agent = demoAgents.find(entry => entry.id === id); if (!agent) throw new Error(`Unknown agent id: ${id}`);
+      if (agent.status !== "ready" || !agent.enabled) warnings.push(`${agent.label} 当前不可用，启动使用此预设的 Run 前需恢复可用状态。`);
+    }
+    return warnings;
+  }
+  private member(spec: TeamMemberSpec, addedBy: TeamMember["addedBy"], reason?: string): TeamMember { return { ...cleanMember(spec), id: `member-${++this.serial}`, status: "active", addedBy, addedAt: new Date(this.now()).toISOString(), reason }; }
+  private teamUpdate(data: DemoRun, team: TeamRecord, change: TeamChange): void {
+    this.emit(data, { type: "team.updated", team: { ...team, changes: [...team.changes, change], updatedAt: change.at }, change });
+  }
+  private teamFor(data: DemoRun): TeamRecord {
+    if (data.snapshot.run.policy.mode === "solo") throw new Error("单独完成模式没有团队");
+    return data.snapshot.run.team ?? { source: "dynamic", members: [], proposals: [], changes: [], updatedAt: new Date(this.now()).toISOString() };
+  }
+  async addMember(id: string, request: AddMemberRequest): Promise<void> {
+    const data = this.get(id); const team = this.teamFor(data); const issues = validateMembers([...activeMembers(team), request]); if (issues.length) throw new Error(issues.join("；"));
+    const member = this.member(request, "human", request.reason);
+    this.teamUpdate(data, { ...team, members: [...team.members, member] }, { kind: "member_added", by: "human", memberId: member.id, at: member.addedAt, reason: request.reason });
+  }
+  async replaceMember(id: string, memberId: string, request: ReplaceMemberRequest): Promise<void> {
+    const data = this.get(id); const team = this.teamFor(data); const old = activeMembers(team).find(member => member.id === memberId); if (!old) throw new Error("成员已被替换或移除");
+    const next = this.member({ ...request, role: old.role, responsibilities: request.responsibilities ?? old.responsibilities }, "human", request.reason); next.replaces = old.id;
+    this.teamUpdate(data, { ...team, members: [...team.members.map(member => member.id === old.id ? { ...member, status: "replaced" as const, replacedBy: next.id, reason: request.reason } : member), next] }, { kind: "member_replaced", by: "human", memberId: next.id, previousMemberId: old.id, reason: request.reason, at: next.addedAt });
+    if (request.reassignActive !== false) for (const edge of data.snapshot.delegations.filter(edge => edge.memberId === old.id && !["completed", "canceled", "replaced"].includes(edge.status))) await this.reassign(edge.id, { memberId: next.id, reason: request.reason });
+  }
+  async removeMember(id: string, memberId: string): Promise<void> {
+    const data = this.get(id); const team = this.teamFor(data); const member = activeMembers(team).find(entry => entry.id === memberId); if (!member) throw new Error("成员不再活跃");
+    this.teamUpdate(data, { ...team, members: team.members.map(entry => entry.id === memberId ? { ...entry, status: "removed", reason: "由用户移除" } : entry) }, { kind: "member_removed", by: "human", memberId, at: new Date(this.now()).toISOString(), reason: "由用户移除；正在执行的委派继续运行。" });
+  }
+  async saveTeam(id: string, request: SaveTeamPresetRequest): Promise<TeamPresetResult> {
+    const data = this.get(id); const root = data.snapshot.nodes.find(node => node.id === data.snapshot.run.rootNodeId)!;
+    return this.createTeam({ ...request, lead: { agentId: root.agentId, model: root.model, modeId: root.modeId, thinking: root.thinking }, members: activeMembers(this.teamFor(data)).map(cleanMember) });
+  }
+  async reassign(id: string, request: ReassignRequest): Promise<void> {
+    const old = await this.delegation(id); const data = this.get(old.runId); const team = this.teamFor(data);
+    if (["canceled", "replaced"].includes(old.status)) throw new Error("已取消或替换的委派不能改派");
+    let target = activeMembers(team).find(member => member.id === request.memberId);
+    if (!target) {
+      if (request.memberId || !request.agentId || data.snapshot.run.policy.mode === "preset") throw new Error("请选择活跃团队成员");
+      await this.addMember(old.runId, { role: `临时-${++this.serial}`, agentId: request.agentId, model: request.model, modeId: request.modeId, thinking: request.thinking, reason: request.reason });
+      target = activeMembers(data.snapshot.run.team).at(-1)!;
+    }
+    const hasNode = data.snapshot.nodes.some(node => node.id === old.toNodeId);
+    const rows = hasNode ? (await this.items(old.toNodeId)).items : [];
+    const last = rows.findLast(row => row.item.type === "assistant_message");
+    const files = rows.flatMap(row => row.item.type === "tool_call" && (row.item.detail.type === "edit" || row.item.detail.type === "write") ? [row.item.detail.filePath] : []);
+    const progress = `${last?.item.type === "assistant_message" ? last.item.text.slice(0, 2000) : "尚无最终回复"}\n修改文件：${[...new Set(files)].join(", ") || "无"}`;
+    if (hasNode) await this.cancelNode(old.toNodeId); else this.cancelQueued(data, old);
+    const ts = new Date(this.now()).toISOString(); const newId = `delegation-${++this.serial}`;
+    if (hasNode) this.emit(data, { type: "node.updated", nodeId: old.toNodeId, patch: { status: "replaced", endedAt: ts, updatedAt: ts, activity: "已改派" } });
+    this.emit(data, { type: "delegation.updated", delegationId: old.id, patch: { status: "replaced", replacedBy: newId, replaceReason: request.reason, endedAt: ts } });
+    this.queueTask(data, target, { ...old.brief, context: `${old.brief.context ?? ""}\n\n前任进展摘要：\n${progress}` }, undefined, old.fromNodeId, newId, old.id);
+    this.notice(data, old.fromNodeId, `任务已改派：${old.id} → ${newId}\n原因：${request.reason ?? "用户要求"}\n前任进展和修改文件已附入任务书。`);
+  }
+  /** Exposed only on the browser demo, to exercise the same gate without a real agent. */
+  proposeTeam(id: string, specs: TeamMemberSpec[], rationale: string): void {
+    const data = this.get(id); const team = this.teamFor(data);
+    if (pendingProposals(team).length) throw new Error("已有待确认提案，请先处理");
+    const issues = validateMembers([...activeMembers(team), ...specs]); if (issues.length) throw new Error(issues.join("；"));
+    const ts = new Date(this.now()).toISOString();
+    if (data.snapshot.run.policy.teamApproval === false) {
+      const members = specs.map(spec => this.member(spec, "lead", rationale));
+      this.teamUpdate(data, { ...team, rationale, members: [...team.members, ...members] }, { kind: team.members.length ? "member_added" : "formed", by: "lead", at: ts, reason: rationale });
+      members.forEach(member => this.queueTask(data, member, { title: `${member.role} · 执行任务`, task: member.responsibilities ?? "执行分配任务" }));
+      return;
+    }
+    const proposal: TeamProposal = { id: `proposal-${++this.serial}`, kind: team.members.length ? "addition" : "formation", status: "pending", by: "lead", nodeId: data.snapshot.run.rootNodeId, proposedAt: ts, rationale, members: specs.map(cleanMember) };
+    this.teamUpdate(data, { ...team, rationale, proposals: [...team.proposals, proposal] }, { kind: "proposed", by: "lead", at: ts, reason: rationale, proposalId: proposal.id });
+    specs.forEach(spec => this.queueTask(data, spec, { title: `${spec.role} · 执行任务`, task: spec.responsibilities ?? "执行分配任务" }, proposal.id));
+    this.notice(data, proposal.nodeId, "组队提案已提交，等待你的名单确认；批准前排队任务不会开工。");
+  }
+  proposeReplacement(id: string, memberId: string, spec: TeamMemberSpec, reason: string, reassignActive = true): void {
+    const data = this.get(id); const team = this.teamFor(data);
+    if (pendingProposals(team).length) throw new Error("已有待确认提案，请先处理");
+    if (!activeMembers(team).some(member => member.id === memberId)) throw new Error("成员不再活跃");
+    if (data.snapshot.run.policy.teamApproval === false) { void this.replaceMember(id, memberId, { ...spec, reason, reassignActive }); return; }
+    const ts = new Date(this.now()).toISOString();
+    const proposal: TeamProposal = { id: `proposal-${++this.serial}`, kind: "replacement", status: "pending", by: "lead", nodeId: data.snapshot.run.rootNodeId, proposedAt: ts, rationale: reason, replace: { memberId, with: cleanMember(spec), reassignActive, reason } };
+    this.teamUpdate(data, { ...team, proposals: [...team.proposals, proposal] }, { kind: "proposed", by: "lead", at: ts, proposalId: proposal.id, reason });
+    this.notice(data, proposal.nodeId, `已提交换人提案：${spec.role} → ${spec.agentId}，等待确认。`);
+  }
+  private queueTask(data: DemoRun, member: TeamMemberSpec, brief: DelegationRecord["brief"], blockedByProposal?: string, parentId = data.snapshot.run.rootNodeId, id = `delegation-${++this.serial}`, replaces?: string): void {
+    const ts = new Date(this.now()).toISOString(); const nodeId = `node-${++this.serial}`;
+    const memberId = "id" in member && typeof member.id === "string" ? member.id : undefined;
+
+    const edge: DelegationRecord = { id, runId: data.snapshot.run.id, kind: "delegate", fromNodeId: parentId, toNodeId: nodeId, role: member.role, memberId, brief, status: "queued", round: 1, createdAt: ts, subtreeUsage: emptyUsage(), ...(blockedByProposal ? { blockedByProposal } : {}), ...(replaces ? { replaces } : {}) };
+    this.emit(data, { type: "delegation.created", delegation: edge });
+    if (!blockedByProposal) this.startTask(data, edge, memberId);
+  }
+  private startTask(data: DemoRun, old: DelegationRecord, memberId?: string): void {
+    const { blockedByProposal: _blocked, ...reserved } = old;
+    const ts = new Date(this.now()).toISOString(); const member = activeMembers(data.snapshot.run.team).find(entry => entry.id === memberId);
+    if (!member) throw new Error("任务需要活跃团队成员");
+    const edge = { ...reserved, role: member.role, memberId: member.id }; const turnId = `${edge.toNodeId}:t1`;
+    const parent = data.snapshot.nodes.find(node => node.id === edge.fromNodeId)!;
+    if (!data.snapshot.nodes.some(node => node.id === edge.toNodeId)) this.emit(data, { type: "node.created", node: { id: edge.toNodeId, runId: edge.runId, parentNodeId: parent.id, delegationId: edge.id, depth: parent.depth + 1, ...cleanMember(member), memberId: member.id, title: edge.brief.title, cwd: parent.cwd, status: "starting", activity: "准备执行", createdAt: ts, updatedAt: ts, usage: emptyUsage(), turns: 0 } });
+    this.emit(data, { type: "run.updated", patch: { status: "active", updatedAt: ts } });
+    this.emit(data, { type: "delegation.created", delegation: { ...edge, status: "running", startedAt: ts } });
+    this.emit(data, { type: "node.updated", nodeId: edge.toNodeId, patch: { ...cleanMember(member), memberId: member.id, status: "running", activity: "执行已批准的任务", turns: 1, updatedAt: ts } });
+    this.emit(data, { type: "turn.started", turn: { id: turnId, runId: edge.runId, nodeId: edge.toNodeId, trigger: "delegation", delegationId: edge.id, status: "running", startedAt: ts } });
+    this.append(data, edge.toNodeId, { type: "user_message", text: demoBriefPrompt(edge) });
+    this.append(data, edge.toNodeId, { type: "assistant_message", text: `以 ${member?.role ?? edge.role} 角色开始执行，先检查现有实现。` });
+    const span = { id: `${edge.toNodeId}:check`, runId: edge.runId, nodeId: edge.toNodeId, turnId, callId: "check", name: "shell", kind: "shell", status: "running" as const, summary: "npm test", startedAt: ts };
+    this.emit(data, { type: "tool.span", span });
+    const end = new Date(this.now() + 12000).toISOString();
+    const future: RunEvent[] = [{ type: "tool.span", span: { ...span, status: "completed", endedAt: end } }, { type: "turn.updated", turnId, patch: { status: "completed", endedAt: end } }, { type: "node.updated", nodeId: edge.toNodeId, patch: { status: "completed", activity: "结果已交付", endedAt: end, updatedAt: end } }, { type: "delegation.updated", delegationId: edge.id, patch: { status: "completed", endedAt: end, deliveredAt: end, deliveredVia: "turn", result: { status: "success", summary: "浏览器 demo 任务执行完成，测试通过。", reported: true, finalText: "完成" } } }];
+    future.forEach(event => data.remaining.push({ ...event, runId: edge.runId, seq: 0, ts: end }));
+  }
+  private cancelQueued(data: DemoRun, old: DelegationRecord): void {
+    const { blockedByProposal: _blocked, ...edge } = old;
+    this.emit(data, { type: "delegation.created", delegation: { ...edge, status: "canceled", endedAt: new Date(this.now()).toISOString() } });
+  }
+  private notice(data: DemoRun, nodeId: string, text: string): void { this.append(data, nodeId, { type: "user_message", text: `<baton-notice>\n${text}\n</baton-notice>` }); }
+  async approveTeam(id: string, proposalId: string, request: ApproveTeamProposalRequest): Promise<void> {
+    const data = this.get(id); const team = this.teamFor(data); const proposal = team.proposals.find(entry => entry.id === proposalId && entry.status === "pending"); if (!proposal) throw new Error("提案已处理或不存在");
+    const specs = (proposal.kind === "replacement" ? [request.replacement ?? proposal.replace!.with] : request.members ?? proposal.members ?? []).map(cleanMember);
+    if (proposal.replace && specs[0]?.role !== proposal.replace.with.role) throw new Error("换人必须保留原角色");
+    const issues = validateMembers([...activeMembers(team).filter(member => member.id !== proposal.replace?.memberId), ...specs]); if (issues.length) throw new Error(issues.join("；"));
+    const ts = new Date(this.now()).toISOString(); const members = specs.map(spec => this.member(spec, proposal.by, proposal.rationale));
+    this.teamUpdate(data, { ...team, rationale: proposal.rationale ?? team.rationale, members: [...team.members, ...members], proposals: team.proposals.map(entry => entry.id === proposalId ? { ...entry, status: "approved", decidedAt: ts, approvedMembers: proposal.kind !== "replacement" ? specs : undefined, approvedReplacement: proposal.kind === "replacement" ? specs[0] : undefined, feedback: request.note } : entry) }, { kind: "approved", by: "human", at: ts, proposalId, reason: request.note ?? "批准名单" });
+    if (!proposal.replace) this.teamUpdate(data, data.snapshot.run.team!, { kind: proposal.kind === "formation" ? "formed" : "member_added", by: proposal.by, at: ts, proposalId, reason: proposal.rationale });
+    if (proposal.replace && members[0]) {
+      const replacement = members[0];
+      const current = data.snapshot.run.team!;
+      const next = { ...current, members: current.members.map(member => member.id === proposal.replace!.memberId ? { ...member, status: "replaced" as const, replacedBy: replacement.id } : member.id === replacement.id ? { ...member, replaces: proposal.replace!.memberId } : member) };
+      this.teamUpdate(data, next, { kind: "member_replaced", by: "human", at: ts, memberId: replacement.id, previousMemberId: proposal.replace.memberId, reason: request.note ?? proposal.replace.reason });
+      if (proposal.replace.reassignActive) for (const edge of data.snapshot.delegations.filter(edge => edge.memberId === proposal.replace!.memberId && !["completed", "canceled", "replaced"].includes(edge.status))) await this.reassign(edge.id, { memberId: replacement.id, reason: request.note ?? proposal.replace.reason });
+    }
+    for (const edge of data.snapshot.delegations.filter(edge => edge.blockedByProposal === proposalId)) {
+      const member = members.find(member => member.role === edge.role);
+      if (member) this.startTask(data, edge, member.id); else this.cancelQueued(data, edge);
+    }
+    const originalSpecs = (proposal.members ?? (proposal.replace ? [proposal.replace.with] : [])).map(cleanMember);
+    const originalRoles = originalSpecs.map(member => member.role);
+    this.notice(data, proposal.nodeId, `名单已批准。\n原提案：${originalRoles.join("、")}\n生效名单：${specs.map(spec => `${spec.role}=${spec.agentId}/${spec.model ?? "默认模型"}`).join("、")}\n${JSON.stringify(specs) === JSON.stringify(originalSpecs) ? "按原名单批准。" : "已按用户编辑应用名单；删除角色的排队任务已取消。"}\n留言：${request.note ?? "无"}`);
+  }
+  async rejectTeam(id: string, proposalId: string, request: RejectTeamProposalRequest): Promise<void> {
+    if (!request.feedback.trim()) throw new Error("请填写驳回理由");
+    const data = this.get(id); const team = this.teamFor(data); const proposal = team.proposals.find(entry => entry.id === proposalId && entry.status === "pending"); if (!proposal) throw new Error("提案已处理或不存在");
+    const ts = new Date(this.now()).toISOString();
+    this.teamUpdate(data, { ...team, proposals: team.proposals.map(entry => entry.id === proposalId ? { ...entry, status: "rejected", decidedAt: ts, feedback: request.feedback } : entry) }, { kind: "rejected", by: "human", at: ts, proposalId, reason: request.feedback });
+    for (const edge of data.snapshot.delegations.filter(edge => edge.blockedByProposal === proposalId)) this.cancelQueued(data, edge);
+    this.notice(data, proposal.nodeId, `名单已驳回，所有相关排队委派已取消。\n理由：${request.feedback}`);
   }
   async patchRun(id: string, request: PatchRunRequest): Promise<void> {
     const data = this.get(id);
@@ -85,7 +270,7 @@ export class DemoClient implements BatonClient {
   }
   async send(nodeId: string, text: string): Promise<void> {
     const data = this.forNode(nodeId); const ts = new Date(this.now()).toISOString(); const node = data.snapshot.nodes.find(entry => entry.id === nodeId)!;
-    if (node.status === "canceled") throw new Error("节点已取消，请创建新的 Run");
+    if (node.status === "canceled" || node.status === "replaced") throw new Error("节点已取消或替换，请选择活跃节点");
     if (node.status === "waiting_permission") throw new Error("请先处理该节点的权限请求");
     this.append(data, nodeId, { type: "user_message", text });
     const turnId = `${nodeId}:user-${data.snapshot.lastSeq}`;
@@ -100,7 +285,7 @@ export class DemoClient implements BatonClient {
   cancelRun = async (id: string): Promise<void> => { const data = this.get(id); await this.cancelNode(data.snapshot.run.rootNodeId); };
   async cancelNode(nodeId: string): Promise<void> {
     const data = this.forNode(nodeId); const ids = new Set([nodeId]); const ts = new Date(this.now()).toISOString();
-    let size = 0; while (size !== ids.size) { size = ids.size; data.snapshot.nodes.forEach(node => { if (node.parentNodeId && ids.has(node.parentNodeId)) ids.add(node.id); }); }
+    let size = 0; while (size !== ids.size) { size = ids.size; data.snapshot.nodes.forEach(node => { if (node.parentNodeId && ids.has(node.parentNodeId)) ids.add(node.id); }); data.snapshot.delegations.forEach(edge => { if (ids.has(edge.fromNodeId)) ids.add(edge.toNodeId); }); }
     data.remaining = data.remaining.filter(event => {
       if (event.type === "run.updated" && event.patch.usage) return false;
       if ("nodeId" in event && event.nodeId && ids.has(event.nodeId)) return false;
@@ -114,9 +299,15 @@ export class DemoClient implements BatonClient {
     for (const node of [...data.snapshot.nodes].reverse()) if (ids.has(node.id) && !terminal(node.status)) this.emit(data, { type: "node.updated", nodeId: node.id, patch: { status: "canceled", endedAt: ts, updatedAt: ts } });
     for (const turn of data.snapshot.turns) if (ids.has(turn.nodeId) && turn.status === "running") this.emit(data, { type: "turn.updated", turnId: turn.id, patch: { status: "canceled", endedAt: ts } });
     for (const span of data.snapshot.toolSpans) if (ids.has(span.nodeId) && span.status === "running") this.emit(data, { type: "tool.span", span: { ...span, status: "canceled", endedAt: ts } });
-    for (const edge of data.snapshot.delegations) if (ids.has(edge.toNodeId) && !terminal(edge.status)) this.emit(data, { type: "delegation.updated", delegationId: edge.id, patch: { status: "canceled", endedAt: ts } });
+    for (const edge of data.snapshot.delegations) if (ids.has(edge.toNodeId) && !terminal(edge.status)) {
+      if (edge.blockedByProposal) this.cancelQueued(data, edge); else this.emit(data, { type: "delegation.updated", delegationId: edge.id, patch: { status: "canceled", endedAt: ts } });
+    }
     for (const permission of data.snapshot.permissions) if (ids.has(permission.nodeId) && permission.status === "pending") this.emit(data, { type: "permission", permission: { ...permission, status: "expired", resolvedAt: ts } });
-    if (ids.has(data.snapshot.run.rootNodeId)) this.emit(data, { type: "run.updated", patch: { status: "canceled", endedAt: ts, updatedAt: ts } });
+    if (ids.has(data.snapshot.run.rootNodeId)) {
+      const team = data.snapshot.run.team;
+      if (team && pendingProposals(team).length) this.teamUpdate(data, { ...team, proposals: team.proposals.map(proposal => proposal.status === "pending" ? { ...proposal, status: "rejected", decidedAt: ts, feedback: "Run 已取消" } : proposal) }, { kind: "rejected", by: "human", at: ts, reason: "Run 已取消" });
+      this.emit(data, { type: "run.updated", patch: { status: "canceled", endedAt: ts, updatedAt: ts } });
+    }
   }
   decide = (requestId: string, decision: PermissionDecision) => this.resolve(requestId, decision, "human");
   private async resolve(requestId: string, decision: PermissionDecision, by: "human" | "policy"): Promise<void> {
@@ -141,6 +332,17 @@ export class DemoClient implements BatonClient {
       for (const turn of data.snapshot.turns) if (turn.nodeId === rootId && turn.status === "running") this.emit(data, { type: "turn.updated", turnId: turn.id, patch: { status: "completed", endedAt: ts } });
       data.remaining = [];
       for (const span of data.snapshot.toolSpans) if (span.status === "running") this.emit(data, { type: "tool.span", span: { ...span, status: "completed", endedAt: ts } });
+      // Resolving the walkthrough's final permission also finishes its integration check.
+      for (const node of data.snapshot.nodes.filter(node => node.parentNodeId && !terminal(node.status))) {
+        this.emit(data, { type: "node.updated", nodeId: node.id, patch: { status: "completed", endedAt: ts, updatedAt: ts, activity: "验证完成" } });
+        for (const turn of data.snapshot.turns.filter(turn => turn.nodeId === node.id && turn.status === "running")) this.emit(data, { type: "turn.updated", turnId: turn.id, patch: { status: "completed", endedAt: ts } });
+        const pending = data.snapshot.delegations.find(edge => edge.toNodeId === node.id);
+        if (pending) {
+          const result: DelegationRecord = { ...pending, status: "completed", endedAt: ts, deliveredAt: ts, deliveredVia: "turn", result: { status: "success", summary: "集成回归验证完成。", reported: true, finalText: "验证完成" } };
+          this.emit(data, { type: "delegation.updated", delegationId: pending.id, patch: result });
+          this.append(data, result.fromNodeId, { type: "user_message", text: demoResultsPrompt([result]) });
+        }
+      }
       this.emit(data, { type: "run.updated", patch: { status: "idle", updatedAt: ts } });
       return;
     }

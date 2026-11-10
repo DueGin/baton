@@ -31,9 +31,11 @@ describe("deterministic demo protocol stream", () => {
       for (const record of [...snapshot.nodes, ...snapshot.delegations]) if (record.endedAt) expect(Date.parse(record.endedAt)).toBeGreaterThanOrEqual(Date.parse(record.createdAt));
     }
     expect(replacements).toBeGreaterThan(5);
-    expect(snapshot.nodes).toHaveLength(5);
+    expect(snapshot.nodes).toHaveLength(7);
     expect(snapshot.nodes.some(node => node.depth === 2)).toBe(true);
     expect(snapshot.nodes.some(node => node.status === "failed")).toBe(true);
+    expect(snapshot.nodes.some(node => node.status === "replaced")).toBe(true);
+    expect(snapshot.delegations.some(edge => edge.status === "replaced" && snapshot.delegations.some(next => next.id === edge.replacedBy && next.replaces === edge.id))).toBe(true);
     expect(snapshot.permissions.some(permission => permission.status === "pending")).toBe(true);
     expect(new Set(snapshot.toolSpans.map(span => span.kind)).size).toBeGreaterThanOrEqual(8);
     expect(snapshot.turns.some(turn => turn.trigger === "result")).toBe(true);
@@ -42,8 +44,8 @@ describe("deterministic demo protocol stream", () => {
     expect(snapshot.run.usage.outputTokens).toBe(sum.outputTokens);
     expect(snapshot.run.usage.costUsd).toBeCloseTo(sum.costUsd, 8);
     const protocol = scenario.events.filter(event => event.type === "item" && event.item.type === "user_message").flatMap(event => event.type === "item" && event.item.type === "user_message" ? parseBatonMessage(event.item.text) ?? [] : []);
-    expect(protocol.filter(part => part.type === "assignment")).toHaveLength(4);
-    expect(protocol.filter(part => part.type === "results")).toHaveLength(3);
+    expect(protocol.filter(part => part.type === "assignment")).toHaveLength(6);
+    expect(protocol.filter(part => part.type === "results")).toHaveLength(4);
   });
   it("implements the same client actions, resolves permissions and delivers the child result", async () => {
     const client = new DemoClient(() => base + 86000);
@@ -63,13 +65,13 @@ describe("deterministic demo protocol stream", () => {
   });
   it("creates a usable Run and cascades cancellation without affecting siblings", async () => {
     const client = new DemoClient(() => base + 86000);
-    const created = await client.createRun({ agent: "codex", cwd: "/tmp/demo", prompt: "检查项目", policy: { autoApprove: true } });
+    const created = await client.createRun({ agent: "codex", cwd: "/tmp/demo", prompt: "检查项目", policy: { autoApprove: true, mode: "solo" } });
     expect(created.run.policy.autoApprove).toBe(true);
     expect((await client.items(created.run.rootNodeId)).items).toHaveLength(3);
     await client.cancelNode("run-demo:root");
     const canceled = await client.run("run-demo");
     expect(canceled.run.status).toBe("canceled");
-    expect(canceled.nodes.every(node => ["completed", "failed", "canceled"].includes(node.status))).toBe(true);
+    expect(canceled.nodes.every(node => ["completed", "failed", "canceled", "replaced"].includes(node.status))).toBe(true);
     expect(canceled.permissions.every(permission => permission.status !== "pending")).toBe(true);
     expect((await client.run(created.run.id)).run.status).toBe("idle");
   });

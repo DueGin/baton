@@ -29,6 +29,7 @@ function lastActivity(snapshot: RunSnapshot, fallback: number): number {
   for (const span of snapshot.toolSpans) { take(span.startedAt); take(span.endedAt); }
   for (const edge of snapshot.delegations) { take(edge.endedAt); take(edge.deliveredAt); }
   for (const node of snapshot.nodes) take(node.endedAt);
+  for (const change of snapshot.run.team?.changes ?? []) take(change.at);
   return latest;
 }
 export function fitTime(snapshot: RunSnapshot, now: number): TimeViewport {
