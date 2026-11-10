@@ -1,16 +1,36 @@
 import { randomUUID } from "node:crypto";
-import { isAbsolute, relative, resolve, matchesGlob } from "node:path";
+import { realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, relative, resolve, matchesGlob } from "node:path";
 import { z } from "zod";
 import type { CreatePermissionRuleRequest, NodeRecord, PermissionDecision, PermissionRecord, PermissionRequest, PermissionRule } from "@baton/protocol";
 import type { Store } from "../store/index.js";
 export const HUMAN_DENIAL = "The human denied this action. Do not retry it; choose a different approach or ask_human.";
 const ruleSchema = z.object({ agentId: z.string().min(1).optional(), toolName: z.string().trim().min(1), pattern: z.string().min(1).optional(), decision: z.enum(["allow", "deny"]), scope: z.enum(["global", "run"]), runId: z.string().optional() });
 const normalizeCommand = (value: string): string => value.trim().replace(/\s+/g, " ");
+/** Resolve symlinks (macOS /tmp → /private/tmp) even when the file itself does not exist yet. */
+function canonical(path: string): string {
+  try { return realpathSync(path); } catch {
+    const parent = dirname(path);
+    return parent === path ? path : resolve(canonical(parent), basename(path));
+  }
+}
+/** File path of a permission request: the normalised detail first, then the common raw input keys
+ * (Claude Write/Edit/Read use input.file_path, notebooks use notebook_path). */
+function requestPath(request: PermissionRequest): string | undefined {
+  const detail = request.detail;
+  if (detail && "filePath" in detail && typeof detail.filePath === "string") return detail.filePath;
+  for (const key of ["file_path", "filePath", "path", "notebook_path"]) {
+    const value = request.input?.[key];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
+}
 export function permissionInput(request: PermissionRequest, cwd: string): { command?: string; file?: string } {
   const detail = request.detail;
   const command = detail?.type === "shell" ? detail.command : typeof request.input?.command === "string" ? request.input.command : undefined;
-  const path = detail && "filePath" in detail && typeof detail.filePath === "string" ? detail.filePath : undefined;
-  return { command: command === undefined ? undefined : normalizeCommand(command), file: path === undefined ? undefined : relative(cwd, isAbsolute(path) ? path : resolve(cwd, path)).replaceAll("\\", "/") };
+  const path = requestPath(request);
+  const file = path === undefined ? undefined : relative(canonical(cwd), canonical(isAbsolute(path) ? path : resolve(cwd, path))).replaceAll("\\", "/");
+  return { command: command === undefined ? undefined : normalizeCommand(command), file };
 }
 export function ruleMatches(rule: PermissionRule, request: PermissionRequest, node: Pick<NodeRecord, "agentId" | "runId" | "cwd">): boolean {
   if (rule.scope === "run" && rule.runId !== node.runId) return false;
