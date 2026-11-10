@@ -3,7 +3,7 @@ import { isAbsolute } from "node:path";
 import { BATON_TOOLS, emptyUsage, type AgentEntry, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionResponse, type ReportResultInput, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
 import type { DriverEvent, DriverRegistry, DriverSession } from "../driver/types.js";
 import { Store } from "../store/index.js";
-import { briefPrompt, correctionPrompt, resultsPrompt, SYSTEM_PROMPT } from "./prompts.js";
+import { briefPrompt, correctionPrompt, resultsPrompt, systemPrompt } from "./prompts.js";
 import { validateSchema } from "./schema.js";
 
 export const DEFAULT_POLICY: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false };
@@ -119,7 +119,7 @@ export class Kernel {
     rt.opening = (async () => {
       const n = this.store.node(id), driver = this.registry.get(n.agentId);
       if (!driver) throw new Error(`Agent unavailable: ${n.agentId}`);
-      const spec = { cwd: n.cwd, model: n.model, modeId: n.modeId, thinking: n.thinking, title: n.title, systemPrompt: SYSTEM_PROMPT, mcpServers: { baton: { type: "http" as const, url: `${this.options.baseUrl}/mcp/n/${rt.token}` } } };
+      const spec = { cwd: n.cwd, model: n.model, modeId: n.modeId, thinking: n.thinking, title: n.title, systemPrompt: systemPrompt(n, this.store.snapshot(n.runId).run.policy), mcpServers: { baton: { type: "http" as const, url: `${this.options.baseUrl}/mcp/n/${rt.token}` } } };
       const session = n.persistence !== undefined && driver.capabilities.resume ? await driver.resume(n.persistence, spec) : await driver.open(spec);
       if (rt.closed) { await session.close(); throw new Error("Node session closed during startup"); }
       rt.session = session;
