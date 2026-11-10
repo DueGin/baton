@@ -11,9 +11,16 @@ export const BATON_MCP_SERVER_NAME = "baton";
 export const listAgentsInput = z.object({});
 
 export const delegateInput = z.object({
-  agent: z.string().describe('Agent id from list_agents, e.g. "codex", "claude", "pi".'),
-  model: z.string().optional().describe("Model id from list_agents; omit for the agent default."),
-  mode: z.string().optional().describe("Mode id from list_agents; omit for the run default."),
+  role: z
+    .string()
+    .optional()
+    .describe("Team role to delegate to (see get_team). Required in preset runs; preferred in dynamic runs."),
+  agent: z
+    .string()
+    .optional()
+    .describe('Agent id from list_agents, e.g. "codex". Use when not delegating by role; in dynamic runs this adds an ad-hoc member to the team.'),
+  model: z.string().optional().describe("Override the member's / agent's model."),
+  mode: z.string().optional().describe("Override the member's / agent's mode."),
   title: z.string().min(1).max(120).describe("Short title shown in the topology graph."),
   task: z.string().min(1).describe("What the delegate must do. Self-contained: it cannot see your conversation."),
   context: z.string().optional().describe("Relevant facts, file paths, decisions, what was already tried."),
@@ -71,11 +78,71 @@ export const reportResultInput = z.object({
     .optional(),
 });
 
+
+const memberSpec = z.object({
+  role: z.string().min(1).max(40).describe('Short unique role name, e.g. "frontend", "assets", "tester".'),
+  agent: z.string().describe("Agent id from list_agents."),
+  model: z.string().optional(),
+  mode: z.string().optional(),
+  thinking: z.string().optional(),
+  responsibilities: z.string().min(1).describe("What this role owns: scope, files, deliverables."),
+  reason: z.string().optional().describe("Why this agent/model fits the role."),
+});
+
+export const formTeamInput = z.object({
+  rationale: z.string().min(1).describe("How you split the request and why this team."),
+  members: z.array(memberSpec).min(1).max(12),
+});
+
+export const getTeamInput = z.object({});
+
+export const replaceMemberInput = z.object({
+  role: z.string().describe("Role whose member is replaced."),
+  agent: z.string().describe("New agent id."),
+  model: z.string().optional(),
+  mode: z.string().optional(),
+  thinking: z.string().optional(),
+  responsibilities: z.string().optional().describe("Omit to keep the role's responsibilities."),
+  reason: z.string().min(1),
+  reassignActive: z
+    .boolean()
+    .default(true)
+    .describe("Also hand the old member's unfinished delegations to the new member."),
+});
+
+export const reassignInput = z.object({
+  delegationId: z.string().describe("One of your delegations."),
+  role: z.string().optional().describe("Give it to this team role…"),
+  agent: z.string().optional().describe("…or to this agent (ad-hoc)."),
+  model: z.string().optional(),
+  mode: z.string().optional(),
+  reason: z.string().min(1),
+});
+
 export const BATON_TOOLS = {
   list_agents: {
     input: listAgentsInput,
     description:
       "List the agents you can delegate to on this machine, with models, modes, notes and current load.",
+  },
+  form_team: {
+    input: formTeamInput,
+    description:
+      "Lead only (dynamic runs): form the team for this request — roles, the agent/model that fills each role, and their responsibilities. Call before delegating; call again to add roles. Keep the team as small as the work allows.",
+  },
+  get_team: {
+    input: getTeamInput,
+    description: "The run's team: roles, who fills them, their responsibilities and their current delegations.",
+  },
+  replace_member: {
+    input: replaceMemberInput,
+    description:
+      "Lead only: replace the agent filling a role (e.g. it failed, is too slow, or another agent fits better). By default its unfinished delegations move to the new member with a summary of the work done so far.",
+  },
+  reassign: {
+    input: reassignInput,
+    description:
+      "Move one of your delegations to another role or agent. The current delegate is stopped; the new one gets the same brief plus a summary of the work done so far. The result then comes from the new delegation id returned here.",
   },
   delegate: {
     input: delegateInput,
@@ -111,6 +178,11 @@ export const BATON_TOOLS = {
 } as const;
 
 export type BatonToolName = keyof typeof BATON_TOOLS;
+/** Tools only the root (lead) may call. */
+export const LEAD_ONLY_TOOLS: readonly BatonToolName[] = ["form_team", "replace_member"];
+export type FormTeamInput = z.infer<typeof formTeamInput>;
+export type ReplaceMemberInput = z.infer<typeof replaceMemberInput>;
+export type ReassignInput = z.infer<typeof reassignInput>;
 export type DelegateInput = z.infer<typeof delegateInput>;
 export type DelegateOutput = z.infer<typeof delegateOutput>;
 export type WaitInput = z.infer<typeof waitInput>;

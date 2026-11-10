@@ -59,7 +59,15 @@ export interface AgentEntry {
 
 // ───────────────────────────── run / node / delegation ─────────────────────────────
 
-export type DelegationMode = "lead" | "auto";
+/**
+ * How a run collaborates (DESIGN §4.5):
+ * - "dynamic": the root is the lead; it forms a team for the request (form_team), delegates by role,
+ *   and may replace members or reassign tasks at any time.
+ * - "preset": the team comes from a saved TeamPreset; the root is the preset's lead and delegates only
+ *   to the preset's roles (members can still be replaced).
+ * - "solo": the root does everything itself; no delegation tools are injected.
+ */
+export type CollaborationMode = "dynamic" | "preset" | "solo";
 
 export type RunStatus = "active" | "idle" | "completed" | "failed" | "canceled";
 
@@ -70,13 +78,8 @@ export interface RunPolicy {
   maxActiveChildren: number;
   /** Auto-approve permission requests of every node in the run (recorded as by: "policy"). */
   autoApprove: boolean;
-  /**
-   * How strongly agents are steered toward delegating (default "lead").
-   * - "lead": the root acts as the lead of the run — it splits separable work and delegates it in
-   *   parallel to the best-suited agents, keeping planning, integration and verification for itself.
-   * - "auto": every agent decides on its own whether delegating is worth it.
-   */
-  delegation?: DelegationMode;
+  /** Collaboration mode; default "dynamic". */
+  mode?: CollaborationMode;
   /** Optional run budget; exceeding it rejects new delegations and cancels nothing by itself. */
   budget?: { maxCostUsd?: number; maxTokens?: number; maxWallMinutes?: number };
 }
@@ -88,6 +91,69 @@ export interface UsageTotals {
   costUsd: number;
 }
 
+// ───────────────────────────── team ─────────────────────────────
+
+/** A role slot: which agent (and model/mode) does a kind of work. Delegating to a role opens a new
+ * node with this spec; one member can have several delegations. */
+export interface TeamMemberSpec {
+  /** Unique within the team, short and descriptive: "frontend", "assets", "reviewer"… */
+  role: string;
+  agentId: string;
+  model?: string;
+  modeId?: string;
+  thinking?: string;
+  /** What this role is responsible for; shown to the lead and to the member's delegates. */
+  responsibilities?: string;
+}
+
+export type TeamActor = "human" | "lead" | "preset" | "agent";
+
+export interface TeamMember extends TeamMemberSpec {
+  id: string;
+  status: "active" | "replaced" | "removed";
+  addedBy: TeamActor;
+  addedAt: IsoTime;
+  /** Why this member was chosen (or, once replaced/removed, why it left). */
+  reason?: string;
+  /** Member id that took over this role. */
+  replacedBy?: string;
+  /** Member id this one took over from. */
+  replaces?: string;
+}
+
+export interface TeamChange {
+  kind: "formed" | "member_added" | "member_replaced" | "member_removed";
+  by: TeamActor;
+  at: IsoTime;
+  memberId?: string;
+  previousMemberId?: string;
+  reason?: string;
+}
+
+export interface TeamRecord {
+  source: "dynamic" | "preset";
+  presetId?: string;
+  presetName?: string;
+  /** The lead's explanation of the team design (form_team rationale). */
+  rationale?: string;
+  /** All members ever, including replaced/removed ones (status tells). */
+  members: TeamMember[];
+  /** Roster history, oldest first. */
+  changes: TeamChange[];
+  updatedAt: IsoTime;
+}
+
+export interface TeamPreset {
+  id: string;
+  name: string;
+  description?: string;
+  /** Agent that runs the root node when a run uses this preset. */
+  lead: { agentId: string; model?: string; modeId?: string; thinking?: string };
+  members: TeamMemberSpec[];
+  createdAt: IsoTime;
+  updatedAt: IsoTime;
+}
+
 export interface RunRecord {
   id: string;
   title: string;
@@ -95,6 +161,8 @@ export interface RunRecord {
   status: RunStatus;
   rootNodeId: string;
   policy: RunPolicy;
+  /** Present in dynamic runs once a team is formed, and in preset runs from the start. */
+  team?: TeamRecord;
   createdAt: IsoTime;
   updatedAt: IsoTime;
   endedAt?: IsoTime;
@@ -110,9 +178,11 @@ export type NodeStatus =
   | "completed"
   | "failed"
   | "canceled"
+  /** Its delegation was reassigned to another agent; see the delegation's replacedBy. */
+  | "replaced"
   | "interrupted";
 
-export const TERMINAL_NODE_STATUSES: readonly NodeStatus[] = ["completed", "failed", "canceled"];
+export const TERMINAL_NODE_STATUSES: readonly NodeStatus[] = ["completed", "failed", "canceled", "replaced"];
 
 export interface NodeRecord {
   id: string;
@@ -123,6 +193,9 @@ export interface NodeRecord {
   delegationId: string | null;
   depth: number;
   agentId: string;
+  /** Team role this node works as (delegations to a role), if any. */
+  role?: string;
+  memberId?: string;
   model?: string;
   modeId?: string;
   thinking?: string;
@@ -150,6 +223,8 @@ export type DelegationStatus =
   | "completed"
   | "failed"
   | "canceled"
+  /** Reassigned to another agent; `replacedBy` is the delegation that took over. */
+  | "replaced"
   | "interrupted";
 
 export interface DelegationBrief {
@@ -183,6 +258,14 @@ export interface DelegationRecord {
   toNodeId: string;
   brief: DelegationBrief;
   status: DelegationStatus;
+  /** Team role / member the work was delegated to, if delegated by role. */
+  role?: string;
+  memberId?: string;
+  /** Delegation this one took over from (reassignment), and the one that took over from it. */
+  replaces?: string;
+  replacedBy?: string;
+  /** Why it was reassigned (on the replaced delegation). */
+  replaceReason?: string;
   /** 1 for the first assignment; +1 for every follow-up `send` that reopens it. */
   round: number;
   result?: DelegationResult;

@@ -9,6 +9,8 @@ import type {
   NodeRecord,
   PermissionRecord,
   RunRecord,
+  TeamChange,
+  TeamRecord,
   ToolSpanRecord,
   TurnRecord,
 } from "./records.js";
@@ -26,6 +28,8 @@ export type RunEvent =
   | { type: "delegation.updated"; delegationId: string; patch: Partial<DelegationRecord> }
   | { type: "turn.started"; turn: TurnRecord }
   | { type: "turn.updated"; turnId: string; patch: Partial<TurnRecord> }
+  /** The run's team roster changed; `team` is the full new roster (replaces run.team). */
+  | { type: "team.updated"; team: TeamRecord; change: TeamChange }
   /** Upsert by span id. */
   | { type: "tool.span"; span: ToolSpanRecord }
   /** Upsert by permission id. */

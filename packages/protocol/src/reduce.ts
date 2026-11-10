@@ -54,6 +54,9 @@ export function applyEvent(snapshot: RunSnapshot, event: RunEventEnvelope): RunS
     case "tool.span":
       next.toolSpans = upsert(next.toolSpans, event.span);
       break;
+    case "team.updated":
+      next.run = { ...next.run, team: event.team };
+      break;
     case "permission":
       next.permissions = upsert(next.permissions, event.permission);
       break;

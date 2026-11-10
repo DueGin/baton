@@ -88,15 +88,19 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
 | 工具 | 作用 |
 |---|---|
 | `list_agents` | 列出可用的 agent：模型、模式、说明（profile notes）、当前负载 |
-| `delegate` | 派活。返回 `{delegationId, nodeId}`，**立即返回、不等待**。参数：`agent`、`model?`、`mode?`、`title`、`task`、`context?`、`acceptance?`（验收标准）、`readonly?`、`outputSchema?`（JSON Schema） |
+| `delegate` | 派活。返回 `{delegationId, nodeId}`，**立即返回、不等待**。参数：`role`（按团队角色）或 `agent`、`model?`、`mode?`、`title`、`task`、`context?`、`acceptance?`（验收标准）、`readonly?`、`outputSchema?`（JSON Schema） |
 | `wait` | 有界阻塞，等若干委派完成。`timeoutSec` 默认 45，最大 50，因为 Codex 的 MCP 工具默认超时是 60 秒。返回已完成委派的结果，并标记为已送达，避免重复通知 |
 | `get_result` | 取完整结果：`result`、最后一条回复全文、产出物、用量 |
 | `send` | 给自己的子节点追问或补充。子节点正在运行且支持插话时用 steer，否则开新的一轮 |
 | `cancel` | 取消一个委派，**级联取消所有子孙** |
 | `status` | 我的委派及其子树的状态摘要 |
 | `report_result` | **子节点**交付结果：`{status: success｜partial｜failed, summary, result?, artifacts?}`。调用后应结束这一轮。根节点调用会报错 |
+| `form_team` | **仅主导者**（dynamic）：按需求组建团队——角色、由哪个 agent/模型担任、职责、理由。可多次调用追加角色 |
+| `get_team` | 查看团队：角色、担任者、职责、各自的委派 |
+| `replace_member` | **仅主导者**：给某个角色换人；默认把旧成员未完成的委派连同进展摘要改派给新成员 |
+| `reassign` | 把自己的某个委派改派给另一个角色或 agent：停掉当前 delegate，新 delegate 拿到同一份任务书加上前任的进展摘要 |
 
-**只能操作自己的直接子委派**：`send`、`cancel`、`get_result`、`wait` 都会校验委派属于调用者，否则报错。
+**只能操作自己的直接子委派**：`send`、`cancel`、`get_result`、`wait`、`reassign` 都会校验委派属于调用者，否则报错。`form_team`、`replace_member` 只有根节点能调用。
 
 ### 4.3 生命周期
 
@@ -133,6 +137,30 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
 
 - 根节点和普通节点一样有全部工具，只是不能调用 `report_result`。
 - 人可以在控制台给**任意节点**发消息（trigger=`user`）、取消任意子树、处理权限请求。
+
+### 4.5 团队与协作方式
+
+每个 Run 有一种协作方式（`RunPolicy.mode`），建 Run 时选：
+
+| 方式 | 根节点的角色 | 团队从哪来 | 委派对象 |
+|---|---|---|---|
+| `dynamic` 动态组队（默认） | 主导者 | 主导者读完需求后用 `form_team` 组建，之后可追加、换人 | 优先按角色；也可直接指定 agent，这时自动加一个临时成员（`addedBy: agent`） |
+| `preset` 预设团队 | 预设里的 lead | 来自 `TeamPreset`，建 Run 时整队带入（`addedBy: preset`） | 只能按预设里的角色 |
+| `solo` 单独完成 | 独自干活 | 无 | 不注入 baton 工具，不能委派 |
+
+- **成员是"角色槽位"**，不是一个会话：对同一个角色委派三次，会开三个节点，都用这个角色的 agent/模型/模式。节点和委派都记录 `role`、`memberId`。
+- **团队是 Run 级的**，所有层级的委派都受它约束（preset 下子节点也只能按角色派）。只有根节点能改名单；人在控制台随时可以加人、换人、移除。
+- **换人**（`replace_member` 或人工）：旧成员标 `replaced`，新成员 `replaces` 指回旧成员。`reassignActive` 为真时，旧成员所有未完成的委派逐个改派。
+- **改派**（`reassign`、人工改派、换人时的连带改派），步骤如下：
+  1. 级联取消旧委派的子树。旧节点标 `replaced`，旧委派标 `replaced` 并记下 `replacedBy`、`replaceReason`。
+  2. 生成"前任进展摘要"：旧节点最后一条 assistant 回复（≤2000 字）、它改过的文件列表（来自 edit/write 工具调用）。摘要追加到任务书的 `context`。
+  3. 由同一个父节点新建委派，记下 `replaces`，用新成员的配置开节点，立即开始。
+  4. 如果改派不是父节点自己发起的（人工或换人连带），给父节点送一条 `<baton-notice>`，告诉它旧 id → 新 id。送达方式和结果送达相同。
+- **名单变化**都发 `team.updated` 事件（带完整名单和这次的 `TeamChange`），`TeamRecord.changes` 保留历史，时间线据此画标记。
+- **预设团队**（`TeamPreset`）存在 SQLite，用 `/api/teams` 增删改查；也可以把某个 Run 当前的名单"另存为预设"。
+- **提示词**：
+  - 主导者：先组队再派活，团队越小越好。只有简单问题或单个小文件的修改才由它自己做（也就是不组队）。有成员失败、太慢或不合适时，主导者主动换人或改派。
+  - 成员：写明它的角色、职责，以及团队里其他人分别负责什么，避免撞文件。
 
 ## 5. Driver 接口（server 和 providers 之间的边界）
 
@@ -175,6 +203,13 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
 | POST | `/api/nodes/:nodeId/cancel` | 级联取消该节点的子树 |
 | POST | `/api/permissions/:requestId` | `PermissionDecision` |
 | GET | `/api/delegations/:id` | 完整的委派记录和结果 |
+| POST | `/api/delegations/:id/reassign` | `ReassignRequest`，人工改派 |
+| POST | `/api/runs/:runId/team/members` | `AddMemberRequest`，人工加成员 |
+| POST | `/api/runs/:runId/team/members/:memberId/replace` | `ReplaceMemberRequest`，人工换人 |
+| DELETE | `/api/runs/:runId/team/members/:memberId` | 移除成员（未完成的委派不受影响） |
+| POST | `/api/runs/:runId/team/save-preset` | `SaveTeamPresetRequest`，当前名单另存为预设 |
+| GET/POST | `/api/teams` | 列出 / 新建预设团队（`TeamPresetInput`） |
+| PUT/DELETE | `/api/teams/:id` | 修改 / 删除预设团队 |
 | GET | `/api/runs/:runId/export?format=json｜otlp｜md` | 导出 |
 | ALL | `/mcp/n/:nodeToken` | MCP Streamable HTTP，**不走** Bearer 鉴权，凭 token 识别节点 |
 
@@ -202,7 +237,25 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
    - 内容：任务书、结果（含 JSON）、transcript（消息、思考、工具调用的输入输出可折叠）、用量、权限记录。
    - 操作：发消息、取消。
 
-另有 **Agents 页**（识别结果和刷新）和 **设置页**（默认策略、profile 说明）。
+5. **团队面板**（Run 视图里的第四个标签"团队"，拓扑图顶部也有简版名单条）：
+   - 名单：角色、担任者（agent + 模型）、职责、谁加的、理由、当前委派数和状态。
+   - 操作：加成员、换人（可选"同时改派未完成的任务"）、移除、另存为预设。
+   - 变更历史：组队、加人、换人、移除，带时间和理由。
+6. **拓扑图和时间线中的团队信息**：
+   - 节点卡片显示角色标签。
+   - 被替换的节点置灰，标"已替换"，用虚线连到接手的节点。
+   - 节点卡片和详情抽屉里有"改派"按钮。
+   - 时间线根节点那一行标出团队变更。
+
+另有以下页面：
+- **Agents 页**：识别结果和刷新。
+- **团队页**：管理预设团队，可以新建、编辑、删除；编辑时设置 lead 和成员表，每一行是角色、agent、模型、模式、职责。
+- **设置页**：默认策略。
+
+新建 Run 的弹窗里，"协作方式"三选一：
+- 动态组队：可以预先放几个成员。
+- 预设团队：选一个预设，根节点自动用预设的 lead。
+- 单独完成。
 
 **实时更新的方式**：先取快照，再订阅 SSE。本地 store 做事件归约，所有视图从同一个 store 派生。断线重连时从 `lastSeq` 续订。
 
