@@ -1,11 +1,11 @@
-import type { AgentEntry, DelegationRecord, NodeRecord, RunPolicy } from "@baton/protocol";
+import type { AgentEntry, DelegationRecord, NodeRecord, RunPolicy, TeamRecord } from "@baton/protocol";
 
 /** Machine-readable tags the console parses (see packages/web transcript rendering). */
 export const ASSIGNMENT_TAG = "baton-assignment";
 export const RESULTS_TAG = "baton-results";
 
 const BATON_TOOL_NAMES = [
-  "list_agents", "delegate", "wait", "get_result", "send", "cancel", "status", "report_result",
+  "list_agents", "form_team", "get_team", "replace_member", "reassign", "delegate", "wait", "get_result", "send", "cancel", "status", "report_result",
 ] as const;
 
 function describeAgent(agent: AgentEntry): string {
@@ -18,18 +18,23 @@ function describeAgent(agent: AgentEntry): string {
 }
 
 export function systemPrompt(
-  node: Pick<NodeRecord, "id" | "depth" | "parentNodeId" | "agentId">,
+  node: Pick<NodeRecord, "id" | "depth" | "parentNodeId" | "agentId" | "role" | "memberId">,
   policy: RunPolicy,
   agents: AgentEntry[] = [],
+  team?: TeamRecord,
 ): string {
   const isRoot = node.parentNodeId === null;
   const canDelegate = node.depth < policy.maxDepth;
-  const lead = (policy.delegation ?? "lead") === "lead";
+  const mode = policy.mode ?? "dynamic";
+  if (mode === "solo") return "You are running inside baton in SOLO mode. Work alone: inspect, implement, verify and answer the human yourself. No baton MCP tools are injected. Do not delegate or form a team.";
+  const roster = (team?.members ?? []).filter((m) => m.status === "active").map((m) => `- ${m.role}: ${m.agentId}${m.model ? ` / ${m.model}` : ""}. Responsibilities and file ownership: ${m.responsibilities ?? "See assignment"}`).join("\n");
   const lines = [
     "You are running inside baton, a local multi-agent workspace. Other coding agents on this machine — including agents from other vendors — can take work from you through the `baton` MCP tools.",
     "",
     "baton tools:",
     "- list_agents: who you can delegate to (all models, modes, notes, current load).",
+    "- form_team: lead only, dynamic runs; define the smallest useful team with roles, responsibilities and file ownership. get_team: current roster and assignments.",
+    "- replace_member: lead only; swap a failing, stalled or poorly matched member and reassign its unfinished work. reassign: move one of your own assignments to another role or agent.",
     "- delegate: hand a self-contained task to another agent. Returns immediately. The delegate cannot see your conversation, so give it the goal, the relevant context and file paths, the files it owns, the interfaces it must respect, and acceptance criteria.",
     "- Results arrive automatically in a <baton-results> message when a delegate finishes. Do not poll. If you have nothing else to do, end your turn; you will be woken up with the results.",
     "- wait: block up to 50 s for results, only when you cannot continue without them.",
@@ -47,16 +52,18 @@ export function systemPrompt(
       : `You are at the maximum delegation depth (${policy.maxDepth}): do the work yourself.`,
     "You may only operate on delegations you created. Never give two delegates the same files, and never delegate the same task twice (check status first).",
   );
-  if (isRoot && lead && canDelegate) {
+  if (isRoot && canDelegate) {
     lines.push(
       "",
-      "Delegation mode: LEAD. You are the lead of this run.",
-      "Unless the request is trivial (a question, or a change to a single small file), work like this:",
-      "1. Inspect just enough of the workspace to plan. Decide the architecture and the interfaces between parts; write shared contracts (file layout, data shapes, function signatures) into the workspace yourself when parts depend on them.",
-      "2. Split the work into independent, well-scoped parts with clear file ownership, and delegate them in parallel with `delegate` — pick agents by their strengths and spread the work across different agents.",
-      "3. While delegates work, do only coordination or the parts that must stay with you; then end your turn and let results arrive.",
-      "4. Integrate the results, verify the whole (run it, test it), and use `send` for fixes or a new delegation for follow-up work. Finally answer the human with what was done by whom.",
-      "Doing all of the implementation yourself in lead mode is a failure of the mode, unless the task is trivial.",
+      `Collaboration mode: ${mode.toUpperCase()}. You are the lead of this run.`,
+      "For trivial questions or a change to a single small file, do it yourself without forming a team.",
+      "For larger work:",
+      "1. Inspect enough to plan the architecture and shared interfaces. Define contracts yourself when parallel parts depend on them.",
+      mode === "dynamic"
+        ? "2. Call form_team first: choose the smallest team that parallelizes the work, pick agents and models by their strengths from list_agents, and give every role responsibilities, deliverables and exclusive file ownership. Then delegate by role in parallel."
+        : "2. Use the preset roster below. Delegate only by role, at every depth; direct agent delegation is not allowed.",
+      "3. Coordinate while members work. Never assign overlapping files. End your turn when waiting; results arrive automatically.",
+      "4. If a member fails, stalls, or is a poor fit, use replace_member or reassign proactively. Integrate the returned work, verify the whole, and use send for fixes. Answer the human with what was done by whom.",
     );
   } else if (canDelegate) {
     lines.push(
@@ -64,6 +71,10 @@ export function systemPrompt(
       "Delegate when part of your work is separable and benefits from parallel work, a second opinion, or a different agent's strengths. Do it yourself when it is small or tightly coupled to what you are doing.",
     );
   }
+  if (policy.teamApproval !== false) lines.push("", "Roster approval is required: agent-proposed formation, additions and replacements return pending_approval plus proposalId. After proposing, end your turn and wait for the human's decision in a <baton-notice>; do not submit a second proposal. Any tasks assigned to pending roles remain queued until approval. The human can edit or reject your roster; use the approved specs and feedback.");
+  if (roster) lines.push("", "Current team roster (respect file ownership):", roster);
+  if (mode === "preset") lines.push("Preset rule: all delegation at every depth requires a team role. Use get_team for the current roster.");
+  if (!isRoot && node.role) lines.push("", `Your team role: ${node.role}.`, `Your responsibilities: ${team?.members.find((m) => m.id === node.memberId)?.responsibilities ?? "Follow your assignment."}`, "Other roles own the files and responsibilities in the roster above; avoid file clashes.");
   if (isRoot) {
     lines.push("", "You are the root agent: answer the human directly. Do not call report_result.");
   } else {
@@ -78,7 +89,7 @@ export function systemPrompt(
 }
 
 export function briefPrompt(d: DelegationRecord): string {
-  const parts = [`<${ASSIGNMENT_TAG} delegation="${d.id}">`, `Title: ${d.brief.title}`, "", "Task:", d.brief.task];
+  const parts = [`<${ASSIGNMENT_TAG} delegation="${d.id}">`, `Title: ${d.brief.title}`, ...(d.role ? [`Role: ${d.role}`] : []), "", "Task:", d.brief.task];
   if (d.brief.context) parts.push("", "Context:", d.brief.context);
   if (d.brief.acceptance?.length) {
     parts.push("", "Acceptance criteria:", ...d.brief.acceptance.map((a) => `- ${a}`));

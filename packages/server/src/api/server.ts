@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile, chmod, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { CreateRunRequest, PatchRunRequest, PermissionDecision, RunEventEnvelope } from "@baton/protocol";
+import type { ApproveTeamProposalRequest, AddMemberRequest, ReplaceMemberRequest, ReassignRequest, SaveTeamPresetRequest, TeamPresetInput, CreateRunRequest, PatchRunRequest, PermissionDecision, RunEventEnvelope } from "@baton/protocol";
 import type { DriverRegistry } from "../driver/types.js";
 import { FakeDriverRegistry } from "../driver/fake.js";
 import { Store } from "../store/index.js";
@@ -78,6 +78,32 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
         if (method === "GET") { json(response, 200, store.list()); return; }
         if (method === "POST") { json(response, 201, await kernel.createRun(record(await body(request)) as unknown as CreateRunRequest)); return; }
       }
+      if (path === "/api/teams") {
+        if (method === "GET") { json(response, 200, store.presets()); return; }
+        if (method === "POST") { json(response, 201, await kernel.teams.savePreset(record(await body(request)) as unknown as TeamPresetInput)); return; }
+      }
+      const preset = /^\/api\/teams\/([^/]+)$/.exec(path);
+      if (preset) {
+        if (method === "GET") { json(response, 200, store.preset(preset[1]!)); return; }
+        if (method === "PUT") { json(response, 200, await kernel.teams.savePreset(record(await body(request)) as unknown as TeamPresetInput, preset[1]!)); return; }
+        if (method === "DELETE") { store.deletePreset(preset[1]!); json(response, 200, { deleted: true }); return; }
+      }
+      const proposalRoute = /^\/api\/runs\/([^/]+)\/team\/proposals\/([^/]+)\/(approve|reject)$/.exec(path);
+      if (method === "POST" && proposalRoute) {
+        const input = record(await body(request));
+        const result = proposalRoute[3] === "approve" ? await kernel.teams.approve(proposalRoute[1]!, proposalRoute[2]!, input as ApproveTeamProposalRequest) : await kernel.teams.reject(proposalRoute[1]!, proposalRoute[2]!, input.feedback as string);
+        json(response, 200, result); return;
+      }
+      const teamRoute = /^\/api\/runs\/([^/]+)\/team\/(members|save-preset)(?:\/([^/]+)(?:\/(replace))?)?$/.exec(path);
+      if (teamRoute) {
+        const id = teamRoute[1]!, memberId = teamRoute[3]; store.snapshot(id);
+        if (method === "POST" && teamRoute[2] === "save-preset") { json(response, 201, await kernel.teams.saveRun(id, record(await body(request)) as unknown as SaveTeamPresetRequest)); return; }
+        if (method === "POST" && !memberId) { json(response, 201, await kernel.teams.add(id, record(await body(request)) as unknown as AddMemberRequest)); return; }
+        if (method === "POST" && memberId && teamRoute[4] === "replace") { json(response, 200, await kernel.teams.replace(id, memberId, record(await body(request)) as unknown as ReplaceMemberRequest, "human")); return; }
+        if (method === "DELETE" && memberId && !teamRoute[4]) { json(response, 200, kernel.teams.remove(id, memberId)); return; }
+      }
+      const reassign = /^\/api\/delegations\/([^/]+)\/reassign$/.exec(path);
+      if (method === "POST" && reassign) { json(response, 200, await kernel.teams.reassign(reassign[1]!, record(await body(request)) as unknown as ReassignRequest)); return; }
       const run = /^\/api\/runs\/([^/]+)(?:\/(events|cancel|export))?$/.exec(path);
       if (run) {
         const id = run[1]!, action = run[2]; store.snapshot(id);

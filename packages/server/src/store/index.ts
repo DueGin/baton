@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { applyEvent, type ItemRecord, type RunEvent, type RunEventEnvelope, type RunSnapshot, type RunSummary } from "@baton/protocol";
+import { applyEvent, type ItemRecord, type RunEvent, type RunEventEnvelope, type RunSnapshot, type RunSummary, type TeamPreset } from "@baton/protocol";
 
 const tables = ["nodes", "delegations", "turns", "tool_spans", "permissions"] as const;
 export class Store {
@@ -8,6 +8,8 @@ export class Store {
   constructor(path: string) {
     this.db = new DatabaseSync(path);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
+      CREATE TABLE IF NOT EXISTS notices (id TEXT PRIMARY KEY, node_id TEXT NOT NULL, run_id TEXT NOT NULL, text TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS team_presets (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, data TEXT NOT NULL, seq INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS events (run_id TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(run_id, seq));
       CREATE TABLE IF NOT EXISTS items (node_id TEXT NOT NULL, seq INTEGER NOT NULL, run_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(node_id, seq));`);
@@ -79,5 +81,18 @@ export class Store {
       return { ...s.run, rootAgentId: s.nodes.find((n) => n.id === s.run.rootNodeId)?.agentId ?? "", agents: [...new Set(s.nodes.map((n) => n.agentId))], nodeCount: s.nodes.length, activeNodeCount: s.nodes.filter((n) => ["starting", "running", "waiting_permission"].includes(n.status)).length, pendingPermissions: s.permissions.filter((p) => p.status === "pending").length };
     });
   }
+  queueNotice(id: string, nodeId: string, runId: string, text: string): void { this.db.prepare("INSERT INTO notices VALUES (?, ?, ?, ?)").run(id, nodeId, runId, text); }
+  notices(nodeId?: string): Array<{ id: string; nodeId: string; text: string }> {
+    const rows = nodeId ? this.db.prepare("SELECT * FROM notices WHERE node_id=? ORDER BY rowid").all(nodeId) : this.db.prepare("SELECT * FROM notices ORDER BY rowid").all();
+    return rows.map((row) => ({ id: String(row.id), nodeId: String(row.node_id), text: String(row.text) }));
+  }
+  deleteNotices(ids: string[]): void { for (const id of ids) this.db.prepare("DELETE FROM notices WHERE id=?").run(id); }
+  presets(): TeamPreset[] { return this.db.prepare("SELECT data FROM team_presets ORDER BY rowid").all().map((row) => JSON.parse(String(row.data)) as TeamPreset); }
+  preset(id: string): TeamPreset {
+    const row = this.db.prepare("SELECT data FROM team_presets WHERE id=?").get(id);
+    if (!row) throw new Error(`Team preset not found: ${id}`); return JSON.parse(String(row.data)) as TeamPreset;
+  }
+  savePreset(preset: TeamPreset): void { this.db.prepare("INSERT INTO team_presets VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data=excluded.data").run(preset.id, JSON.stringify(preset)); }
+  deletePreset(id: string): void { this.preset(id); this.db.prepare("DELETE FROM team_presets WHERE id=?").run(id); }
   close(): void { this.listeners.clear(); this.db.close(); }
 }
