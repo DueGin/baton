@@ -1,0 +1,74 @@
+import { createContext, memo, useContext, useEffect, useMemo, useRef, useState } from "react";
+import dagre from "@dagrejs/dagre";
+import { Background, BaseEdge, Controls, EdgeLabelRenderer, Handle, MiniMap, Position, ReactFlow, ReactFlowProvider, getSmoothStepPath, useNodesState, useReactFlow, type Edge, type EdgeProps, type Node, type NodeProps } from "@xyflow/react";
+import type { NodeRecord, PermissionResponse, RunSnapshot } from "@baton/protocol";
+import { agentColors, cost, displayStatus, duration, terminal, tokens } from "../lib/derive.js";
+import { AgentMark, PermissionActions, Status, Toggle } from "./common.js";
+
+interface GraphContextValue { snapshot: RunSnapshot; now: number; decide: (id: string, response: PermissionResponse) => void; busy: boolean }
+const GraphContext = createContext<GraphContextValue | null>(null);
+type AgentNode = Node<{ node: NodeRecord }, "agent">;
+const AgentCard = memo(function AgentCard({ data, selected }: NodeProps<AgentNode>) {
+  const context = useContext(GraphContext)!;
+  const { node } = data; const { snapshot, now } = context;
+  const status = displayStatus(node, snapshot);
+  const permissions = snapshot.permissions.filter(permission => permission.nodeId === node.id && permission.status === "pending");
+  const children = snapshot.delegations.filter(edge => edge.fromNodeId === node.id);
+  const tool = snapshot.toolSpans.findLast(span => span.nodeId === node.id && span.status === "running");
+  return <div className={`node-card ${selected ? "selected" : ""} ${permissions.length ? "needs-permission" : ""}`}>
+    <Handle type="target" position={Position.Top} />
+    <div className="node-card-top"><AgentMark agent={node.agentId} small /><span className="node-agent">{node.agentId}</span><Status status={status} /></div>
+    <div className="node-title">{node.title}</div>
+    <div className="node-model">{node.model ?? "默认模型"}</div>
+    <div className={`node-activity ${terminal(node.status) ? "muted" : ""}`}><span className={`activity-indicator ${node.status === "running" ? "live" : ""}`} />{tool?.summary ?? node.activity ?? "等待活动"}</div>
+    <div className="node-metrics"><span>{duration(node.createdAt, node.endedAt ?? now)}</span><span>{tokens(node.usage.inputTokens + node.usage.outputTokens)} tokens</span><span>{cost(node.usage.costUsd)}</span>{children.length > 0 && <span title="子委派">⑂ {children.length}</span>}</div>
+    {permissions.length > 0 && <div className="node-permission"><span>⚑ {permissions[0]!.request.title ?? "需要授权"}</span><PermissionActions permission={permissions[0]!} decide={context.decide} busy={context.busy} /></div>}
+    <Handle type="source" position={Position.Bottom} />
+  </div>;
+});
+
+function DelegationEdge(props: EdgeProps) {
+  const [path, x, y] = getSmoothStepPath({ ...props, borderRadius: 16 });
+  return <><BaseEdge path={path} style={props.style} markerEnd={props.markerEnd} /><EdgeLabelRenderer><div className={`delegation-label nodrag nopan edge-${String(props.data?.status ?? "running")}`} style={{ transform: `translate(-50%, -50%) translate(${x}px, ${y}px)` }}>{props.label}</div></EdgeLabelRenderer></>;
+}
+const nodeTypes = { agent: AgentCard };
+const edgeTypes = { delegation: DelegationEdge };
+
+export function graphPositions(snapshot: Pick<RunSnapshot, "nodes" | "delegations">): Map<string, { x: number; y: number }> {
+  const graph = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
+  graph.setGraph({ rankdir: "TB", nodesep: 36, ranksep: 95, marginx: 30, marginy: 30 });
+  snapshot.nodes.forEach(node => graph.setNode(node.id, { width: 286, height: 210 }));
+  snapshot.delegations.forEach(edge => { if (graph.hasNode(edge.fromNodeId) && graph.hasNode(edge.toNodeId)) graph.setEdge(edge.fromNodeId, edge.toNodeId); });
+  dagre.layout(graph);
+  return new Map(snapshot.nodes.map(node => { const point = graph.node(node.id); return [node.id, { x: point.x - 143, y: point.y - 105 }]; }));
+}
+
+function GraphView({ snapshot, selected, inspect }: { snapshot: RunSnapshot; selected: string | null; inspect: (id: string) => void }) {
+  const [follow, setFollow] = useState(true);
+  const [nodes, setNodes, onNodesChange] = useNodesState<AgentNode>([]);
+  const { fitView } = useReactFlow();
+  const structure = `${snapshot.nodes.map(node => node.id).join("|")}::${snapshot.delegations.map(edge => `${edge.fromNodeId}>${edge.toNodeId}`).join("|")}`;
+  const previousStructure = useRef("");
+  const fitFrame = useRef(0);
+  const positions = useRef(new Map<string, { x: number; y: number }>());
+  useEffect(() => {
+    const changed = previousStructure.current !== structure;
+    if (changed) { positions.current = graphPositions(snapshot); previousStructure.current = structure; }
+    setNodes(existing => snapshot.nodes.map(node => ({ id: node.id, type: "agent", data: { node }, position: changed ? positions.current.get(node.id)! : existing.find(entry => entry.id === node.id)?.position ?? positions.current.get(node.id)!, selected: node.id === selected })));
+    if (changed && follow) fitFrame.current = requestAnimationFrame(() => { void fitView({ padding: 0.15, duration: 400, maxZoom: 1 }); });
+  }, [snapshot, selected, structure, follow, setNodes, fitView]);
+  useEffect(() => () => cancelAnimationFrame(fitFrame.current), []);
+  const edges = useMemo<Edge[]>(() => snapshot.delegations.map(edge => ({ id: edge.id, type: "delegation", source: edge.fromNodeId, target: edge.toNodeId, data: { status: edge.status }, label: `${edge.result ? edge.result.status === "success" ? "✓ " : edge.result.status === "partial" ? "◐ " : "✗ " : ""}${edge.brief.title}`, animated: edge.status === "running", style: { stroke: edge.status === "failed" ? "var(--red)" : edge.status === "completed" ? "var(--green)" : "var(--edge)", strokeWidth: 1.5 } })), [snapshot.delegations]);
+  return <div className="topology-view"><div className="view-toolbar"><span className="eyebrow">DELEGATION MAP</span><div className="toolbar-actions"><Toggle checked={follow} onChange={setFollow} label="跟随最新" /><button className="button small" onClick={() => { void fitView({ padding: 0.15, duration: 300 }); }}>适应画布</button></div></div>
+    <ReactFlow<AgentNode> nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodeClick={(_, node) => inspect(node.id)} fitView minZoom={0.18} maxZoom={1.8} proOptions={{ hideAttribution: true }} defaultEdgeOptions={{ type: "delegation" }}>
+      <Background gap={22} size={1} color="var(--grid)" />
+      <Controls showInteractive={false} />
+      <MiniMap nodeColor={node => agentColors[snapshot.nodes.find(entry => entry.id === node.id)?.agentId ?? ""] ?? "#758799"} maskColor="var(--minimap-mask)" pannable zoomable />
+    </ReactFlow>
+    <div className="graph-legend"><span><i style={{ background: "var(--green)" }} />结果已送达</span><span><i style={{ background: "var(--amber)" }} />等待授权</span><span><i style={{ background: "var(--red)" }} />执行失败</span><span className="muted">点击节点查看详情</span></div>
+  </div>;
+}
+
+export function Topology(props: { snapshot: RunSnapshot; selected: string | null; now: number; inspect: (id: string) => void; decide: (id: string, response: PermissionResponse) => void; busy: boolean }) {
+  return <GraphContext.Provider value={props}><ReactFlowProvider><GraphView {...props} /></ReactFlowProvider></GraphContext.Provider>;
+}
