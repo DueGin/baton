@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile, chmod, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { CreatePermissionRuleRequest, ResolveEscalationRequest, ApproveTeamProposalRequest, AddMemberRequest, ReplaceMemberRequest, ReassignRequest, SaveTeamPresetRequest, TeamPresetInput, CreateRunRequest, PatchRunRequest, PermissionDecision, RunEventEnvelope } from "@baton/protocol";
+import type { CreatePermissionRuleRequest, ResolveEscalationRequest, ApproveTeamProposalRequest, AddMemberRequest, ReplaceMemberRequest, ReassignRequest, SaveTeamPresetRequest, TeamPresetInput, CreateRunRequest, PatchRunRequest, PermissionDecision, RunEventEnvelope, SendMessageResponse } from "@baton/protocol";
 import type { DriverRegistry } from "../driver/types.js";
 import { FakeDriverRegistry } from "../driver/fake.js";
 import { Store } from "../store/index.js";
@@ -160,7 +160,13 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
       if (node) {
         const id = node[1]!; store.node(id);
         if (method === "GET" && node[2] === "items") { const after = sequence(url.searchParams.get("after")), items = store.items(id, after); json(response, 200, { items, lastSeq: items.at(-1)?.seq ?? after }); return; }
-        if (method === "POST" && node[2] === "messages") { const input = record(await body(request)); await kernel.message(id, input.text as string); json(response, 202, { accepted: true }); return; }
+        if (method === "POST" && node[2] === "messages") {
+          const input = record(await body(request));
+          if (input.clientId !== undefined && typeof input.clientId !== "string") throw new HttpError(400, "clientId must be a string");
+          const delivered = await kernel.message(id, input.text as string, input.clientId);
+          const result: SendMessageResponse = { accepted: true, ...delivered };
+          json(response, 202, result); return;
+        }
         if (method === "POST" && node[2] === "cancel") { await body(request); await kernel.cancelNode(id); json(response, 200, store.node(id)); return; }
       }
       const permission = /^\/api\/permissions\/([^/]+)$/.exec(path);
