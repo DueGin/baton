@@ -32,7 +32,7 @@ describe("Mermaid fences and stability", () => {
   });
 });
 
-const mermaidMock = vi.hoisted(() => ({ initialize: vi.fn(), render: vi.fn(async (id: string) => ({ svg: `<svg id="${id}"><script>bad()</script><path onload="bad()" /></svg>` })) }));
+const mermaidMock = vi.hoisted(() => ({ initialize: vi.fn(), render: vi.fn(async (id: string) => ({ svg: `<svg id="${id}"><text>主导者 → 审查</text><script>bad()</script><path onload="bad()" /></svg>` })) }));
 vi.mock("mermaid", () => ({ default: mermaidMock }));
 vi.mock("dompurify", () => ({ default: { sanitize: vi.fn((svg: string) => svg.replace(/<script>.*?<\/script>/g, "").replace(/ onload="[^"]*"/g, "")) } }));
 describe("lazy Mermaid rendering", () => {
@@ -44,12 +44,13 @@ describe("lazy Mermaid rendering", () => {
     const namespaced = namespaceSvg('<svg id="a"><style>#a .x {fill:url(#clip)}</style><defs id="clip"/><g aria-labelledby="a" fill="url(#clip)"/></svg>', "instance");
     expect(namespaced).toContain('id="instance-a"'); expect(namespaced).toContain("url(#instance-clip)"); expect(namespaced).toContain('aria-labelledby="instance-a"');
     const light = await renderDiagram("flowchart TD; A-->B", "light");
-    expect(light).toContain("<svg"); expect(light).not.toContain("script"); expect(light).not.toContain("onload");
+    expect(light).toContain("<svg"); expect(light).not.toContain("script"); expect(light).not.toContain("onload"); expect(light).toContain("<text>主导者 → 审查</text>");
     expect(await renderDiagram("flowchart TD; A-->B", "light")).toBe(light);
     expect(mermaidMock.render).toHaveBeenCalledTimes(1);
     const dark = await renderDiagram("flowchart TD; A-->B", "dark");
     expect(dark).not.toBe(light);
-    expect(mermaidMock.initialize).toHaveBeenCalledWith(expect.objectContaining({ securityLevel: "strict", startOnLoad: false, theme: "dark" }));
+    expect(mermaidMock.initialize).toHaveBeenCalledWith(expect.objectContaining({ securityLevel: "strict", startOnLoad: false, theme: "dark", htmlLabels: false, flowchart: { htmlLabels: false }, class: { htmlLabels: false } }));
+    for (const [config] of mermaidMock.initialize.mock.calls) expect(config).toMatchObject({ htmlLabels: false, flowchart: { htmlLabels: false }, class: { htmlLabels: false } });
     expect(mermaidMock.render.mock.calls[0]![0]).not.toBe(mermaidMock.render.mock.calls[1]![0]);
   });
 });

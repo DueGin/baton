@@ -12,7 +12,12 @@ export function renderDiagram(code: string, theme: ColorTheme): Promise<string> 
     const already = cache.get(key); if (already) return already;
     const [{ default: mermaid }, { default: purify }] = await Promise.all([import("mermaid"), import("dompurify")]);
     if (initializedTheme !== theme) {
-      mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: theme === "dark" ? "dark" : "default", suppressErrorRendering: true, flowchart: { htmlLabels: false } });
+      mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: theme === "dark" ? "dark" : "default", suppressErrorRendering: true,
+        // Mermaid 12 gives the global option precedence over diagram options.
+        // SVG text survives our foreignObject ban and renders CJK with local fonts.
+        htmlLabels: false, flowchart: { htmlLabels: false }, class: { htmlLabels: false },
+        fontFamily: 'system-ui, "PingFang SC", "Microsoft YaHei", sans-serif',
+        secure: ["secure", "securityLevel", "startOnLoad", "maxTextSize", "suppressErrorRendering", "maxEdges", "htmlLabels", "flowchart", "class"], });
       initializedTheme = theme;
     }
     const id = `baton-diagram-${++serial}`;

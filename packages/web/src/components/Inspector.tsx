@@ -7,8 +7,8 @@ import { EscalationCard, QuestionCard, type HumanActions } from "./HumanActions.
 import { resolutionLabels } from "../lib/inbox.js";
 import { Markdown, ToolDetail, TranscriptRow } from "./Transcript.js";
 
-export function Inspector({ snapshot, nodeId, now, close, converse, cancel, decide, busy, store, items, inspect, reassign, answer, resolve }: {
-  snapshot: RunSnapshot; nodeId: string; now: number; close: () => void; converse: (id: string) => void; cancel: (id: string) => void;
+export function Inspector({ snapshot, nodeId, now, close, back, converse, cancel, decide, busy, store, items, inspect, reassign, answer, resolve }: {
+  snapshot: RunSnapshot; nodeId: string; now: number; close: () => void; back?: () => void; converse: (id: string) => void; cancel: (id: string) => void;
   decide: (id: string, response: PermissionResponse) => void; busy: boolean; store: RunStore; items: Record<string, ItemRecord[]>; inspect: (id: string) => void; reassign: (id: string) => void;
 } & HumanActions) {
   const node = snapshot.nodes.find(entry => entry.id === nodeId);
@@ -16,7 +16,7 @@ export function Inspector({ snapshot, nodeId, now, close, converse, cancel, deci
   if (!node) return null;
   const edge = snapshot.delegations.find(entry => entry.toNodeId === nodeId);
   const permissions = snapshot.permissions.filter(permission => permission.nodeId === nodeId);
-  return <aside className="inspector" aria-label="节点详情"><div className="inspector-header"><span className="eyebrow">NODE INSPECTOR</span><button className="icon-button" title="关闭详情" onClick={close}><Icon name="close" /></button></div><div className="inspector-scroll">
+  return <aside className="inspector" aria-label="节点详情"><div className="inspector-header"><div className="inspector-heading-label">{back && <button className="text-button panel-back" onClick={back}><span>‹</span> Run 详情</button>}<span className="eyebrow">节点详情</span></div><button className="icon-button" title="关闭侧栏" aria-label="关闭节点详情" onClick={close}><Icon name="close" /></button></div><div className="inspector-scroll">
     <div className="inspector-node"><AgentMark agent={node.agentId} /><div><h2>{node.title}</h2><span>{node.agentId} · depth {node.depth}</span></div></div><Status status={edge?.blockedByProposal ? "queued" : displayStatus(node, snapshot)} />
     <div className="inspector-actions">{edge && !edge.blockedByProposal && !["canceled", "replaced"].includes(node.status) && snapshot.run.policy.mode !== "solo" && <button className="button" disabled={busy} onClick={() => reassign(edge.id)}>改派</button>}<button className="button" disabled={["canceled", "replaced"].includes(node.status)} onClick={() => converse(node.id)}><Icon name="chat" size={15} />发消息</button><button className="button danger" disabled={busy || terminal(node.status)} onClick={() => cancel(node.id)}><Icon name="stop" size={14} />取消子树</button></div>
     {node.status === "replaced" && <div className="replacement-panel"><strong>已替换</strong><p>{edge?.replaceReason ?? "任务已由其他节点接手"}</p>{edge?.replacedBy && <button className="text-button" onClick={() => { const next = snapshot.delegations.find(value => value.id === edge.replacedBy); if (next) inspect(next.toNodeId); }}>查看接手节点 ↗</button>}</div>}{node.error && <div className="error-panel">{node.error}</div>}

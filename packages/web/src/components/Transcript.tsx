@@ -1,6 +1,7 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { ItemRecord, NodeRecord, RunSnapshot, ToolCallDetail } from "@baton/protocol";
-import { activeTurn, conversationPhase, conversationRows, deliveryLabel, nodeIsLive, type OutgoingMessage } from "../lib/conversation.js";
+import { activeTurn, conversationPhase, conversationRows, deliveryLabel, nodeIsLive, phaseTimerLabel, type ConversationPhase, type OutgoingMessage } from "../lib/conversation.js";
+import { composerHeight } from "../lib/run-layout.js";
 import { clock, duration, tokens, treeOrder } from "../lib/derive.js";
 import { AgentMark, Empty, Icon, Status } from "./common.js";
 import type { RunStore } from "../store.js";
@@ -72,11 +73,28 @@ export function TranscriptRow({ row, node, snapshot, inspect, streaming = false,
   return <article className={`message message-${item.type}${outgoing?.state === "failed" ? " message-send-failed" : ""}`}><div className="message-meta">{item.type === "user_message" ? <span className="user-avatar">U</span> : <AgentMark agent={node.agentId} small />}<strong>{item.type === "user_message" ? "你" : node.agentId}</strong><time>{clock(row.ts)}</time>{badge && <span className={`delivery-badge delivery-${outgoing?.state ?? "accepted"}`}>{badge}</span>}{outgoing?.state === "failed" && <button className="text-button" title={outgoing.error} onClick={retry}>重试</button>}</div><Markdown text={item.text} streaming={streaming && item.type === "assistant_message"} />{outgoing?.state === "failed" && <div className="error-text send-error">{outgoing.error}</div>}</article>;
 }
 
+export function ConversationStatus({ phase, snapshot, now, inspect }: { phase: ConversationPhase; snapshot: RunSnapshot; now: number; inspect: (id: string) => void }) {
+  const [expanded, setExpanded] = useState(false); const previewId = useId();
+  const linkedNode = (id: string) => snapshot.nodes.find(node => node.id === id);
+  return <div className={`conversation-live phase-${phase.kind}`}>
+    <div className="live-compact-line"><span className="live-dot" /><strong className="live-phase-title" title={phase.label} role="status">{phase.label}</strong>
+      {phase.toolSince && <span className="live-tool-time">{duration(phase.toolSince, now)}</span>}
+      <span className="live-turn-time">{phaseTimerLabel(phase)} {duration(phase.since, now)}</span>
+      {phase.quiet > 30 && <span className="quiet-label">已 {phase.quiet}s 无新输出</span>}
+      {phase.tokens > 0 && <span className="live-token-count">{tokens(phase.tokens)} tokens</span>}
+      <div className="live-inline-links">{phase.related.map(id => <button className="text-button" key={id} title={linkedNode(id)?.title} onClick={() => inspect(id)}>{phase.kind === "permission" ? "处理授权 ↗" : phase.kind === "question" ? "回答问题 ↗" : `${linkedNode(id)?.title ?? "子任务"} ↗`}</button>)}</div>
+      {phase.reasoning && <button type="button" className={`icon-button live-expand${expanded ? " expanded" : ""}`} aria-label={expanded ? "收起实时思考" : "展开实时思考"} aria-expanded={expanded} aria-controls={previewId} onClick={() => setExpanded(value => !value)}><Icon name="chevron" size={13} /></button>}
+    </div>
+    {phase.reasoning && expanded && <div id={previewId} className="live-reasoning-expanded"><Markdown text={phase.reasoning} streaming /></div>}
+  </div>;
+}
+
 export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNodeId, now, inspect }: {
   snapshot: RunSnapshot; store: RunStore; items: Record<string, ItemRecord[]>; itemStatus: Record<string, string>;
   nodeId: string; setNodeId: (id: string) => void; now: number; inspect: (id: string) => void;
 }) {
   const [draft, setDraft] = useState(""); const [follow, setFollow] = useState(true); const bottom = useRef<HTMLDivElement>(null);
+  const input = useRef<HTMLTextAreaElement>(null);
   const scroll = useRef<HTMLDivElement>(null); const node = snapshot.nodes.find(entry => entry.id === nodeId) ?? snapshot.nodes[0];
   const state = store.getSnapshot();
   useEffect(() => { if (node) { void store.loadItems(node.id); setDraft(""); setFollow(true); } }, [node?.id, store]);
@@ -95,11 +113,27 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
     const observer = new ResizeObserver(() => bottom.current?.scrollIntoView({ block: "end" }));
     observer.observe(content); return () => observer.disconnect();
   }, [follow, node?.id]);
+  useLayoutEffect(() => {
+    const textarea = input.current; if (!textarea) return;
+    const resize = () => {
+      const style = getComputedStyle(textarea);
+      const lineHeight = Number.parseFloat(style.lineHeight) || 20;
+      const padding = (Number.parseFloat(style.paddingTop) || 0) + (Number.parseFloat(style.paddingBottom) || 0);
+      textarea.style.height = "auto";
+      textarea.style.height = `${composerHeight(textarea.scrollHeight, lineHeight, padding)}px`;
+    };
+    resize();
+    let width = textarea.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (width !== textarea.clientWidth) { width = textarea.clientWidth; resize(); }
+    });
+    observer.observe(textarea); return () => observer.disconnect();
+  }, [draft, node?.id]);
   const submit = (): void => { const text = draft.trim(); if (!text || !node) return; setDraft(""); setFollow(true); void store.sendMessage(node.id, text); };
   if (!node) return <Empty>等待根节点创建…</Empty>;
-  return <div className="transcript-view"><div className="view-toolbar"><div className="transcript-selector"><AgentMark agent={node.agentId} small /><select aria-label="选择会话节点" value={node.id} onChange={event => setNodeId(event.target.value)}>{treeOrder(snapshot.nodes).map(entry => <option key={entry.id} value={entry.id}>{"　".repeat(entry.depth)}{nodeIsLive(snapshot, entry) ? "◉ " : ""}{entry.title} · {entry.agentId}{nodeIsLive(snapshot, entry) ? " · 运行中" : ""}</option>)}</select><Status status={node.status} /></div><span className="muted">{messages.length} items</span></div>
+  return <div className="transcript-view"><div className="view-toolbar conversation-toolbar"><div className="transcript-selector"><AgentMark agent={node.agentId} small /><select aria-label="选择会话节点" value={node.id} onChange={event => setNodeId(event.target.value)}>{treeOrder(snapshot.nodes).map(entry => <option key={entry.id} value={entry.id}>{"　".repeat(entry.depth)}{nodeIsLive(snapshot, entry) ? "◉ " : ""}{entry.title} · {entry.agentId}{nodeIsLive(snapshot, entry) ? " · 运行中" : ""}</option>)}</select><Status status={node.status} /></div><div className="conversation-toolbar-actions"><span className="muted">{messages.length} items</span><button className="text-button" onClick={() => inspect(node.id)} title="查看当前节点详情">节点详情 ↗</button></div></div>
     <div className="transcript-scroll" ref={scroll} onScroll={() => { const el = scroll.current; if (el) setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 100); }}><div className="transcript-content">{itemStatus[node.id] === "loading" && <div className="loading-line">正在加载会话…</div>}{itemStatus[node.id] === "error" && <button className="button" onClick={() => { void store.loadItems(node.id, true); }}>重试加载会话</button>}{messages.map(({ row, outgoing }) => <TranscriptRow key={outgoing?.clientId ?? row.seq} row={row} node={node} snapshot={snapshot} inspect={inspect} outgoing={outgoing} retry={outgoing ? () => { void store.sendMessage(node.id, outgoing.text, outgoing.clientId); } : undefined} streaming={live && inTurn(row) && (row.item.type === "reasoning" || (row.seq === latestText?.seq && phase?.kind === "reply"))} />)}{!messages.length && itemStatus[node.id] === "ready" && <Empty>这个节点还没有消息。</Empty>}<div ref={bottom} /></div></div>
-    {phase && <div className={`conversation-live phase-${phase.kind}`} role="status" aria-live="polite"><div className="live-phase-heading"><span className="live-dot" /><strong>{phase.label}</strong>{phase.toolSince && <span className="live-tool-time">· {duration(phase.toolSince, now)}</span>}<span className="live-turn-time">本轮 {duration(phase.since, now)}</span>{phase.tokens > 0 && <span>{tokens(phase.tokens)} tokens</span>}</div>{phase.reasoning && <details className="live-reasoning-preview"><summary>{phase.reasoning.split("\n").filter(Boolean).slice(-2).join(" · ")}</summary><Markdown text={phase.reasoning} streaming /></details>}<div className="live-phase-actions">{phase.quiet > 30 && <span className="quiet-label">已 {phase.quiet}s 无新输出</span>}{phase.related.map(id => <button className="text-button" key={id} onClick={() => inspect(id)}>{phase.kind === "permission" ? "处理授权 ↗" : phase.kind === "question" ? "回答问题 ↗" : `${snapshot.nodes.find(entry => entry.id === id)?.title ?? "子任务"} ↗`}</button>)}</div></div>}
-    <form className="composer" onSubmit={event => { event.preventDefault(); submit(); }}><textarea aria-label="消息" placeholder={`向 ${node.agentId} 发送消息…${live ? "（运行中也可发送）" : ""}`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); submit(); } }} disabled={["canceled", "replaced"].includes(node.status)} rows={3} /><div className="composer-footer"><span>{live ? "运行中可继续发送 · 送达方式会显示在消息旁" : "发送到当前节点"} · ⌘ / Ctrl + Enter</span><button className="button primary" disabled={!draft.trim() || ["canceled", "replaced"].includes(node.status)}><Icon name="arrow" size={15} />发送</button></div></form>
+    {phase && <ConversationStatus key={node.id} phase={phase} snapshot={snapshot} now={now} inspect={inspect} />}
+    <form className="composer" onSubmit={event => { event.preventDefault(); submit(); }}><textarea ref={input} aria-label="消息" placeholder={`向 ${node.agentId} 发送消息…${live ? "（运行中也可发送）" : ""}`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); submit(); } }} disabled={["canceled", "replaced"].includes(node.status)} rows={2} /><div className="composer-footer"><span title="送达方式会显示在消息旁">{live ? "运行中可继续发送" : "发送到当前节点"} · ⌘ / Ctrl + Enter</span><button className="button primary" disabled={!draft.trim() || ["canceled", "replaced"].includes(node.status)}><Icon name="arrow" size={15} />发送</button></div></form>
   </div>;
 }
