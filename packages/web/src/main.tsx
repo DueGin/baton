@@ -5,8 +5,9 @@ import { ApiClient, readToken } from "./api.js";
 import { DemoClient } from "./demo/client.js";
 import "@xyflow/react/dist/style.css";
 import "./styles.css";
+import { highlightStyles } from "./highlight.js";
 
 const token = readToken(window.location, window.sessionStorage, window.history);
 const demo = new URLSearchParams(window.location.search).get("demo") === "1" || !token;
 const client = demo ? new DemoClient() : new ApiClient(token!);
-createRoot(document.getElementById("root")!).render(<StrictMode><App client={client} /></StrictMode>);
+createRoot(document.getElementById("root")!).render(<StrictMode><style>{highlightStyles}</style><App client={client} /></StrictMode>);

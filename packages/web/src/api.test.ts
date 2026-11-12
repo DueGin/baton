@@ -20,10 +20,10 @@ describe("API transport", () => {
     expect(received).toEqual([event]);
   });
   it("sends bearer auth, JSON bodies and encoded IDs", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 })); vi.stubGlobal("fetch", fetchMock);
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({ accepted: true, delivery: "queued", itemSeq: 9 }, { status: 202 })); vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("local-secret");
-    await client.send("node/1", "hello");
-    expect(fetchMock).toHaveBeenCalledWith("/api/nodes/node%2F1/messages", { method: "POST", headers: { Authorization: "Bearer local-secret", "Content-Type": "application/json" }, body: JSON.stringify({ text: "hello" }) });
+    expect(await client.send("node/1", "hello", "client-1")).toEqual({ accepted: true, delivery: "queued", itemSeq: 9 });
+    expect(fetchMock).toHaveBeenCalledWith("/api/nodes/node%2F1/messages", { method: "POST", headers: { Authorization: "Bearer local-secret", "Content-Type": "application/json" }, body: JSON.stringify({ text: "hello", clientId: "client-1" }) });
   });
   it("exposes server error bodies and response status", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: "UNAUTHORIZED", message: "invalid token" } }), { status: 401 })));

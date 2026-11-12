@@ -1,4 +1,5 @@
-import { applyEvent, emptyUsage, type CreateRunRequest, type DelegationRecord, type GetItemsResponse, type PatchRunRequest, type PermissionDecision, type RunEvent, type RunEventEnvelope, type RunSnapshot, type TimelineItem, type AddMemberRequest, type ReplaceMemberRequest, type ReassignRequest, type TeamPreset, type TeamPresetInput, type SaveTeamPresetRequest, type TeamRecord, type TeamMember, type TeamMemberSpec, type TeamChange, type TeamProposal, type ApproveTeamProposalRequest, type RejectTeamProposalRequest, type InboxItem, type AnswerQuestionRequest, type ResolveEscalationRequest, type PermissionRule, type CreatePermissionRuleRequest, type QuestionRecord, type EscalationRecord } from "@baton/protocol";
+import { applyEvent, emptyUsage, type CreateRunRequest, type DelegationRecord, type GetItemsResponse, type PatchRunRequest, type PermissionDecision, type RunEvent, type RunEventEnvelope, type RunSnapshot, type TimelineItem, type AddMemberRequest, type ReplaceMemberRequest, type ReassignRequest, type TeamPreset, type TeamPresetInput, type SaveTeamPresetRequest, type TeamRecord, type TeamMember, type TeamMemberSpec, type TeamChange, type TeamProposal, type ApproveTeamProposalRequest, type RejectTeamProposalRequest, type InboxItem, type AnswerQuestionRequest, type ResolveEscalationRequest, type PermissionRule, type CreatePermissionRuleRequest, type QuestionRecord, type EscalationRecord, type SendMessageResponse } from "@baton/protocol";
+import { richConversation } from "./conversation.js";
 import type { BatonClient, TeamPresetResult } from "../api.js";
 import { summarize, terminal } from "../lib/derive.js";
 import { createScenario, demoAgents } from "./scenario.js";
@@ -15,6 +16,8 @@ export class DemoClient implements BatonClient {
   private inboxListeners = new Set<() => void>();
   private rules = new Map<string, PermissionRule>();
   private roundExtensions = new Map<string, number>();
+  private abandonedMessages = new Set<string>();
+  private itemCounters = new Map<string, number>();
   private counter = 0;
   private serial = 0;
   private presets = new Map<string, TeamPreset>();
@@ -41,6 +44,7 @@ export class DemoClient implements BatonClient {
     // Keep a second live Run at the approval gate until the human decides.
     void this.createRun({ agent: "claude", cwd: "/workspace/atlas", title: "待确认团队 · 实现登录流程", prompt: "实现登录流程，并独立审查会话安全。", policy: { mode: "dynamic", teamApproval: true } });
     this.setupHumanDemo();
+    this.setupConversationDemo();
   }
   agents = async () => structuredClone(demoAgents);
   runs = async () => { this.advance(); return [...this.data.values()].map(data => summarize(data.snapshot)).reverse(); };
@@ -59,11 +63,22 @@ export class DemoClient implements BatonClient {
     data.snapshot = applyEvent(data.snapshot, envelope); data.log.push(envelope);
     this.listeners.forEach(listener => listener(envelope));
     if (["permission", "question", "escalation", "team.updated", "run.updated", "node.updated"].includes(event.type)) this.inboxListeners.forEach(listener => listener());
-    if (event.type === "node.updated" && event.patch.status && terminal(event.patch.status)) for (const question of data.snapshot.questions.filter(row => row.nodeId === event.nodeId && row.status === "pending")) this.emit(data, { type: "question", question: { ...question, status: "canceled", answeredAt: envelope.ts } });
+    if (event.type === "node.updated" && event.patch.status && terminal(event.patch.status)) {
+      for (const row of this.queuedMessages(data, event.nodeId)) {
+        this.abandonedMessages.add(`${event.nodeId}:${row.itemSeq}`);
+        this.append(data, event.nodeId, { type: "notice", level: "warning", message: "未送达：节点已结束" });
+      }
+      for (const question of data.snapshot.questions.filter(row => row.nodeId === event.nodeId && row.status === "pending")) this.emit(data, { type: "question", question: { ...question, status: "canceled", answeredAt: envelope.ts } });
+    }
   }
-  private append(data: DemoRun, nodeId: string, item: TimelineItem): void {
-    const seq = Math.max(0, ...data.log.filter(event => event.type === "item" && event.nodeId === nodeId).map(event => event.type === "item" ? event.itemSeq : 0)) + 1;
-    this.emit(data, { type: "item", nodeId, itemSeq: seq, ts: new Date(this.now()).toISOString(), item });
+  private append(data: DemoRun, nodeId: string, item: TimelineItem): number {
+    const seq = this.nextItemSeq(data, nodeId);
+    this.emit(data, { type: "item", nodeId, itemSeq: seq, turnId: data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running")?.id, ts: new Date(this.now()).toISOString(), item });
+    return seq;
+  }
+  private nextItemSeq(data: DemoRun, nodeId: string, count = 1): number {
+    const first = Math.max(this.itemCounters.get(nodeId) ?? 0, ...[...data.log, ...data.remaining].filter(event => event.type === "item" && event.nodeId === nodeId).map(event => event.type === "item" ? event.itemSeq : 0)) + 1;
+    this.itemCounters.set(nodeId, first + count - 1); return first;
   }
   private advance(): void {
     for (const data of this.data.values()) {
@@ -72,6 +87,10 @@ export class DemoClient implements BatonClient {
       for (const event of ready) {
         if (terminal(data.snapshot.run.status)) continue;
         this.emit(data, event);
+        if (event.type === "turn.updated" && event.patch.status && event.patch.status !== "running") {
+          const nodeId = data.snapshot.turns.find(turn => turn.id === event.turnId)?.nodeId;
+          if (nodeId) this.deliverQueued(data, nodeId);
+        }
         if (event.seq === 0 && event.type === "delegation.updated" && event.patch.deliveredAt) {
           const edge = data.snapshot.delegations.find(entry => entry.id === event.delegationId);
           if (edge && edge.result) this.append(data, edge.fromNodeId, { type: "user_message", text: demoResultsPrompt([edge]) });
@@ -285,19 +304,59 @@ export class DemoClient implements BatonClient {
     const items = [...rows.values()].filter(row => row.seq > after).sort((a, b) => a.seq - b.seq);
     return structuredClone({ items, lastSeq: items.at(-1)?.seq ?? after });
   }
-  async send(nodeId: string, text: string): Promise<void> {
-    const data = this.forNode(nodeId); const ts = new Date(this.now()).toISOString(); const node = data.snapshot.nodes.find(entry => entry.id === nodeId)!;
+  async send(nodeId: string, text: string, clientId?: string): Promise<SendMessageResponse> {
+    this.advance();
+    const data = this.forNode(nodeId); const node = data.snapshot.nodes.find(entry => entry.id === nodeId)!;
     if (node.status === "canceled" || node.status === "replaced") throw new Error("节点已取消或替换，请选择活跃节点");
-    if (node.status === "waiting_permission") throw new Error("请先处理该节点的权限请求");
-    this.append(data, nodeId, { type: "user_message", text });
-    const turnId = `${nodeId}:user-${data.snapshot.lastSeq}`;
+    const previous = clientId ? data.log.findLast(event => event.type === "item" && event.nodeId === nodeId && event.item.type === "user_message" && event.item.clientId === clientId) : undefined;
+    if (previous?.type === "item" && previous.item.type === "user_message") return { accepted: true, delivery: previous.item.delivery ?? "turn", itemSeq: previous.itemSeq };
+    const active = data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running");
+    const delivery = active ? demoAgents.find(agent => agent.id === node.agentId)?.capabilities.steer && node.status !== "waiting_permission" ? "steered" : "queued" : "turn";
+    const itemSeq = this.append(data, nodeId, { type: "user_message", text, clientId, delivery });
+    if (delivery === "turn") {
+      this.startReply(data, nodeId, text);
+      const turnId = data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running")?.id;
+      this.emit(data, { type: "item", nodeId, itemSeq, turnId, ts: new Date(this.now()).toISOString(), item: { type: "user_message", text, clientId, delivery } });
+    }
+    return { accepted: true, delivery, itemSeq };
+  }
+  private startReply(data: DemoRun, nodeId: string, text: string): void {
+    const node = data.snapshot.nodes.find(entry => entry.id === nodeId)!;
+    const ts = new Date(this.now()).toISOString(); const turnId = `${nodeId}:user-${++this.serial}`;
     this.emit(data, { type: "turn.started", turn: { id: turnId, runId: data.snapshot.run.id, nodeId, trigger: "user", status: "running", startedAt: ts } });
-    this.emit(data, { type: "node.updated", nodeId, patch: { status: "running", endedAt: undefined, turns: node.turns + 1, activity: "处理新消息", updatedAt: ts } });
-    this.append(data, nodeId, { type: "assistant_message", text: `已收到补充：\n\n${text}\n\n这是 demo 回复。真实连接下，消息会发送到选中节点的 agent 会话。` });
-    this.emit(data, { type: "turn.updated", turnId, patch: { status: "completed", endedAt: ts } });
-    this.emit(data, { type: "node.updated", nodeId, patch: { status: "idle", activity: "等待下一条消息", updatedAt: ts } });
+    this.emit(data, { type: "node.updated", nodeId, patch: { status: "running", endedAt: undefined, turns: node.turns + 1, activity: "已发送，等待响应…", updatedAt: ts } });
     if (node.delegationId) this.emit(data, { type: "delegation.updated", delegationId: node.delegationId, patch: { round: (data.snapshot.delegations.find(edge => edge.id === node.delegationId)?.round ?? 1) + 1 } });
     this.emit(data, { type: "run.updated", patch: { status: "active", endedAt: undefined, updatedAt: ts } });
+    const first = this.nextItemSeq(data, nodeId, 3);
+    const schedule = (seconds: number, event: RunEvent) => data.remaining.push({ ...event, runId: data.snapshot.run.id, seq: 0, ts: new Date(this.now() + seconds * 1000).toISOString() });
+    const row = (seconds: number, itemSeq: number, item: TimelineItem) => schedule(seconds, { type: "item", nodeId, itemSeq, turnId, ts, item });
+    row(1, first, { type: "reasoning", text: "先确认补充信息对现有计划的影响。" });
+    row(3, first, { type: "reasoning", text: "先确认补充信息对现有计划的影响。\n检查当前任务、验收条件和已交付结果，再调整实现。" });
+    schedule(4, { type: "node.updated", nodeId, patch: { activity: "思考中…" } });
+    const span = { id: `${turnId}:check`, callId: `${turnId}:check`, runId: data.snapshot.run.id, nodeId, turnId, name: "shell", kind: "shell", summary: "npm test", status: "running" as const, startedAt: new Date(this.now() + 6_000).toISOString() };
+    schedule(6, { type: "tool.span", span });
+    row(6, first + 1, { type: "tool_call", callId: span.callId, name: "shell", status: "running", detail: { type: "shell", command: "npm test" } });
+    schedule(10, { type: "tool.span", span: { ...span, status: "completed", endedAt: new Date(this.now() + 10_000).toISOString() } });
+    row(10, first + 1, { type: "tool_call", callId: span.callId, name: "shell", status: "completed", detail: { type: "shell", command: "npm test", output: "✓ 12 tests passed", exitCode: 0 } });
+    row(11, first + 2, { type: "assistant_message", text: "已收到补充，验证通过。\n\n" });
+    row(13, first + 2, { type: "assistant_message", text: `已收到补充：\n\n${text}\n\n- [x] 更新计划\n- [x] 验证通过\n\n这是 demo 回复，可在运行中继续发送消息。` });
+    schedule(15, { type: "node.updated", nodeId, patch: { status: "idle", activity: "等待下一条消息", updatedAt: new Date(this.now() + 15_000).toISOString() } });
+    schedule(15, { type: "turn.updated", turnId, patch: { status: "completed", endedAt: new Date(this.now() + 15_000).toISOString() } });
+    data.remaining.sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
+  }
+  private queuedMessages(data: DemoRun, nodeId: string) {
+    const rows = new Map<number, Extract<RunEventEnvelope, { type: "item" }>>();
+    for (const event of data.log) if (event.type === "item" && event.nodeId === nodeId) rows.set(event.itemSeq, event);
+    return [...rows.values()].filter(row => row.item.type === "user_message" && row.item.delivery === "queued" && !this.abandonedMessages.has(`${nodeId}:${row.itemSeq}`));
+  }
+  private deliverQueued(data: DemoRun, nodeId: string): void {
+    if (data.snapshot.nodes.some(node => node.id === nodeId && ["canceled", "replaced", "failed", "completed"].includes(node.status))) return;
+    const queued = this.queuedMessages(data, nodeId)[0];
+    if (queued?.item.type === "user_message") {
+      this.startReply(data, nodeId, queued.item.text);
+      const turnId = data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running")?.id;
+      this.emit(data, { type: "item", nodeId, itemSeq: queued.itemSeq, turnId, ts: new Date(this.now()).toISOString(), item: { ...queued.item, delivery: "turn" } });
+    }
   }
   cancelRun = async (id: string): Promise<void> => { const data = this.get(id); await this.cancelNode(data.snapshot.run.rootNodeId); };
   async cancelNode(nodeId: string): Promise<void> {
@@ -409,7 +468,10 @@ export class DemoClient implements BatonClient {
       if (request.resolution === "cancel") await this.cancelNode(escalation.nodeId);
       if (request.resolution === "extend") {
         if (escalation.delegationId) this.roundExtensions.set(escalation.delegationId, (this.roundExtensions.get(escalation.delegationId) ?? 0) + (request.extraRounds ?? 2));
-        if (escalation.pendingMessage) await this.send(escalation.nodeId, escalation.pendingMessage);
+        if (escalation.pendingMessage) {
+          for (const turn of data.snapshot.turns.filter(turn => turn.nodeId === escalation.nodeId && turn.status === "running")) this.emit(data, { type: "turn.updated", turnId: turn.id, patch: { status: "completed", endedAt: new Date(this.now()).toISOString() } });
+          await this.send(escalation.nodeId, escalation.pendingMessage);
+        }
       }
       const edge = data.snapshot.delegations.find(row => row.id === escalation.delegationId);
       this.notice(data, edge?.fromNodeId ?? data.snapshot.run.rootNodeId, `升级已处理：${escalation.kind} · ${request.resolution}\n留言：${request.note ?? "无"}`); return;
@@ -445,6 +507,28 @@ export class DemoClient implements BatonClient {
     this.emit(data, { type: "escalation", escalation: stall });
     this.emit(data, { type: "escalation", escalation: { id: "demo-round-limit", runId: data.snapshot.run.id, nodeId: edges[1]!.toNodeId, delegationId: edges[1]!.id, kind: "round_limit", detail: "tester 已达到 3 轮，需要你决定是否继续。", pendingMessage: "请补充归档数据的回归测试。", status: "pending", createdAt: new Date(this.now()).toISOString() } });
     this.emit(data, { type: "delegation.updated", delegationId: edges[1]!.id, patch: { round: 3 } });
+  }
+  private setupConversationDemo(): void {
+    const scenario = createScenario(this.now() - 180_000, "run-conversation");
+    const root = scenario.initial.run.rootNodeId; const at = (offset: number) => new Date(this.now() + offset).toISOString();
+    const seed = scenario.events.reduce(applyEvent, scenario.initial);
+    const snapshot: RunSnapshot = { ...seed, run: { ...seed.run, title: "会话体验 · Markdown 与 Mermaid", status: "active", endedAt: undefined, updatedAt: at(-90_000) }, nodes: seed.nodes.filter(node => [root, "run-conversation:review"].includes(node.id)).map(node => ({ ...node, status: "running", endedAt: undefined, activity: "思考中…", updatedAt: at(-65_000) })), turns: [], toolSpans: [], permissions: [], questions: [], escalations: [], delegations: seed.delegations.filter(edge => edge.toNodeId === "run-conversation:review").map(edge => ({ ...edge, status: "running", endedAt: undefined, deliveredAt: undefined, result: undefined })), lastSeq: 0 };
+    snapshot.run.usage = snapshot.nodes.reduce((usage, node) => ({ inputTokens: usage.inputTokens + node.usage.inputTokens, cachedInputTokens: usage.cachedInputTokens + node.usage.cachedInputTokens, outputTokens: usage.outputTokens + node.usage.outputTokens, costUsd: usage.costUsd + node.usage.costUsd }), emptyUsage());
+    const data: DemoRun = { snapshot, log: [], remaining: [] }; this.data.set(snapshot.run.id, data);
+    const history = (secondsAgo: number, event: RunEvent) => {
+      const envelope = { ...event, runId: snapshot.run.id, seq: data.snapshot.lastSeq + 1, ts: at(-secondsAgo * 1000) } as RunEventEnvelope;
+      data.snapshot = applyEvent(data.snapshot, envelope); data.log.push(envelope);
+    };
+    history(170, { type: "item", nodeId: root, itemSeq: 1, ts: at(-170_000), item: { type: "user_message", text: "请展示完整 Markdown、Mermaid，以及运行中继续发送消息的体验。", delivery: "turn" } });
+    history(140, { type: "item", nodeId: root, itemSeq: 2, ts: at(-140_000), item: { type: "assistant_message", text: richConversation } });
+    for (const node of snapshot.nodes) {
+      const turnId = `${node.id}:quiet`;
+      history(100, { type: "turn.started", turn: { id: turnId, nodeId: node.id, runId: snapshot.run.id, trigger: "user", status: "running", startedAt: at(-100_000) } });
+      history(65, { type: "item", nodeId: node.id, itemSeq: node.id === root ? 3 : 1, turnId, ts: at(-65_000), item: { type: "reasoning", text: "正在梳理复杂边界。此 demo 故意保持较长静默，仍会显示本轮计时与无新输出时长。\nClaude 支持插入当前回合；切换到 pi 发送可以体验排队。" } });
+      data.remaining.push({ type: "node.updated", nodeId: node.id, patch: { status: "idle", activity: "本轮完成" }, runId: snapshot.run.id, seq: 0, ts: at(45_000) });
+      data.remaining.push({ type: "turn.updated", turnId, patch: { status: "completed", endedAt: at(45_000) }, runId: snapshot.run.id, seq: 0, ts: at(45_000) });
+    }
+    data.remaining.sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
   }
   async events(runId: string, after: number, onEvent: (event: RunEventEnvelope) => void, signal: AbortSignal): Promise<void> {
     const listener = (event: RunEventEnvelope): void => { if (event.runId === runId && event.seq > after) { after = event.seq; onEvent(structuredClone(event)); } };
