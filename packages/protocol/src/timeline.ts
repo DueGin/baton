@@ -76,7 +76,19 @@ export interface TodoEntry {
  * server merges consecutive chunks of the same turn into one stored item (see DESIGN §6).
  */
 export type TimelineItem =
-  | { type: "user_message"; text: string; messageId?: string }
+  | {
+      type: "user_message";
+      text: string;
+      messageId?: string;
+      /**
+       * How the message reached the agent (human messages): "turn" started a new turn, "steered"
+       * was injected into the running turn, "queued" waits for the running turn to end (the same
+       * itemSeq is replaced with "turn" when it is delivered). Absent for kernel prompts.
+       */
+      delivery?: "turn" | "steered" | "queued";
+      /** Echo of SendMessageRequest.clientId, so the console can reconcile its optimistic row. */
+      clientId?: string;
+    }
   | { type: "assistant_message"; text: string; messageId?: string }
   | { type: "reasoning"; text: string }
   | ToolCallItem

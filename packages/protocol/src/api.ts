@@ -26,6 +26,16 @@ export interface PatchRunRequest {
 
 export interface SendMessageRequest {
   text: string;
+  /** Client-generated id echoed on the stored user_message item (optimistic UI reconciliation). */
+  clientId?: string;
+}
+
+/** 202 response of POST /api/nodes/:nodeId/messages. */
+export interface SendMessageResponse {
+  accepted: true;
+  delivery: "turn" | "steered" | "queued";
+  /** Node-local seq of the user_message item that represents this message. */
+  itemSeq: number;
 }
 
 export interface PermissionDecision {
