@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
-import { BATON_TOOLS, LEAD_ONLY_TOOLS, emptyUsage, type AgentEntry, type AskHumanInput, type PermissionDecision, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionRequest, type PermissionResponse, type ReportResultInput, type FormTeamInput, type ReplaceMemberInput, type ReassignInput, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
+import { BATON_TOOLS, LEAD_ONLY_TOOLS, emptyUsage, type AgentEntry, type AskHumanInput, type PermissionDecision, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionRequest, type PermissionResponse, type ReportResultInput, type FormTeamInput, type ReplaceMemberInput, type ReassignInput, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type SendMessageResponse, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
 import type { DriverEvent, DriverRegistry, DriverSession, OpenSessionSpec } from "../driver/types.js";
 import { Store } from "../store/index.js";
 import { briefPrompt, correctionPrompt, resultsPrompt, systemPrompt } from "./prompts.js";
@@ -22,10 +22,12 @@ const now = (): string => new Date().toISOString();
 const active = (status: string): boolean => ["starting", "running", "waiting_permission", "queued"].includes(status);
 const done = (d: DelegationRecord): boolean => ["completed", "failed", "canceled", "replaced"].includes(d.status);
 const addUsage = (a: UsageTotals, b: UsageTotals): UsageTotals => ({ inputTokens: a.inputTokens + b.inputTokens, cachedInputTokens: a.cachedInputTokens + b.cachedInputTokens, outputTokens: a.outputTokens + b.outputTokens, costUsd: a.costUsd + b.costUsd });
+interface QueuedPrompt { text: string; trigger: TurnTrigger; humanItem?: ItemRecord }
+type MessageDelivery = Pick<SendMessageResponse, "delivery" | "itemSeq">;
 interface Runtime {
   token: string; session?: DriverSession; opening?: Promise<DriverSession>; unsubscribe?: () => void;
   turnId?: string; driverTurnId?: string; report?: ReportResultInput; finalText: string; corrections: number;
-  usage: UsageTotals; chain: Promise<void>; queued: Array<{ text: string; trigger: TurnTrigger }>;
+  usage: UsageTotals; chain: Promise<void>; queued: QueuedPrompt[]; pendingMessages: Map<number, ItemRecord>;
   pendingItem?: ItemRecord; itemTimer?: NodeJS.Timeout; lastItem?: ItemRecord; closed: boolean;
   idleTimer?: NodeJS.Timeout; stallTimer?: NodeJS.Timeout;
 }
@@ -86,7 +88,7 @@ export class Kernel {
   private runtime(id: string): Runtime {
     let rt = this.runtimes.get(id);
     if (!rt) {
-      rt = { token: randomBytes(32).toString("hex"), finalText: "", corrections: 0, usage: emptyUsage(), chain: Promise.resolve(), queued: [], closed: false };
+      rt = { token: randomBytes(32).toString("hex"), finalText: "", corrections: 0, usage: emptyUsage(), chain: Promise.resolve(), queued: [], pendingMessages: new Map(), closed: false };
       this.runtimes.set(id, rt); this.identities.set(rt.token, id);
     }
     return rt;
@@ -194,20 +196,32 @@ export class Kernel {
     try { return await rt.opening; } finally { rt.opening = undefined; }
   }
   private async startTurn(id: string, text: string, trigger: TurnTrigger): Promise<void> {
-    if (this.stopped) return;
+    await this.startPrompts(id, [{ text, trigger }]);
+  }
+  private async startPrompts(id: string, prompts: QueuedPrompt[]): Promise<MessageDelivery["delivery"]> {
+    if (this.stopped) return "queued";
     const rt = this.runtime(id), n = this.store.node(id);
-    if (rt.turnId) { rt.queued.push({ text, trigger }); return; }
+    // A cancel/close can abandon a message while session startup or steer is awaiting the driver.
+    prompts = prompts.filter((p) => !p.humanItem || rt.pendingMessages.has(p.humanItem.seq));
+    if (!prompts.length) return "queued";
+    if (rt.turnId) { rt.queued.push(...prompts); return "queued"; }
     if (["canceled", "replaced"].includes(n.status) || this.canceling.has(id)) throw new Error("Node is canceled");
     const session = await this.session(id);
-    if (rt.turnId) { rt.queued.push({ text, trigger }); return; }
+    prompts = prompts.filter((p) => !p.humanItem || rt.pendingMessages.has(p.humanItem.seq));
+    if (!prompts.length) return "queued";
+    if (rt.turnId) { rt.queued.push(...prompts); return "queued"; }
     const current = this.store.node(id);
     if (["canceled", "replaced"].includes(current.status) || this.canceling.has(id) || this.stopped) throw new Error("Node has been canceled or daemon stopped");
     if (!active(current.status)) this.checkGlobalLimit();
     clearTimeout(rt.idleTimer);
+    const trigger = prompts[0]!.trigger, text = prompts.map((p) => p.text).join("\n\n");
     const turnId = randomUUID(); rt.turnId = turnId; rt.driverTurnId = undefined; rt.report = undefined; rt.finalText = ""; rt.usage = emptyUsage(); rt.lastItem = undefined;
     this.emit(n.runId, { type: "turn.started", turn: { id: turnId, runId: n.runId, nodeId: id, trigger, delegationId: n.delegationId ?? undefined, status: "running", startedAt: now() } });
     this.patchNode(id, { status: "running", activity: "Thinking…", turns: n.turns + 1, error: undefined, endedAt: undefined });
-    this.addItem(id, { type: "user_message", text });
+    for (const prompt of prompts) if (prompt.humanItem) this.deliverMessage(id, prompt.humanItem, "turn", turnId);
+    // Human rows already exist. Only kernel prompts need a new transcript row for this batch.
+    const kernelText = prompts.filter((p) => !p.humanItem).map((p) => p.text).join("\n\n");
+    if (kernelText) this.addItem(id, { type: "user_message", text: kernelText });
     if (n.delegationId) this.patchDelegation(n.delegationId, { status: "running", startedAt: now(), endedAt: undefined, ...(n.status === "completed" || n.status === "failed" ? { deliveredAt: undefined, deliveredVia: undefined, result: undefined } : {}) });
     this.updateRun(n.runId); this.armStall(id);
     try {
@@ -218,9 +232,54 @@ export class Kernel {
       await this.finishTurn(id, "failed", undefined, error instanceof Error ? error.message : String(error));
       throw error;
     }
+    return "turn";
   }
-  async message(id: string, text: string, trigger: TurnTrigger = "user"): Promise<void> {
+  async message(id: string, text: string, clientId?: string): Promise<MessageDelivery> {
     if (typeof text !== "string" || !text.trim()) throw new Error("Nonempty text is required");
+    if (clientId !== undefined && typeof clientId !== "string") throw new Error("clientId must be a string");
+    const n = this.store.node(id), rt = this.runtime(id);
+    if (this.stopped) throw new Error("Daemon is shutting down");
+    if (["canceled", "replaced"].includes(n.status) || this.canceling.has(id)) throw new Error("Node is canceled");
+    const row = this.addItem(id, { type: "user_message", text, delivery: "queued", ...(clientId !== undefined ? { clientId } : {}) });
+    rt.pendingMessages.set(row.seq, row);
+    try {
+      const turnId = rt.turnId;
+      if (turnId) {
+        let outcome: Awaited<ReturnType<DriverSession["steer"]>> | undefined;
+        try { outcome = await rt.session?.steer(text); }
+        catch (error) { this.log(n.runId, error, id); }
+        if (!rt.pendingMessages.has(row.seq)) return { delivery: "queued", itemSeq: row.seq };
+        if (outcome === "steered") {
+          this.deliverMessage(id, row, "steered", turnId); return { delivery: "steered", itemSeq: row.seq };
+        }
+      }
+      const delivery = await this.startPrompts(id, [{ text, trigger: "user", humanItem: row }]);
+      return { delivery, itemSeq: row.seq };
+    } catch (error) {
+      // A failed submission must not discard other messages already waiting on this node.
+      rt.queued = rt.queued.filter((p) => p.humanItem?.seq !== row.seq);
+      this.abandonMessage(id, row.seq); throw error;
+    }
+  }
+  private deliverMessage(id: string, row: ItemRecord, delivery: "turn" | "steered", turnId: string): void {
+    const rt = this.runtime(id);
+    if (row.item.type !== "user_message" || !rt.pendingMessages.delete(row.seq)) return;
+    const next = { ...row, turnId, item: { ...row.item, delivery } };
+    this.store.appendItem(this.store.node(id).runId, next);
+    if (rt.lastItem?.seq === row.seq) rt.lastItem = next;
+  }
+  private abandonMessages(id: string): void {
+    const rt = this.runtime(id); rt.queued = [];
+    for (const seq of rt.pendingMessages.keys()) this.abandonMessage(id, seq);
+  }
+  private abandonMessage(id: string, seq: number): void {
+    if (this.runtime(id).pendingMessages.delete(seq)) this.addItem(id, { type: "notice", level: "warning", message: "未送达：节点已结束" });
+  }
+  private async drainMessages(id: string): Promise<void> {
+    const rt = this.runtime(id);
+    if (rt.queued.length && !rt.closed) await this.startPrompts(id, rt.queued.splice(0));
+  }
+  private async sendPrompt(id: string, text: string, trigger: TurnTrigger): Promise<void> {
     const n = this.store.node(id), rt = this.runtime(id);
     if (["canceled", "replaced"].includes(n.status) || this.canceling.has(id)) throw new Error("Node is canceled");
     if (rt.turnId) {
@@ -365,7 +424,7 @@ export class Kernel {
     if (["canceled", "replaced"].includes(d.status)) throw new Error(`Delegation is ${d.status}`);
     this.patchDelegation(d.id, { round: d.round + 1, result: undefined, status: "running", deliveredAt: undefined, deliveredVia: undefined, endedAt: undefined });
     this.runtime(d.toNodeId).corrections = 0;
-    await this.message(d.toNodeId, message, "followup");
+    await this.sendPrompt(d.toNodeId, message, "followup");
   }
   private armStall(id: string): void {
     const rt = this.runtime(id); clearTimeout(rt.stallTimer);
@@ -435,10 +494,10 @@ export class Kernel {
       }
       case "mode_changed": this.patchNode(id, { modeId: event.modeId ?? undefined }); break;
       case "model_changed": this.patchNode(id, { model: event.model ?? undefined }); break;
-      case "closed": if (rt.turnId) await this.finishTurn(id, "failed", undefined, event.error || "Agent session closed"); this.identities.delete(rt.token); rt.closed = true; rt.session = undefined; break;
+      case "closed": rt.closed = true; this.abandonMessages(id); if (rt.turnId) await this.finishTurn(id, "failed", undefined, event.error || "Agent session closed"); this.identities.delete(rt.token); rt.session = undefined; break;
     }
   }
-  private addItem(id: string, incoming: TimelineItem, ts = now()): void {
+  private addItem(id: string, incoming: TimelineItem, ts = now()): ItemRecord {
     const n = this.store.node(id), rt = this.runtime(id);
     let item = incoming;
     if (item.type === "tool_call") {
@@ -475,12 +534,13 @@ export class Kernel {
       const existing = this.store.items(id);
       // Tool updates replace their row instead of adding duplicate calls to the transcript.
       const previous = item.type === "tool_call" ? existing.find((r) => r.item.type === "tool_call" && r.item.callId === (item.type === "tool_call" ? item.callId : "")) : undefined;
-      row = { nodeId: id, seq: previous?.seq ?? (existing.at(-1)?.seq ?? 0) + 1, turnId: rt.turnId, ts: previous?.ts ?? ts, item };
+      row = { nodeId: id, seq: previous?.seq ?? (existing.at(-1)?.seq ?? 0) + 1, turnId: item.type === "user_message" && item.delivery === "queued" ? undefined : rt.turnId, ts: previous?.ts ?? ts, item };
     }
     rt.lastItem = row;
     if (row.item.type === "assistant_message") rt.finalText = row.item.text;
     if (text) { rt.pendingItem = row; rt.itemTimer ??= setTimeout(() => this.flushItem(id), 100); }
     else this.store.appendItem(n.runId, row);
+    return row;
   }
   private flushItem(id: string): void {
     const rt = this.runtimes.get(id); if (!rt) return;
@@ -503,6 +563,7 @@ export class Kernel {
   }
   private async finishTurn(id: string, status: "completed" | "failed" | "canceled", usage?: Usage, error?: string): Promise<void> {
     const rt = this.runtime(id), n = this.store.node(id); if (!rt.turnId) return;
+    if (status === "canceled") this.abandonMessages(id);
     if (usage) this.usage(id, usage);
     this.flushItem(id);
     this.patchNode(id, { persistence: rt.session?.persistence() ?? undefined });
@@ -512,7 +573,7 @@ export class Kernel {
     for (const span of this.store.snapshot(n.runId).toolSpans) if (span.nodeId === id && span.status === "running") this.emit(n.runId, { type: "tool.span", span: { ...span, status: status === "completed" ? "completed" : status, endedAt: now() } });
     const blocking = this.store.snapshot(n.runId).questions.find((q) => q.nodeId === id && q.blocking && q.status === "pending");
     if (status === "completed" && blocking && !rt.report) {
-      this.patchNode(id, { status: "idle", activity: `等你回答: ${blocking.question}` }); this.updateRun(n.runId); this.armIdle(id); await this.deliver(id); return;
+      this.patchNode(id, { status: "idle", activity: `等你回答: ${blocking.question}` }); this.updateRun(n.runId); this.armIdle(id); await this.drainMessages(id); await this.deliver(id); return;
     }
     if (n.delegationId) {
       const d = this.store.delegation(n.delegationId);
@@ -530,15 +591,13 @@ export class Kernel {
     this.human.refreshActivity(id);
     this.updateRun(n.runId);
     this.armIdle(id);
-    if (rt.queued.length && !rt.closed) {
-      const queued = rt.queued.splice(0); await this.startTurn(id, queued.map((q) => q.text).join("\n\n"), queued[0]!.trigger);
-    }
+    await this.drainMessages(id);
     await this.deliver(id);
   }
   private failNode(id: string, error: unknown): void {
     const n = this.store.node(id); if (["canceled", "replaced"].includes(n.status) || this.canceling.has(id) || this.stopped) return;
     const message = error instanceof Error ? error.message : String(error);
-    const rt = this.runtime(id); clearTimeout(rt.stallTimer);
+    const rt = this.runtime(id); clearTimeout(rt.stallTimer); this.abandonMessages(id);
     if (rt.turnId) { this.emit(n.runId, { type: "turn.updated", turnId: rt.turnId, patch: { status: "failed", error: message, endedAt: now() } }); rt.turnId = undefined; }
     this.patchNode(id, { status: "failed", error: message, activity: message, endedAt: now() });
     if (n.delegationId) { const d = this.store.delegation(n.delegationId); this.patchDelegation(d.id, { status: "failed", result: { status: "failed", summary: message, finalText: "", reported: false, error: message }, endedAt: now() }); this.scheduleDelivery(d.fromNodeId); }
@@ -633,7 +692,7 @@ export class Kernel {
     for (const descendant of subtree) this.canceling.add(descendant);
     for (const d of s.delegations) if (subtree.has(d.fromNodeId) && d.blockedByProposal && d.status === "queued") this.patchDelegation(d.id, { status: "canceled", endedAt: now(), result: { status: "failed", summary: reason, finalText: "", reported: false } });
     for (const child of s.nodes.filter((child) => child.parentNodeId === id && child.status !== "replaced")) await this.cancelNode(child.id, reason);
-    const rt = this.runtime(id); rt.closed = true; rt.queued = [];
+    const rt = this.runtime(id); rt.closed = true; this.abandonMessages(id);
     clearTimeout(this.deliveryTimers.get(id)); this.deliveryTimers.delete(id);
     if (rt.session) await rt.session.interrupt().catch((error: unknown) => this.log(n.runId, error, id));
     this.flushItem(id);
@@ -647,7 +706,7 @@ export class Kernel {
   }
   async cancelRun(id: string): Promise<void> { await this.cancelNode(this.store.snapshot(id).run.rootNodeId); }
   private async closeSession(id: string): Promise<void> {
-    const rt = this.runtime(id); clearTimeout(rt.idleTimer); clearTimeout(rt.stallTimer); this.identities.delete(rt.token); rt.unsubscribe?.(); rt.closed = true;
+    const rt = this.runtime(id); clearTimeout(rt.idleTimer); clearTimeout(rt.stallTimer); this.identities.delete(rt.token); rt.unsubscribe?.(); rt.closed = true; this.abandonMessages(id);
     await rt.opening?.catch(() => {});
     await rt.session?.close(); rt.session = undefined;
     for (const finish of this.waits.get(id) ?? []) finish(); this.waits.delete(id);
