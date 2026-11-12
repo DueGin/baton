@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
 import type { AgentEntry, CreateRunRequest, PermissionResponse, RunPolicy, RunSummary, TeamMember, TeamPreset, PermissionDecision, PermissionRule, CreatePermissionRuleRequest, RunSnapshot, ResolveEscalationRequest } from "@baton/protocol";
 import type { BatonClient } from "./api.js";
 import { InboxStore } from "./inbox-store.js";
@@ -8,7 +8,7 @@ import { AdvancedPolicy } from "./components/AdvancedPolicy.js";
 import { NotificationTracker } from "./lib/notifications.js";
 import { snapshotInbox } from "./lib/inbox.js";
 import { RunStore, errorText } from "./store.js";
-import { agentColors, cost, displayRunStatus, duration, statusLabels, summarize, terminal, tokens } from "./lib/derive.js";
+import { agentColors, cost, statusLabels, summarize } from "./lib/derive.js";
 import { AgentMark, Empty, Icon, Status, Toggle } from "./components/common.js";
 import { Transcript } from "./components/Transcript.js";
 import { Inspector } from "./components/Inspector.js";
@@ -16,10 +16,12 @@ import { ProposalCard } from "./components/TeamProposal.js";
 import { pendingProposals } from "./lib/teams.js";
 import { RunTeam, TeamsPage } from "./components/Teams.js";
 import { MemberDialog, ReassignDialog, SavePresetDialog } from "./components/TeamForms.js";
+import { RunBar } from "./components/RunBar.js";
+import { RunDetails } from "./components/RunDetails.js";
+import { readRunPanel, reduceRunPanel, saveRunPanel, visibleRunPanel, type RunTab } from "./lib/run-layout.js";
 import { NewRun } from "./components/NewRun.js";
 
 type Page = "inbox" | "runs" | "agents" | "teams" | "settings";
-type Tab = "topology" | "timeline" | "transcript" | "team";
 const Topology = lazy(() => import("./components/Topology.js").then(module => ({ default: module.Topology })));
 const Timeline = lazy(() => import("./components/Timeline.js").then(module => ({ default: module.Timeline })));
 const defaultPolicy: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, teamApproval: true, mode: "dynamic", maxTeamSize: 5, stallMinutes: 10, maxRoundsPerDelegation: 3 };
@@ -52,8 +54,12 @@ export default function App({ client }: { client: BatonClient }) {
   const [reassignId, setReassignId] = useState<string | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [page, setPage] = useState<Page>("inbox");
-  const [tab, setTab] = useState<Tab>("topology");
-  const [inspected, setInspected] = useState<string | null>(null);
+  const [tab, setTab] = useState<RunTab>("topology");
+  const [panel, dispatchPanel] = useReducer(reduceRunPanel, { detailsOpen: false, nodeId: null }, () => readRunPanel(localStorage));
+  const inspected = panel.nodeId;
+  const rightPanel = visibleRunPanel(panel);
+  const setInspected = useCallback((nodeId: string | null) => dispatchPanel({ type: "inspect", nodeId }), []);
+  useEffect(() => { saveRunPanel(localStorage, panel.detailsOpen); }, [panel.detailsOpen]);
   const [conversation, setConversation] = useState("");
   const [newRun, setNewRun] = useState(false);
   const [now, setNow] = useState(Date.now());
@@ -109,12 +115,12 @@ export default function App({ client }: { client: BatonClient }) {
     const timer = setInterval(() => { void refreshRuns().catch(() => undefined); }, 10000);
     return () => { active = false; clearInterval(timer); };
   }, [client, refreshRuns]);
-  useEffect(() => { if (runId) { void store.open(runId); setInspected(null); setConversation(""); setTeamDialog(null); setReassignId(null); } return () => store.close(); }, [store, runId]);
+  useEffect(() => { if (runId) { void store.open(runId); setInspected(null); setConversation(""); setTeamDialog(null); setReassignId(null); } return () => store.close(); }, [store, runId, setInspected]);
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem("baton.theme", theme); }, [theme]);
-  useEffect(() => { if (snapshot && pendingNavigation.current?.runId === snapshot.run.id) { setInspected(pendingNavigation.current.nodeId ?? null); pendingNavigation.current = null; } }, [snapshot]);
+  useEffect(() => { if (snapshot && pendingNavigation.current?.runId === snapshot.run.id) { setInspected(pendingNavigation.current.nodeId ?? null); pendingNavigation.current = null; } }, [snapshot, setInspected]);
   useEffect(() => { if (snapshot) { setRuns(current => current.map(entry => entry.id === snapshot.run.id ? summarize(snapshot) : entry)); setConversation(current => current || snapshot.run.rootNodeId); } }, [snapshot]);
-  useEffect(() => { const handler = (event: KeyboardEvent): void => { if (event.key === "Escape") setInspected(null); }; window.addEventListener("keydown", handler); return () => window.removeEventListener("keydown", handler); }, []);
+  useEffect(() => { const handler = (event: KeyboardEvent): void => { if (event.key === "Escape" && !document.querySelector('[aria-modal="true"]')) dispatchPanel({ type: "close" }); }; window.addEventListener("keydown", handler); return () => window.removeEventListener("keydown", handler); }, []);
 
   const action = async (operation: () => Promise<void>): Promise<boolean> => {
     setBusy(true); setError(null); setWarnings([]);
@@ -133,9 +139,7 @@ export default function App({ client }: { client: BatonClient }) {
     try { setAgents(await client.agents(true)); } catch (cause) { setError(errorText(cause)); } finally { setRefreshing(false); }
   };
   const saveDefaults = (policy: RunPolicy): void => { setDefaults(policy); localStorage.setItem("baton.defaults", JSON.stringify({ ...policy, maxCostUsd: policy.budget?.maxCostUsd })); };
-  const active = snapshot?.nodes.filter(node => !terminal(node.status) && node.status !== "idle").length ?? 0;
   const proposals = pendingProposals(snapshot?.run.team);
-  const runPending = snapshot ? snapshotInbox(snapshot).length : 0;
 
   return <div className="app-shell">
     <aside className="sidebar"><div className="brand"><span className="brand-symbol">b<span>↗</span></span><div>baton <span className="version">0.1</span><small>LOCAL AGENT WORKSPACE</small></div></div>
@@ -150,12 +154,11 @@ export default function App({ client }: { client: BatonClient }) {
       {(error || state.error) && <div className={`global-error ${state.connection === "reconnecting" && !error ? "reconnect-warning" : ""}`} role="alert"><span>{error ?? state.error}</span><div>{state.connection === "offline" && runId && <button className="text-button" onClick={() => { void store.open(runId); }}>重试</button>}{error && <button className="icon-button" title="关闭提示" onClick={() => setError(null)}><Icon name="close" size={14} /></button>}</div></div>}
       {warnings.length > 0 && <div className="global-error reconnect-warning preset-warnings" role="status"><div><strong>预设已保存 · Agent 可用性提示</strong>{warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div><button className="icon-button" title="关闭提示" onClick={() => setWarnings([])}><Icon name="close" size={14} /></button></div>}
       {page === "inbox" ? <Inbox items={inboxState.items} snapshots={inboxSnapshots} busy={busy} loading={!inboxState.loaded} error={inboxState.error} refresh={() => { void inboxStore.refresh(); }} open={openInboxItem} decide={decideFull} approve={(id, proposalId) => { void action(() => client.approveTeam(id, proposalId, {})); }} answer={answer} resolve={resolve} /> : page === "agents" ? <AgentsPage agents={agents} refreshing={refreshing} refresh={() => { void refreshAgents(); }} /> : page === "teams" ? <TeamsPage presets={presets} agents={agents} busy={busy} error={error} save={(input, id) => action(async () => { const saved = id ? await client.updateTeam(id, input) : await client.createTeam(input); setWarnings(saved.warnings ?? []); setPresets(await client.teams()); })} remove={id => action(async () => { await client.deleteTeam(id); setPresets(await client.teams()); })} /> : page === "settings" ? <SettingsPage policy={defaults} setPolicy={saveDefaults} theme={theme} setTheme={setTheme} agents={agents} runs={runs} rules={rules} busy={busy} notifications={notifications} notificationPermission={notificationPermission} toggleNotifications={enabled => { void toggleNotifications(enabled); }} createRule={input => action(async () => { await client.createPermissionRule(input); setRules(await client.permissionRules()); })} removeRule={id => { void action(async () => { await client.deletePermissionRule(id); setRules(await client.permissionRules()); }); }} /> : snapshot ? <>
-        <header className="run-header"><div className="run-breadcrumb">Workspace <Icon name="chevron" size={12} /><span>{snapshot.run.cwd.split("/").filter(Boolean).at(-1)}</span><span className={`connection-indicator ${state.connection}`}>{state.connection === "live" ? "● Live" : state.connection === "reconnecting" ? "◌ 重连中" : "○ 离线"}</span></div><div className="run-title-row"><div><h1>{snapshot.run.title}<Status status={displayRunStatus(snapshot)} /></h1><div className="run-cwd">{snapshot.run.cwd}</div></div><div className="run-header-actions"><Toggle label="autoApprove" checked={snapshot.run.policy.autoApprove} disabled={busy} onChange={value => { void action(() => client.patchRun(snapshot.run.id, { policy: { autoApprove: value } })); }} /><button className="button cancel-run" disabled={busy || terminal(snapshot.run.status)} onClick={() => { void action(() => client.cancelRun(snapshot.run.id)); }}><Icon name="stop" size={13} />取消 Run</button></div></div>
-          <div className="run-stats"><div><strong>{active}<span> / {snapshot.nodes.length}</span></strong><span>活跃节点</span></div><div><strong>{tokens(snapshot.run.usage.inputTokens + snapshot.run.usage.outputTokens)}</strong><span>tokens <small>· {tokens(snapshot.run.usage.cachedInputTokens)} cached</small></span></div><div><strong>{cost(snapshot.run.usage.costUsd)}</strong><span>累计费用</span></div><div><strong>{duration(snapshot.run.createdAt, snapshot.run.endedAt ?? now)}</strong><span>运行时间</span></div><div className="stats-permissions"><strong className={runPending ? "amber-text" : ""}>{runPending.toString().padStart(2, "0")}</strong><span>待处理</span></div></div>
-        </header>
-        <div className="view-tabs" role="tablist" aria-label="Run 视图">{([{ id: "topology", label: "拓扑图", icon: "graph" }, { id: "timeline", label: "时间线", icon: "timeline" }, { id: "transcript", label: "会话", icon: "chat" }, { id: "team", label: "团队", icon: "agents" }] as const).map(entry => <button key={entry.id} role="tab" aria-selected={tab === entry.id} className={tab === entry.id ? "active" : ""} onClick={() => setTab(entry.id)}><Icon name={entry.icon} size={16} />{entry.label}{entry.id === "team" && proposals.length > 0 && <span className="team-tab-badge">{proposals.length}</span>}</button>)}<span className="tab-end-label">{snapshot.delegations.length} delegations · {snapshot.turns.length} turns</span></div>
-        <div className="workspace-body"><section className="view-panel" role="tabpanel" aria-label={tab === "topology" ? "拓扑图" : tab === "timeline" ? "时间线" : tab === "team" ? "团队" : "会话"}>{(tab === "topology" || tab === "team") && proposals.map(proposal => <ProposalCard key={proposal.id} proposal={proposal} snapshot={snapshot} agents={agents} busy={busy} error={error} approve={request => { void action(() => client.approveTeam(snapshot.run.id, proposal.id, request)); }} reject={feedback => { void action(() => client.rejectTeam(snapshot.run.id, proposal.id, { feedback })); }} />)}<Suspense fallback={<Empty><div className="loading-orbit" />正在加载视图…</Empty>}>{tab === "topology" ? <Topology answer={answer} resolve={resolve} snapshot={snapshot} selected={inspected} now={now} inspect={setInspected} decide={decide} busy={busy} reassign={id => { setError(null); setReassignId(id); }} openTeam={() => setTab("team")} /> : tab === "timeline" ? <Timeline key={snapshot.run.id} snapshot={snapshot} now={now} inspect={setInspected} /> : tab === "team" ? <RunTeam snapshot={snapshot} busy={busy} add={() => { setError(null); setTeamDialog("add"); }} replace={member => { setError(null); setTeamDialog(member); }} remove={member => { void action(() => client.removeMember(snapshot.run.id, member.id)); }} save={() => { setError(null); setTeamDialog("save"); }} inspect={setInspected} /> : <Transcript snapshot={snapshot} store={store} items={state.items} itemStatus={state.itemStatus} nodeId={conversation || snapshot.run.rootNodeId} setNodeId={setConversation} now={now} inspect={setInspected} />}</Suspense></section>
-          {inspected && <Inspector answer={answer} resolve={resolve} snapshot={snapshot} nodeId={inspected} now={now} close={() => setInspected(null)} converse={id => { setConversation(id); setTab("transcript"); setInspected(null); }} cancel={id => { void action(() => client.cancelNode(id)); }} decide={decide} busy={busy} store={store} items={state.items} inspect={setInspected} reassign={id => { setError(null); setReassignId(id); }} />}
+        <RunBar snapshot={snapshot} tab={tab} setTab={setTab} detailsOpen={rightPanel === "details"} toggleDetails={() => dispatchPanel({ type: "toggle_details" })} />
+        <div className="workspace-body"><section id="run-view" className="view-panel" role="tabpanel" aria-labelledby={`run-tab-${tab}`} aria-label={tab === "topology" ? "拓扑图" : tab === "timeline" ? "时间线" : tab === "team" ? "团队" : "会话"}>{(tab === "topology" || tab === "team") && proposals.map(proposal => <ProposalCard key={proposal.id} proposal={proposal} snapshot={snapshot} agents={agents} busy={busy} error={error} approve={request => { void action(() => client.approveTeam(snapshot.run.id, proposal.id, request)); }} reject={feedback => { void action(() => client.rejectTeam(snapshot.run.id, proposal.id, { feedback })); }} />)}<Suspense fallback={<Empty><div className="loading-orbit" />正在加载视图…</Empty>}>{tab === "topology" ? <Topology answer={answer} resolve={resolve} snapshot={snapshot} selected={inspected} now={now} inspect={setInspected} decide={decide} busy={busy} reassign={id => { setError(null); setReassignId(id); }} openTeam={() => setTab("team")} /> : tab === "timeline" ? <Timeline key={snapshot.run.id} snapshot={snapshot} now={now} inspect={setInspected} /> : tab === "team" ? <RunTeam snapshot={snapshot} busy={busy} add={() => { setError(null); setTeamDialog("add"); }} replace={member => { setError(null); setTeamDialog(member); }} remove={member => { void action(() => client.removeMember(snapshot.run.id, member.id)); }} save={() => { setError(null); setTeamDialog("save"); }} inspect={setInspected} /> : <Transcript snapshot={snapshot} store={store} items={state.items} itemStatus={state.itemStatus} nodeId={conversation || snapshot.run.rootNodeId} setNodeId={setConversation} now={now} inspect={setInspected} />}</Suspense></section>
+          {rightPanel && <button className="right-panel-backdrop" aria-label="关闭侧栏" onClick={() => dispatchPanel({ type: "close" })} />}
+          {rightPanel === "inspector" && inspected ? <Inspector answer={answer} resolve={resolve} snapshot={snapshot} nodeId={inspected} now={now} close={() => dispatchPanel({ type: "close" })} back={panel.detailsOpen ? () => dispatchPanel({ type: "back_to_details" }) : undefined} converse={id => { setConversation(id); setTab("transcript"); setInspected(null); }} cancel={id => { void action(() => client.cancelNode(id)); }} decide={decide} busy={busy} store={store} items={state.items} inspect={setInspected} reassign={id => { setError(null); setReassignId(id); }} /> : rightPanel === "details" && <RunDetails snapshot={snapshot} now={now} connection={state.connection} busy={busy} close={() => dispatchPanel({ type: "close" })} autoApprove={value => { void action(() => client.patchRun(snapshot.run.id, { policy: { autoApprove: value } })); }} cancel={() => { void action(() => client.cancelRun(snapshot.run.id)); }} openTeam={() => { setTab("team"); dispatchPanel({ type: "close" }); }} openPending={kind => { if (kind === "proposal") { setTab("team"); dispatchPanel({ type: "close" }); } else { const item = snapshotInbox(snapshot).find(entry => entry.kind === kind); if (item) setInspected(item.kind === "permission" ? item.permission.nodeId : item.kind === "question" ? item.question.nodeId : item.kind === "escalation" ? item.escalation.nodeId : item.proposal.nodeId); } }} />}
+
         </div>
       </> : <Empty>{initialLoading || state.connection === "loading" && runId ? <><div className="loading-orbit" />正在加载 workspace…</> : <><div className="welcome-mark">b↗</div><h1>从一个目标开始协作</h1><p>让你本机的 agent 自然委派，实时看到每一步。</p><button className="button primary" onClick={() => setNewRun(true)} disabled={!agents.some(agent => agent.status === "ready")}><Icon name="plus" />新建 Run</button></>}</Empty>}
     </main>

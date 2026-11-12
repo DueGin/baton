@@ -55,3 +55,7 @@ export function conversationPhase(snapshot: RunSnapshot, node: NodeRecord, rows:
   if (children.length) return { ...phase, kind: "children", label: `等待 ${children.length} 个子任务`, related: children.map(edge => edge.toNodeId).filter(id => snapshot.nodes.some(entry => entry.id === id)) };
   return phase;
 }
+
+export function phaseTimerLabel(phase: Pick<ConversationPhase, "kind">): string {
+  return phase.kind === "children" ? "等待" : "本轮";
+}
