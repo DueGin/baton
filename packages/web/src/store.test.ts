@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyEvent, type GetItemsResponse, type RunEventEnvelope } from "@baton/protocol";
 import { DemoClient } from "./demo/client.js";
 import { createScenario, replay } from "./demo/scenario.js";
+import { deliveryLabel } from "./lib/conversation.js";
 import { mergeItems, RunStore } from "./store.js";
 
 const base = Date.parse("2026-11-10T07:00:00Z");
@@ -82,4 +83,48 @@ describe("RunStore and protocol integration", () => {
       store.close();
     }
   });
+});
+
+describe("optimistic sending", () => {
+  it("shows an immediate row, accepts SSE before HTTP and does not regress an acknowledged send on HTTP failure", async () => {
+    const client = new DemoClient(() => base); let rejectSend: (error: Error) => void = () => undefined;
+    vi.spyOn(client, "send").mockImplementation(() => new Promise((_resolve, reject) => { rejectSend = reject; }));
+    const store = new RunStore(client); await store.open("run-conversation");
+    const before = store.getSnapshot().snapshot!; const nodeId = before.run.rootNodeId;
+    const sending = store.sendMessage(nodeId, "hello"); const local = store.getSnapshot().outgoing[0]!;
+    expect(local.state).toBe("sending");
+    const ts = new Date(base).toISOString();
+    store.apply({ type: "item", runId: before.run.id, seq: before.lastSeq + 1, nodeId, itemSeq: 8, ts, item: { type: "user_message", text: "hello", clientId: local.clientId, delivery: "queued" } });
+    expect(store.getSnapshot().outgoing[0]!.state).toBe("accepted");
+    expect(store.getSnapshot().lastEventAt[nodeId]).toBe(base);
+    rejectSend(new Error("response lost")); await sending;
+    expect(store.getSnapshot().outgoing[0]!.state).toBe("accepted"); store.close();
+  });
+  it("keeps failures retryable with the same clientId and reconciles an acknowledgement by itemSeq", async () => {
+    const client = new DemoClient(() => base);
+    const send = vi.spyOn(client, "send").mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce({ accepted: true, delivery: "turn", itemSeq: 20 });
+    const store = new RunStore(client); await store.open("run-conversation"); const nodeId = store.getSnapshot().snapshot!.run.rootNodeId;
+    await store.sendMessage(nodeId, "retry me"); const message = store.getSnapshot().outgoing[0]!;
+    expect(message).toMatchObject({ state: "failed", error: "offline" });
+    await store.sendMessage(nodeId, message.text, message.clientId);
+    expect(store.getSnapshot().outgoing).toHaveLength(1);
+    expect(store.getSnapshot().outgoing[0]).toMatchObject({ state: "accepted", itemSeq: 20, delivery: "turn" });
+    expect(send.mock.calls[0]![2]).toBe(send.mock.calls[1]![2]); store.close();
+  });
+  it("does not mistake the server's transient queued record for an actual queued delivery", async () => {
+    const client = new DemoClient(() => base);
+    let accept: (value: { accepted: true; delivery: "turn"; itemSeq: number }) => void = () => undefined;
+    vi.spyOn(client, "send").mockImplementation(() => new Promise(resolve => { accept = resolve; }));
+    const store = new RunStore(client); await store.open("run-conversation");
+    const snapshot = store.getSnapshot().snapshot!; const nodeId = snapshot.run.rootNodeId;
+    const sending = store.sendMessage(nodeId, "start a new turn");
+    const clientId = store.getSnapshot().outgoing[0]!.clientId;
+    const event: RunEventEnvelope = { type: "item", runId: snapshot.run.id, seq: snapshot.lastSeq + 1, nodeId, itemSeq: 10, ts: new Date(base).toISOString(), item: { type: "user_message", text: "start a new turn", delivery: "queued", clientId } };
+    store.apply(event);
+    store.apply({ ...event, seq: event.seq + 1, item: { type: "user_message", text: "start a new turn", delivery: "turn", clientId } });
+    accept({ accepted: true, delivery: "turn", itemSeq: 10 }); await sending;
+    const message = store.getSnapshot().outgoing[0]!;
+    expect(deliveryLabel(message.delivery, message.wasQueued)).toBe("已开始新一轮"); store.close();
+  });
+
 });

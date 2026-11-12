@@ -6,7 +6,7 @@ import { demoBriefPrompt, demoResultsPrompt } from "../demo/prompts.js";
 
 describe("safe agent content rendering", () => {
   it("escapes HTML while supporting code, lists and emphasis", () => {
-    const html = renderToStaticMarkup(<Markdown text={'<img src=x onerror=alert(1)>\n- **bold** and `inline`\n\n```html\n<script>alert(1)</script>\n```'} />);
+    const html = renderToStaticMarkup(<Markdown text={'<img src=x onerror=alert(1)>\n\n- **bold** and `inline`\n\n```html\n<script>alert(1)</script>\n```'} />);
     expect(html).not.toContain("<img");
     expect(html).not.toContain("<script");
     expect(html).toContain("&lt;img");
@@ -47,4 +47,15 @@ describe("safe agent content rendering", () => {
     const notice = render('<baton-notice>任务已改派 <img src=x onerror="bad()"></baton-notice>');
     expect(notice).toContain("团队通知"); expect(notice).toContain("baton-notice-card"); expect(notice).not.toContain("<img");
   });
+  it("expands live reasoning, collapses completed reasoning and shows streaming reply carets", () => {
+    const snapshot = replay(createScenario(0), 86000); const node = snapshot.nodes[0]!;
+    const row = { seq: 1, nodeId: node.id, ts: snapshot.run.createdAt, item: { type: "reasoning" as const, text: "Thinking **live**" } };
+    expect(renderToStaticMarkup(<TranscriptRow row={row} node={node} streaming />)).toContain('open=""');
+    expect(renderToStaticMarkup(<TranscriptRow row={row} node={node} />)).not.toContain('open=""');
+    const reply = renderToStaticMarkup(<TranscriptRow row={{ ...row, item: { type: "assistant_message", text: "Partial reply" } }} node={node} streaming />);
+    expect(reply).toContain("streaming-text");
+    const failed = renderToStaticMarkup(<TranscriptRow row={{ ...row, item: { type: "user_message", text: "try again" } }} node={node} outgoing={{ nodeId: node.id, clientId: "c", text: "try again", ts: row.ts, state: "failed", error: "offline" }} retry={() => undefined} />);
+    expect(failed).toContain("发送失败"); expect(failed).toContain("重试"); expect(failed).toContain("offline");
+  });
+
 });

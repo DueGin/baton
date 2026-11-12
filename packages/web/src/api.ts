@@ -2,7 +2,7 @@ import type {
   AgentEntry, CreateRunRequest, DelegationRecord, GetItemsResponse, PatchRunRequest,
   PermissionDecision, RunEventEnvelope, RunSnapshot, RunSummary, AddMemberRequest, ReplaceMemberRequest,
   ReassignRequest, TeamPreset, TeamPresetInput, SaveTeamPresetRequest, ApproveTeamProposalRequest, RejectTeamProposalRequest,
-  InboxItem, AnswerQuestionRequest, ResolveEscalationRequest, PermissionRule, CreatePermissionRuleRequest,
+  SendMessageResponse, InboxItem, AnswerQuestionRequest, ResolveEscalationRequest, PermissionRule, CreatePermissionRuleRequest,
 } from "@baton/protocol";
 
 /** The server may attach availability warnings to successful preset mutations. */
@@ -17,7 +17,7 @@ export interface BatonClient {
   patchRun(id: string, request: PatchRunRequest): Promise<void>;
   cancelRun(id: string): Promise<void>;
   items(nodeId: string, after?: number): Promise<GetItemsResponse>;
-  send(nodeId: string, text: string): Promise<void>;
+  send(nodeId: string, text: string, clientId?: string): Promise<SendMessageResponse>;
   cancelNode(nodeId: string): Promise<void>;
   decide(requestId: string, decision: PermissionDecision): Promise<void>;
   delegation(id: string): Promise<DelegationRecord>;
@@ -79,7 +79,7 @@ export class ApiClient implements BatonClient {
   patchRun = (id: string, body: PatchRunRequest) => this.request<void>(`/runs/${encodeURIComponent(id)}`, "PATCH", body);
   cancelRun = (id: string) => this.request<void>(`/runs/${encodeURIComponent(id)}/cancel`, "POST", {});
   items = (nodeId: string, after = 0) => this.request<GetItemsResponse>(`/nodes/${encodeURIComponent(nodeId)}/items?after=${after}`);
-  send = (nodeId: string, text: string) => this.request<void>(`/nodes/${encodeURIComponent(nodeId)}/messages`, "POST", { text });
+  send = (nodeId: string, text: string, clientId?: string) => this.request<SendMessageResponse>(`/nodes/${encodeURIComponent(nodeId)}/messages`, "POST", { text, ...(clientId ? { clientId } : {}) });
   cancelNode = (id: string) => this.request<void>(`/nodes/${encodeURIComponent(id)}/cancel`, "POST", {});
   decide = (id: string, body: PermissionDecision) => this.request<void>(`/permissions/${encodeURIComponent(id)}`, "POST", body);
   delegation = (id: string) => this.request<DelegationRecord>(`/delegations/${encodeURIComponent(id)}`);
