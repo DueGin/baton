@@ -25,7 +25,7 @@ function patchById<T extends { id: string }>(list: T[], id: string, patch: Parti
 /** Returns a new snapshot (or the same object when the event is older than lastSeq). */
 export function applyEvent(snapshot: RunSnapshot, event: RunEventEnvelope): RunSnapshot {
   if (event.seq <= snapshot.lastSeq) return snapshot;
-  const next: RunSnapshot = { ...snapshot, lastSeq: event.seq };
+  const next: RunSnapshot = { ...snapshot, lastSeq: event.seq, lastEventAt: event.ts };
   switch (event.type) {
     case "run.created":
       next.run = event.run;
