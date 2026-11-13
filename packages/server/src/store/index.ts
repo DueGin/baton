@@ -24,7 +24,8 @@ export class Store {
     const row = this.db.prepare("SELECT data, seq FROM runs WHERE id=?").get(id);
     if (!row) throw new Error(`Run not found: ${id}`);
     const read = <T>(table: string): T[] => this.db.prepare(`SELECT data FROM ${table} WHERE run_id=? ORDER BY rowid`).all(id).map((r) => JSON.parse(String(r.data)) as T);
-    return { run: JSON.parse(String(row.data)) as RunSnapshot["run"], lastSeq: Number(row.seq), nodes: read("nodes"), delegations: read("delegations"), turns: read("turns"), toolSpans: read("tool_spans"), permissions: read("permissions"), questions: read("questions"), escalations: read("escalations") };
+    const last = this.db.prepare("SELECT json_extract(data, '$.ts') AS ts FROM events WHERE run_id=? AND seq=?").get(id, Number(row.seq));
+    return { run: JSON.parse(String(row.data)) as RunSnapshot["run"], lastSeq: Number(row.seq), ...(last?.ts ? { lastEventAt: String(last.ts) } : {}), nodes: read("nodes"), delegations: read("delegations"), turns: read("turns"), toolSpans: read("tool_spans"), permissions: read("permissions"), questions: read("questions"), escalations: read("escalations") };
   }
   append(runId: string, payload: RunEvent): RunEventEnvelope {
     this.db.exec("BEGIN IMMEDIATE");
@@ -82,7 +83,7 @@ export class Store {
   list(): RunSummary[] {
     return this.db.prepare("SELECT id FROM runs ORDER BY rowid DESC").all().map((r) => {
       const s = this.snapshot(String(r.id));
-      return { ...s.run, rootAgentId: s.nodes.find((n) => n.id === s.run.rootNodeId)?.agentId ?? "", agents: [...new Set(s.nodes.map((n) => n.agentId))], nodeCount: s.nodes.length, activeNodeCount: s.nodes.filter((n) => ["starting", "running", "waiting_permission"].includes(n.status)).length, pendingPermissions: s.permissions.filter((p) => p.status === "pending").length, pendingTotal: this.inboxFor(s).length };
+      return { ...s.run, ...(s.lastEventAt ? { lastEventAt: s.lastEventAt } : {}), rootAgentId: s.nodes.find((n) => n.id === s.run.rootNodeId)?.agentId ?? "", agents: [...new Set(s.nodes.map((n) => n.agentId))], nodeCount: s.nodes.length, activeNodeCount: s.nodes.filter((n) => ["starting", "running", "waiting_permission"].includes(n.status)).length, pendingPermissions: s.permissions.filter((p) => p.status === "pending").length, pendingTotal: this.inboxFor(s).length };
     });
   }
   private inboxFor(s: RunSnapshot): InboxItem[] {

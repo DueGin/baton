@@ -474,11 +474,16 @@ export interface RunSnapshot {
   escalations: EscalationRecord[];
   /** Last event seq included in this snapshot; subscribe with after=lastSeq. */
   lastSeq: number;
+  /** Timestamp of the event at lastSeq (the run's latest activity; absent for an empty log). */
+  lastEventAt?: IsoTime;
 }
 
 export interface RunSummary {
   id: string;
   title: string;
+  titleSource?: RunRecord["titleSource"];
+  /** Timestamp of the run's latest event. */
+  lastEventAt?: IsoTime;
   status: RunStatus;
   cwd: string;
   rootAgentId: string;
