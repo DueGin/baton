@@ -23,6 +23,12 @@ describe("compact Run chrome", () => {
     for (const text of [snapshot.run.title, snapshot.run.cwd, "复制路径", "Run 详情", "活跃 / 总节点", "Cached tokens", "运行时间", "委派 / 回合", "权限请求", "名单确认", "Agent 提问", "需要介入", "动态组队", "autoApprove", "团队人数", "停滞提醒", "委派轮次", "查看团队", "取消 Run"]) expect(html).toContain(text);
     expect(html).toContain('aria-label="关闭 Run 详情"');
   });
+  it("exposes title editing, regeneration and generated source without expanding the header", async () => {
+    const snapshot = await new DemoClient(() => now).run("run-idle-gaps");
+    const html = renderToStaticMarkup(<RunBar snapshot={snapshot} tab="timeline" setTab={() => undefined} detailsOpen={false} toggleDetails={() => undefined} rename={async () => true} regenerate={async () => true} />);
+    expect(html).toContain(`aria-label="重命名：${snapshot.run.title}"`);
+    expect(html).toContain('aria-label="重新生成标题"'); expect(html).toContain("由标题模型命名");
+  });
   it("keeps status on one line by default and names child waiting time correctly", async () => {
     const snapshot = await new DemoClient(() => now).run("run-demo");
     const waiting = renderToStaticMarkup(<ConversationStatus phase={{ kind: "children", label: "等待 2 个子任务", since: new Date(now - 149_000).toISOString(), quiet: 45, related: [], tokens: 1200 }} snapshot={snapshot} now={now} inspect={() => undefined} />);

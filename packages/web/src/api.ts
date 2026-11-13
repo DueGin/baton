@@ -2,6 +2,7 @@ import type {
   AgentEntry, CreateRunRequest, DelegationRecord, GetItemsResponse, PatchRunRequest,
   PermissionDecision, RunEventEnvelope, RunSnapshot, RunSummary, AddMemberRequest, ReplaceMemberRequest,
   ReassignRequest, TeamPreset, TeamPresetInput, SaveTeamPresetRequest, ApproveTeamProposalRequest, RejectTeamProposalRequest,
+  SettingsResponse, UpdateSettingsRequest, TestTitleModelRequest, TestTitleModelResponse,
   SendMessageResponse, InboxItem, AnswerQuestionRequest, ResolveEscalationRequest, PermissionRule, CreatePermissionRuleRequest,
 } from "@baton/protocol";
 
@@ -15,6 +16,10 @@ export interface BatonClient {
   run(id: string): Promise<RunSnapshot>;
   createRun(request: CreateRunRequest): Promise<RunSnapshot>;
   patchRun(id: string, request: PatchRunRequest): Promise<void>;
+  regenerateTitle(id: string): Promise<void>;
+  settings(): Promise<SettingsResponse>;
+  updateSettings(request: UpdateSettingsRequest): Promise<SettingsResponse>;
+  testTitleModel(request: TestTitleModelRequest): Promise<TestTitleModelResponse>;
   cancelRun(id: string): Promise<void>;
   items(nodeId: string, after?: number): Promise<GetItemsResponse>;
   send(nodeId: string, text: string, clientId?: string): Promise<SendMessageResponse>;
@@ -77,6 +82,10 @@ export class ApiClient implements BatonClient {
   run = (id: string) => this.request<RunSnapshot>(`/runs/${encodeURIComponent(id)}`);
   createRun = (body: CreateRunRequest) => this.request<RunSnapshot>("/runs", "POST", body);
   patchRun = (id: string, body: PatchRunRequest) => this.request<void>(`/runs/${encodeURIComponent(id)}`, "PATCH", body);
+  regenerateTitle = (id: string) => this.request<void>(`/runs/${encodeURIComponent(id)}/title/regenerate`, "POST", {});
+  settings = () => this.request<SettingsResponse>("/settings");
+  updateSettings = (body: UpdateSettingsRequest) => this.request<SettingsResponse>("/settings", "PUT", body);
+  testTitleModel = (body: TestTitleModelRequest) => this.request<TestTitleModelResponse>("/settings/title-model/test", "POST", body);
   cancelRun = (id: string) => this.request<void>(`/runs/${encodeURIComponent(id)}/cancel`, "POST", {});
   items = (nodeId: string, after = 0) => this.request<GetItemsResponse>(`/nodes/${encodeURIComponent(nodeId)}/items?after=${after}`);
   send = (nodeId: string, text: string, clientId?: string) => this.request<SendMessageResponse>(`/nodes/${encodeURIComponent(nodeId)}/messages`, "POST", { text, ...(clientId ? { clientId } : {}) });

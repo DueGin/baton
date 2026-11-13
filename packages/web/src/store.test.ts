@@ -72,6 +72,15 @@ describe("RunStore and protocol integration", () => {
     const row = (seq: number, text: string) => ({ seq, nodeId, ts, item: { type: "assistant_message" as const, text } });
     expect(mergeItems([row(3, "old"), row(1, "one")], [row(2, "two"), row(3, "new")]).map(entry => [entry.seq, "text" in entry.item ? entry.item.text : ""])).toEqual([[1, "one"], [2, "two"], [3, "new"]]);
   });
+  it("tracks the latest run event including item-only activity and clears it on run change", async () => {
+    const client = new DemoClient(() => base); const store = new RunStore(client);
+    await store.open("run-idle-gaps"); const snapshot = store.getSnapshot().snapshot!;
+    store.apply({ type: "item", runId: snapshot.run.id, seq: snapshot.lastSeq + 1, ts: new Date(base).toISOString(), nodeId: snapshot.run.rootNodeId, itemSeq: 1, item: { type: "assistant_message", text: "latest activity" } });
+    expect(store.getSnapshot().snapshot!.lastEventAt).toBe(new Date(base).toISOString());
+    const next = await client.run("run-conversation");
+    await store.open(next.run.id); expect(store.getSnapshot().snapshot!.lastEventAt).toBe(next.lastEventAt);
+    store.close();
+  });
   it("keeps approval notices when closing and reopening the durable transcript", async () => {
     const client = new DemoClient(() => base); const store = new RunStore(client);
     const before = await client.run("run-local-1");

@@ -91,6 +91,11 @@ function GraphView({ snapshot, selected, inspect, openTeam }: { snapshot: RunSna
     if (canvas.current) observer.observe(canvas.current);
     return () => observer.disconnect();
   }, []);
+  useEffect(() => {
+    if (!canvasWidth) return;
+    const timer = setTimeout(() => { fitFrame.current = requestAnimationFrame(() => { void fitView(fitOptions); }); }, 100);
+    return () => clearTimeout(timer);
+  }, [canvasWidth, fitView]);
   useEffect(() => () => cancelAnimationFrame(fitFrame.current), []);
   const edges = useMemo(() => graphEdges(snapshot), [snapshot.nodes, snapshot.delegations]);
   return <div className="topology-view" ref={canvas}><RosterStrip snapshot={snapshot} open={openTeam} /><div className="view-toolbar"><span className="eyebrow">DELEGATION MAP</span><div className="toolbar-actions"><Toggle checked={follow} onChange={setFollow} label="跟随最新" /><Toggle checked={showMap} onChange={setShowMap} label="小地图" /><button className="button small" onClick={() => { void fitView(fitOptions); }}>适应画布</button></div></div>
