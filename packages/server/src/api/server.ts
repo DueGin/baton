@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile, chmod, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { CreatePermissionRuleRequest, ResolveEscalationRequest, ApproveTeamProposalRequest, AddMemberRequest, ReplaceMemberRequest, ReassignRequest, SaveTeamPresetRequest, TeamPresetInput, CreateRunRequest, PatchRunRequest, PermissionDecision, RunEventEnvelope, SendMessageResponse } from "@baton/protocol";
+import type { CreatePermissionRuleRequest, ResolveEscalationRequest, ApproveTeamProposalRequest, AddMemberRequest, ReplaceMemberRequest, ReassignRequest, SaveTeamPresetRequest, TeamPresetInput, CreateRunRequest, PatchRunRequest, PermissionDecision, RunEventEnvelope, SendMessageResponse, UpdateSettingsRequest, TestTitleModelRequest } from "@baton/protocol";
 import type { DriverRegistry } from "../driver/types.js";
 import { FakeDriverRegistry } from "../driver/fake.js";
 import { Store } from "../store/index.js";
@@ -12,9 +12,12 @@ import { DEFAULT_POLICY, Kernel } from "../kernel/index.js";
 import { handleMcp } from "../mcp/index.js";
 import { Notifications, desktopNotifier, type Notifier } from "../notifications/index.js";
 import { exportRun, type ExportFormat } from "../telemetry/index.js";
+import { Settings } from "../settings/index.js";
+import { Titles, type TitleGenerator } from "../titles/index.js";
 export interface StartServerOptions {
   home?: string; port?: number; registry?: DriverRegistry; fake?: boolean; webDist?: string;
   maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; notifier?: Notifier; notificationCoalesceMs?: number;
+  titleGenerator?: TitleGenerator;
 }
 export interface BatonServer {
   home: string; port: number; token: string; url: string; server: Server; store: Store; kernel: Kernel;
@@ -51,9 +54,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
   let registry = options.registry;
   if (!registry) registry = options.fake ? new FakeDriverRegistry() : (await import("../driver/paseo-adapter.js")).createPaseoDriverRegistry({ home });
   const store = new Store(join(home, "baton.db"));
+  const settings = new Settings(home), titles = new Titles(settings, options.titleGenerator);
   let desktop = process.platform === "darwin";
-  try { const config = JSON.parse(await readFile(join(home, "config.json"), "utf8")) as { notifications?: { desktop?: boolean } }; if (typeof config.notifications?.desktop === "boolean") desktop = config.notifications.desktop; }
-  catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) { store.close(); throw error; } }
+  try { const config = await settings.config(), notifications = config.notifications; if (notifications && typeof notifications === "object" && "desktop" in notifications && typeof notifications.desktop === "boolean") desktop = notifications.desktop; }
+  catch (error) { store.close(); throw error; }
   const notifications = new Notifications(store, options.notifier ?? (desktop ? desktopNotifier : () => {}), options.notificationCoalesceMs);
   let kernel: Kernel, port = 0;
   const streams = new Set<ServerResponse>();
@@ -87,6 +91,14 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
     if (path.startsWith("/api/")) {
       const provided = request.headers.authorization?.startsWith("Bearer ") ? request.headers.authorization.slice(7) : (method === "GET" && path.endsWith("/events") ? url.searchParams.get("token") : null);
       if (!provided || Buffer.byteLength(provided) !== Buffer.byteLength(token) || !timingSafeEqual(Buffer.from(provided), Buffer.from(token))) throw new HttpError(401, "Bearer token required");
+      if (path === "/api/settings") {
+        if (method === "GET") { json(response, 200, await settings.get()); return; }
+        if (method === "PUT") { json(response, 200, await settings.update(record(await body(request)) as UpdateSettingsRequest)); return; }
+      }
+      if (method === "POST" && path === "/api/settings/title-model/test") {
+        const input = record(await body(request)) as TestTitleModelRequest, latest = store.list()[0];
+        json(response, 200, await titles.test(input, latest ? kernel.firstPrompt(latest.id) : "Build a simple task management app.")); return;
+      }
       if (method === "GET" && path === "/api/inbox") { json(response, 200, store.inbox()); return; }
       if (method === "GET" && path === "/api/inbox/events") { inboxStream(response); return; }
       if (path === "/api/permission-rules") {
@@ -132,6 +144,13 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
       }
       const reassign = /^\/api\/delegations\/([^/]+)\/reassign$/.exec(path);
       if (method === "POST" && reassign) { json(response, 200, await kernel.teams.reassign(reassign[1]!, record(await body(request)) as unknown as ReassignRequest)); return; }
+      const regenerate = /^\/api\/runs\/([^/]+)\/title\/regenerate$/.exec(path);
+      if (method === "POST" && regenerate) {
+        await body(request); store.snapshot(regenerate[1]!);
+        try { json(response, 200, await kernel.regenerateTitle(regenerate[1]!)); }
+        catch (error) { throw new HttpError(502, error instanceof Error ? error.message : String(error)); }
+        return;
+      }
       const run = /^\/api\/runs\/([^/]+)(?:\/(events|cancel|export))?$/.exec(path);
       if (run) {
         const id = run[1]!, action = run[2]; store.snapshot(id);
@@ -191,7 +210,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
   } catch (error) { notifications.close(); store.close(); await registry.shutdown(); throw error; }
   const address = server.address(); if (!address || typeof address === "string") throw new Error("Invalid server address"); port = address.port;
   const url = `http://127.0.0.1:${port}`;
-  kernel = new Kernel(store, registry, { ...options, baseUrl: url }); kernel.recover();
+  kernel = new Kernel(store, registry, { ...options, baseUrl: url, titles }); kernel.recover();
   await writeFile(join(home, "daemon.json"), JSON.stringify({ url, port, pid: process.pid }), { mode: 0o600 });
   let closing: Promise<void> | undefined;
   return { home, token, port, url, server, store, kernel, close() {

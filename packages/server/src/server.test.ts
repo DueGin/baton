@@ -224,7 +224,7 @@ describe("HTTP and exports", () => {
     await until(() => server.store.snapshot(id).turns.length === 2 && server.store.snapshot(id).turns.every((turn) => turn.status === "completed"));
     const canceled = await fetch(`${server.url}/api/runs/${id}/cancel`, { method: "POST", headers: { authorization: `Bearer ${server.token}`, "content-type": "application/json" }, body: "{}" });
     expect(canceled.status).toBe(200); expect(server.store.snapshot(id).run.status).toBe("canceled");
-  });
+  }, 20000); // Starts four separate tsx processes; cold startup can exceed the default 5 seconds.
 
   it("rejects auth/Host/Origin/non-JSON, serves info and token permissions", async () => {
     const server = await setup({ root: idle });
