@@ -8,6 +8,7 @@ import { Teams, type ResolvedMember } from "./teams.js";
 import { HumanInteraction } from "./human.js";
 import { PermissionRules, HUMAN_DENIAL } from "./permission-rules.js";
 import { validateSchema } from "./schema.js";
+import type { TitleNaming } from "../titles/index.js";
 
 /** True when a permission request is for one of baton's own MCP tools (Claude names them
  * mcp__baton__*, Codex asks via an MCP elicitation carrying serverName "baton"). */
@@ -31,12 +32,13 @@ interface Runtime {
   pendingItem?: ItemRecord; itemTimer?: NodeJS.Timeout; lastItem?: ItemRecord; closed: boolean;
   idleTimer?: NodeJS.Timeout; stallTimer?: NodeJS.Timeout;
 }
-export interface KernelOptions { baseUrl: string; maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number }
+export interface KernelOptions { baseUrl: string; maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; titles?: TitleNaming }
 export class Kernel {
   private runtimes = new Map<string, Runtime>();
   private identities = new Map<string, string>();
   private deliveryTimers = new Map<string, NodeJS.Timeout>();
   private stopped = false;
+  private titleController = new AbortController();
   private waits = new Map<string, Set<() => void>>();
   private canceling = new Set<string>();
   private delivering = new Set<string>();
@@ -142,11 +144,35 @@ export class Kernel {
     if (members.length > (policy.maxTeamSize ?? 5)) throw new Error(`Team size exceeds maxTeamSize (${policy.maxTeamSize ?? 5})`);
     await this.available(agent); this.checkGlobalLimit();
     const runId = randomUUID(), nodeId = randomUUID(), ts = now();
-    this.emit(runId, { type: "run.created", run: { id: runId, rootNodeId: nodeId, title: input.title || input.prompt.slice(0, 100), cwd: input.cwd, status: "active", policy, createdAt: ts, updatedAt: ts, usage: emptyUsage() } });
+    this.emit(runId, { type: "run.created", run: { id: runId, rootNodeId: nodeId, title: input.title || input.prompt.slice(0, 100), titleSource: input.title ? "human" : "prompt", cwd: input.cwd, status: "active", policy, createdAt: ts, updatedAt: ts, usage: emptyUsage() } });
     this.emit(runId, { type: "node.created", node: { id: nodeId, runId, parentNodeId: null, delegationId: null, depth: 0, agentId: agent, model: input.model ?? leadDefaults?.model, modeId: input.modeId ?? leadDefaults?.modeId, thinking: input.thinking ?? leadDefaults?.thinking, title: input.title || input.prompt.slice(0, 100), cwd: input.cwd, status: "starting", createdAt: ts, updatedAt: ts, usage: emptyUsage(), turns: 0 } });
     if (preset || input.team) this.teams.initialize(runId, members, preset ? "preset" : "human", preset);
     try { await this.startTurn(nodeId, input.prompt, "user"); } catch (error) { this.failNode(nodeId, error); }
+    if (!input.title) void this.generateTitle(runId, input.prompt);
     return this.store.snapshot(runId);
+  }
+  firstPrompt(id: string): string {
+    const run = this.store.snapshot(id).run;
+    const row = this.store.items(run.rootNodeId).find((r) => r.item.type === "user_message");
+    return row?.item.type === "user_message" ? row.item.text : run.title;
+  }
+  async regenerateTitle(id: string): Promise<RunSnapshot["run"]> {
+    this.store.snapshot(id);
+    await this.generateTitle(id, this.firstPrompt(id), true);
+    return this.store.snapshot(id).run;
+  }
+  private async generateTitle(id: string, prompt: string, force = false): Promise<void> {
+    try {
+      if (!this.options.titles) { if (force) throw new Error("Title model is not configured"); return; }
+      const title = await this.options.titles.generate(prompt, force, this.titleController.signal);
+      if (!title || this.stopped) return;
+      const run = this.store.snapshot(id).run;
+      if (!force && (run.titleSource ?? "prompt") !== "prompt") return;
+      this.emit(id, { type: "run.updated", patch: { title, titleSource: "generated", updatedAt: now() } });
+    } catch (error) {
+      if (!this.stopped) this.emit(id, { type: "log", level: "warn", message: `Title generation failed: ${error instanceof Error ? error.message : String(error)}` });
+      if (force) throw error;
+    }
   }
   private validatePolicy(policy: RunPolicy): RunPolicy {
     if (!Number.isInteger(policy.maxDepth) || policy.maxDepth < 0 || !Number.isInteger(policy.maxActiveChildren) || policy.maxActiveChildren < 1 || typeof policy.autoApprove !== "boolean") throw new Error("Invalid run policy");
@@ -162,7 +188,7 @@ export class Kernel {
     const s = this.store.snapshot(id);
     if (input.title !== undefined && (typeof input.title !== "string" || !input.title.trim())) throw new Error("Invalid title");
     if (input.policy?.maxTeamSize !== undefined && input.policy.maxTeamSize < (s.run.team?.members.filter((m) => m.status === "active").length ?? 0)) throw new Error("maxTeamSize cannot be smaller than the active roster");
-    this.emit(id, { type: "run.updated", patch: { ...(input.title ? { title: input.title } : {}), policy: this.validatePolicy({ ...s.run.policy, ...input.policy, mode: s.run.policy.mode, teamApproval: input.policy?.teamApproval ?? s.run.policy.teamApproval }), updatedAt: now() } });
+    this.emit(id, { type: "run.updated", patch: { ...(input.title ? { title: input.title, titleSource: "human" } : {}), policy: this.validatePolicy({ ...s.run.policy, ...input.policy, mode: s.run.policy.mode, teamApproval: input.policy?.teamApproval ?? s.run.policy.teamApproval }), updatedAt: now() } });
     if (input.policy?.stallMinutes !== undefined) for (const n of s.nodes) if (this.runtimes.get(n.id)?.turnId) this.armStall(n.id);
     if (input.policy?.autoApprove) for (const p of s.permissions) if (p.status === "pending") void this.respondPermission(p.id, { behavior: "allow" }, "policy").catch((e: unknown) => this.log(id, e));
     return this.store.snapshot(id);
@@ -712,7 +738,7 @@ export class Kernel {
     for (const finish of this.waits.get(id) ?? []) finish(); this.waits.delete(id);
   }
   async shutdown(): Promise<void> {
-    this.stopped = true;
+    this.stopped = true; this.titleController.abort();
     for (const waits of this.waits.values()) for (const finish of waits) finish(); this.waits.clear();
     for (const timer of this.deliveryTimers.values()) clearTimeout(timer); this.deliveryTimers.clear();
     for (const [id, rt] of this.runtimes) { this.flushItem(id); rt.unsubscribe?.(); clearTimeout(rt.idleTimer); await rt.session?.interrupt(); await this.closeSession(id); }
