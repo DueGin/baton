@@ -140,3 +140,47 @@ export interface ResolveEscalationRequest {
 
 export type ListPermissionRulesResponse = PermissionRule[];
 export type CreatePermissionRuleRequest = Omit<PermissionRule, "id" | "createdAt" | "hits" | "lastHitAt" | "createdFrom">;
+
+// ───────────────────────────── settings ─────────────────────────────
+
+/** Model used to name runs (any OpenAI-compatible chat-completions endpoint). */
+export interface TitleModelSettings {
+  enabled: boolean;
+  /** e.g. "http://127.0.0.1:3425/v1" — `/chat/completions` is appended. */
+  baseUrl: string;
+  model: string;
+  /** True when an API key is stored (the key itself is never returned). */
+  hasApiKey: boolean;
+  /** Read the key from this environment variable instead of the stored key. */
+  apiKeyEnv?: string;
+}
+
+/** GET /api/settings */
+export interface SettingsResponse {
+  /** Absent until configured. */
+  titleModel?: TitleModelSettings;
+}
+
+/** PUT /api/settings — partial update; persisted to $BATON_HOME/config.json (0600). */
+export interface UpdateSettingsRequest {
+  titleModel?: {
+    enabled?: boolean;
+    baseUrl?: string;
+    model?: string;
+    /** Write-only. Empty string clears the stored key. */
+    apiKey?: string;
+    apiKeyEnv?: string | null;
+  } | null;
+}
+
+/** POST /api/settings/title-model/test — try the (saved or given) settings on a sample prompt. */
+export interface TestTitleModelRequest {
+  sample?: string;
+  titleModel?: UpdateSettingsRequest["titleModel"];
+}
+export interface TestTitleModelResponse {
+  ok: boolean;
+  title?: string;
+  error?: string;
+  latencyMs: number;
+}

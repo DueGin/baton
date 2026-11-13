@@ -201,6 +201,12 @@ export interface TeamPreset {
 export interface RunRecord {
   id: string;
   title: string;
+  /**
+   * Where the title came from: "prompt" = provisional (start of the first prompt), "generated" =
+   * named by the configured title model, "human" = renamed by the human (never overwritten).
+   * Absent on runs created before titles were generated (treat as "prompt").
+   */
+  titleSource?: "prompt" | "generated" | "human";
   cwd: string;
   status: RunStatus;
   rootNodeId: string;
