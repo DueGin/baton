@@ -1,4 +1,5 @@
-import { applyEvent, emptyUsage, type CreateRunRequest, type DelegationRecord, type GetItemsResponse, type PatchRunRequest, type PermissionDecision, type RunEvent, type RunEventEnvelope, type RunSnapshot, type TimelineItem, type AddMemberRequest, type ReplaceMemberRequest, type ReassignRequest, type TeamPreset, type TeamPresetInput, type SaveTeamPresetRequest, type TeamRecord, type TeamMember, type TeamMemberSpec, type TeamChange, type TeamProposal, type ApproveTeamProposalRequest, type RejectTeamProposalRequest, type InboxItem, type AnswerQuestionRequest, type ResolveEscalationRequest, type PermissionRule, type CreatePermissionRuleRequest, type QuestionRecord, type EscalationRecord, type SendMessageResponse } from "@baton/protocol";
+import { applyEvent, emptyUsage, type CreateRunRequest, type DelegationRecord, type GetItemsResponse, type PatchRunRequest, type PermissionDecision, type RunEvent, type RunEventEnvelope, type RunSnapshot, type TimelineItem, type AddMemberRequest, type ReplaceMemberRequest, type ReassignRequest, type TeamPreset, type TeamPresetInput, type SaveTeamPresetRequest, type TeamRecord, type TeamMember, type TeamMemberSpec, type TeamChange, type TeamProposal, type ApproveTeamProposalRequest, type RejectTeamProposalRequest, type InboxItem, type AnswerQuestionRequest, type ResolveEscalationRequest, type PermissionRule, type CreatePermissionRuleRequest, type QuestionRecord, type EscalationRecord, type SendMessageResponse, type SettingsResponse, type UpdateSettingsRequest, type TestTitleModelRequest, type TestTitleModelResponse } from "@baton/protocol";
+import { idleScenario } from "./idle.js";
 import { richConversation } from "./conversation.js";
 import type { BatonClient, TeamPresetResult } from "../api.js";
 import { summarize, terminal } from "../lib/derive.js";
@@ -16,6 +17,9 @@ export class DemoClient implements BatonClient {
   private inboxListeners = new Set<() => void>();
   private rules = new Map<string, PermissionRule>();
   private roundExtensions = new Map<string, number>();
+  private titleSettings: SettingsResponse = { titleModel: { enabled: true, baseUrl: "http://127.0.0.1:3425/v1", model: "demo-title-model", hasApiKey: false } };
+  private titleJobs = new Map<string, { at: number; force: boolean }>();
+  private prompts = new Map<string, string>();
   private abandonedMessages = new Set<string>();
   private itemCounters = new Map<string, number>();
   private counter = 0;
@@ -45,6 +49,7 @@ export class DemoClient implements BatonClient {
     void this.createRun({ agent: "claude", cwd: "/workspace/atlas", title: "待确认团队 · 实现登录流程", prompt: "实现登录流程，并独立审查会话安全。", policy: { mode: "dynamic", teamApproval: true } });
     this.setupHumanDemo();
     this.setupConversationDemo();
+    const idle = idleScenario(now() - 9_000_000); this.data.set(idle.run.id, { snapshot: idle, log: [], remaining: [] });
   }
   agents = async () => structuredClone(demoAgents);
   runs = async () => { this.advance(); return [...this.data.values()].map(data => summarize(data.snapshot)).reverse(); };
@@ -80,7 +85,30 @@ export class DemoClient implements BatonClient {
     const first = Math.max(this.itemCounters.get(nodeId) ?? 0, ...[...data.log, ...data.remaining].filter(event => event.type === "item" && event.nodeId === nodeId).map(event => event.type === "item" ? event.itemSeq : 0)) + 1;
     this.itemCounters.set(nodeId, first + count - 1); return first;
   }
+  settings = async (): Promise<SettingsResponse> => structuredClone(this.titleSettings);
+  async updateSettings(request: UpdateSettingsRequest): Promise<SettingsResponse> {
+    if (request.titleModel === null) this.titleSettings = {};
+    else if (request.titleModel) {
+      const { apiKey, apiKeyEnv, ...fields } = request.titleModel;
+      const old = this.titleSettings.titleModel ?? { enabled: false, baseUrl: "", model: "", hasApiKey: false };
+      this.titleSettings = { titleModel: { ...old, ...fields, hasApiKey: apiKey === undefined ? old.hasApiKey : Boolean(apiKey), apiKeyEnv: apiKeyEnv === null ? undefined : apiKeyEnv ?? old.apiKeyEnv } };
+    }
+    return this.settings();
+  }
+  async testTitleModel(request: TestTitleModelRequest): Promise<TestTitleModelResponse> {
+    const value = { ...this.titleSettings.titleModel, ...request.titleModel };
+    if (!value.baseUrl || !value.model) return { ok: false, error: "请填写 Base URL 和 Model", latencyMs: 120 };
+    return { ok: true, title: "全局搜索与独立审查", latencyMs: 180 };
+  }
+  async regenerateTitle(id: string): Promise<void> {
+    this.get(id); if (!this.titleSettings.titleModel?.baseUrl || !this.titleSettings.titleModel.model) throw new Error("请先配置标题模型");
+    this.titleJobs.set(id, { at: this.now() + 1500, force: true });
+  }
   private advance(): void {
+    for (const [id, job] of this.titleJobs) if (job.at <= this.now()) {
+      this.titleJobs.delete(id); const data = this.get(id);
+      if (job.force || data.snapshot.run.titleSource !== "human") this.emit(data, { type: "run.updated", patch: { title: `实现${(this.prompts.get(id) ?? "搜索与协作").slice(0, 12)}`, titleSource: "generated", updatedAt: new Date(this.now()).toISOString() } });
+    }
     for (const data of this.data.values()) {
       const ready = data.remaining.filter(event => Date.parse(event.ts) <= this.now());
       data.remaining = data.remaining.filter(event => Date.parse(event.ts) > this.now());
@@ -107,7 +135,7 @@ export class DemoClient implements BatonClient {
     if (preset && preset.members.length > (request.policy?.maxTeamSize ?? 5)) throw new Error("预设团队人数超过 maxTeamSize");
     const lead = preset?.lead ?? { agentId: request.agent ?? "claude", model: request.model, modeId: request.modeId, thinking: request.thinking };
     const mode = preset ? "preset" : request.policy?.mode ?? "dynamic";
-    const snapshot: RunSnapshot = { run: { id, title: request.title || request.prompt.slice(0, 28), status: "active", cwd: request.cwd, rootNodeId, createdAt: ts, updatedAt: ts, policy: { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, teamApproval: true, maxTeamSize: 5, stallMinutes: 10, maxRoundsPerDelegation: 3, ...request.policy, mode }, usage: emptyUsage() }, nodes: [{ id: rootNodeId, runId: id, parentNodeId: null, delegationId: null, depth: 0, ...lead, title: request.title || "处理用户请求", status: "running", activity: "分析任务", cwd: request.cwd, usage: emptyUsage(), turns: 1, createdAt: ts, updatedAt: ts }], turns: [{ id: `${id}:t1`, runId: id, nodeId: rootNodeId, status: "running", trigger: "user", startedAt: ts }], delegations: [], permissions: [], questions: [], escalations: [], toolSpans: [], lastSeq: 0 };
+    const snapshot: RunSnapshot = { run: { id, title: request.title || request.prompt.slice(0, 28), titleSource: request.title ? "human" : "prompt", status: "active", cwd: request.cwd, rootNodeId, createdAt: ts, updatedAt: ts, policy: { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, teamApproval: true, maxTeamSize: 5, stallMinutes: 10, maxRoundsPerDelegation: 3, ...request.policy, mode }, usage: emptyUsage() }, nodes: [{ id: rootNodeId, runId: id, parentNodeId: null, delegationId: null, depth: 0, ...lead, title: request.title || "处理用户请求", status: "running", activity: "分析任务", cwd: request.cwd, usage: emptyUsage(), turns: 1, createdAt: ts, updatedAt: ts }], turns: [{ id: `${id}:t1`, runId: id, nodeId: rootNodeId, status: "running", trigger: "user", startedAt: ts }], delegations: [], permissions: [], questions: [], escalations: [], toolSpans: [], lastSeq: 0 };
     const data = { snapshot, log: [], remaining: [] }; this.data.set(id, data);
     this.append(data, rootNodeId, { type: "user_message", text: request.prompt });
     this.append(data, rootNodeId, { type: "notice", level: "info", message: "这是浏览器内 demo。消息与操作保存在本次会话中，不会调用本机 agent。" });
@@ -126,6 +154,8 @@ export class DemoClient implements BatonClient {
       } else if (!preset) this.proposeTeam(id, [{ role: "engineer", ...defaultAgentSpec(demoAgents, "codex"), responsibilities: "实现功能与测试" }, ...((request.policy?.maxTeamSize ?? 5) > 1 ? [{ role: "reviewer", ...defaultAgentSpec(demoAgents, "pi"), responsibilities: "独立检查安全和边界" }] : [])], "实现与审查分开，由成员推进；名单确认后开工。");
       else this.teamUpdate(data, { source: "preset", presetId: preset.id, presetName: preset.name, members: [], proposals: [], changes: [], updatedAt: ts }, { kind: "formed", by: "preset", at: ts, reason: "使用无成员预设，由 lead 处理任务" });
     }
+    this.prompts.set(id, request.prompt);
+    if (!request.title && this.titleSettings.titleModel?.enabled) this.titleJobs.set(id, { at: this.now() + 1500, force: false });
     return structuredClone(data.snapshot);
   }
   teams = async (): Promise<TeamPreset[]> => structuredClone([...this.presets.values()]);
@@ -294,7 +324,7 @@ export class DemoClient implements BatonClient {
   }
   async patchRun(id: string, request: PatchRunRequest): Promise<void> {
     const data = this.get(id);
-    this.emit(data, { type: "run.updated", patch: { ...(request.title ? { title: request.title } : {}), policy: { ...data.snapshot.run.policy, ...request.policy }, updatedAt: new Date(this.now()).toISOString() } });
+    this.emit(data, { type: "run.updated", patch: { ...(request.title !== undefined ? { title: request.title, titleSource: "human" as const } : {}), policy: { ...data.snapshot.run.policy, ...request.policy }, updatedAt: new Date(this.now()).toISOString() } });
     if (request.policy?.autoApprove) for (const permission of data.snapshot.permissions.filter(entry => entry.status === "pending")) await this.resolve(permission.requestId, { response: { behavior: "allow" } }, "policy");
   }
   async items(nodeId: string, after = 0): Promise<GetItemsResponse> {

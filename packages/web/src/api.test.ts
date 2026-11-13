@@ -29,6 +29,21 @@ describe("API transport", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: "UNAUTHORIZED", message: "invalid token" } }), { status: 401 })));
     await expect(new ApiClient("bad").runs()).rejects.toThrow("401");
   });
+  it("edits and regenerates titles and reads, writes and tests the title model", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => Response.json({})); vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("token");
+    await client.patchRun("run/1", { title: "检查登录流程" });
+    await client.regenerateTitle("run/1");
+    await client.settings();
+    await client.updateSettings({ titleModel: { enabled: true, baseUrl: "http://localhost:3425/v1", model: "title-model", apiKey: "write-only", apiKeyEnv: null } });
+    await client.testTitleModel({ sample: "实现登录流程", titleModel: { model: "test-model" } });
+    expect(fetchMock.mock.calls.map(call => [call[0], (call[1] as RequestInit).method])).toEqual([
+      ["/api/runs/run%2F1", "PATCH"], ["/api/runs/run%2F1/title/regenerate", "POST"], ["/api/settings", "GET"], ["/api/settings", "PUT"], ["/api/settings/title-model/test", "POST"],
+    ]);
+    expect(JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string)).toEqual({ title: "检查登录流程" });
+    expect(JSON.parse((fetchMock.mock.calls[3]![1] as RequestInit).body as string)).toMatchObject({ titleModel: { apiKey: "write-only", apiKeyEnv: null } });
+    expect(JSON.parse((fetchMock.mock.calls[4]![1] as RequestInit).body as string)).toEqual({ sample: "实现登录流程", titleModel: { model: "test-model" } });
+  });
   it("sends answers, escalation decisions, remembered permissions and rule mutations", async () => {
     const fetchMock = vi.fn().mockImplementation(async () => new Response(null, { status: 204 })); vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("token");
