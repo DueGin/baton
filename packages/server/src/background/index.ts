@@ -65,7 +65,7 @@ export class BackgroundRegistry {
     for (const old of previous.values()) {
       if (old.status === "exited") continue;
       const live = current.get(old.id);
-      if (!live) this.emit({ ...old, status: "exited", exitedAt: new Date(timestamp).toISOString() });
+      if (!live || attributed.some((p) => p.toolShell && processId(p) === old.id)) this.emit({ ...old, status: "exited", exitedAt: new Date(timestamp).toISOString() });
       else if (!folded.some((p) => p.id === old.id)) {
         // Known registrations stay attached after restart, even if no agent session is open.
         const family = new Set([old.pid]); let grew = true;
