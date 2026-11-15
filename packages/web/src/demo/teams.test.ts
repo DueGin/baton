@@ -70,16 +70,16 @@ describe("browser demo teams and approval gate", () => {
   });
   it("starts dynamic work immediately with teamApproval=false and keeps solo without any team", async () => {
     const client = new DemoClient(() => base);
-    const run = await client.createRun({ agent: "claude", cwd: "/tmp/demo", prompt: "Build", policy: { mode: "dynamic", teamApproval: false } });
+    const run = await client.createRun({ projectId: "project-atlas", agent: "claude", prompt: "Build", policy: { mode: "dynamic", teamApproval: false } });
     expect(pendingProposals(run.run.team)).toHaveLength(0); expect(activeMembers(run.run.team)).toHaveLength(2);
     expect(run.delegations.every(edge => edge.status === "running")).toBe(true);
-    const solo = await client.createRun({ agent: "pi", cwd: "/tmp/demo", prompt: "Question", policy: { mode: "solo" } });
+    const solo = await client.createRun({ projectId: "project-atlas", agent: "pi", prompt: "Question", policy: { mode: "solo" } });
     expect(solo.run.team).toBeUndefined(); expect(solo.delegations).toHaveLength(0);
     await expect(client.addMember(solo.run.id, { role: "test", agentId: "pi" })).rejects.toThrow("单独完成");
   });
   it("supports preset CRUD, root lead configuration and saving a roster", async () => {
     const client = new DemoClient(() => base); const preset = (await client.teams())[0]!;
-    const run = await client.createRun({ teamPresetId: preset.id, cwd: "/tmp/demo", prompt: "Preset work" });
+    const run = await client.createRun({ projectId: "project-atlas", teamPresetId: preset.id, prompt: "Preset work" });
     expect(run.run.policy.mode).toBe("preset"); expect(run.nodes[0]!.agentId).toBe(preset.lead.agentId);
     expect(activeMembers(run.run.team).every(member => member.addedBy === "preset")).toBe(true);
     await client.saveTeam(run.run.id, { name: "Saved team" });
@@ -125,7 +125,7 @@ describe("browser demo teams and approval gate", () => {
   });
   it("approves an edited replacement proposal and moves active tasks to the approved agent", async () => {
     const client = new DemoClient(() => base);
-    const run = await client.createRun({ agent: "claude", cwd: "/tmp/demo", prompt: "Build", policy: { mode: "dynamic", teamApproval: false } });
+    const run = await client.createRun({ projectId: "project-atlas", agent: "claude", prompt: "Build", policy: { mode: "dynamic", teamApproval: false } });
     await client.patchRun(run.run.id, { policy: { teamApproval: true } });
     const member = activeMembers(run.run.team)[0]!;
     client.proposeReplacement(run.run.id, member.id, { role: member.role, agentId: "pi" }, "需要独立执行者");

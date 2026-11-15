@@ -3,6 +3,9 @@ import { idleScenario } from "./idle.js";
 import type { BackgroundProcess, CancelRunRequest, DismissBackgroundRequest, StopBackgroundRequest, ListBackgroundResponse } from "@baton/protocol";
 import { demoBackground } from "./background.js";
 import { backgroundActive } from "../lib/background.js";
+import type { ProjectRecord, ProjectSummary, CreateProjectRequest, PatchProjectRequest } from "@baton/protocol";
+import { demoDirs, demoPath, initialDemoProjects } from "./projects.js";
+import { liveProjectSummaries, pathBasename } from "../lib/projects.js";
 import { richConversation } from "./conversation.js";
 import type { BatonClient, TeamPresetResult } from "../api.js";
 import { summarize, terminal } from "../lib/derive.js";
@@ -28,17 +31,20 @@ export class DemoClient implements BatonClient {
   private counter = 0;
   private serial = 0;
   private presets = new Map<string, TeamPreset>();
+  private projectRecords = new Map<string, ProjectRecord>();
   constructor(private readonly now: () => number = Date.now) {
+    initialDemoProjects(new Date(now() - 86_400_000).toISOString()).forEach(project => this.projectRecords.set(project.id, project));
     const scenario = createScenario(now() - 86000);
     let snapshot = scenario.initial;
     const log = scenario.events.filter(event => Date.parse(event.ts) <= now());
     for (const event of log) snapshot = applyEvent(snapshot, event);
+    snapshot = { ...snapshot, run: { ...snapshot.run, projectId: "project-atlas" } };
     this.data.set(snapshot.run.id, { snapshot, log, remaining: scenario.events.filter(event => Date.parse(event.ts) > now()) });
     const archived = createScenario(now() - 86400000, "run-previous");
     let previous = archived.events.reduce(applyEvent, archived.initial);
     previous = {
       ...previous,
-      run: { ...previous.run, title: "梳理项目结构与 API 规范", status: "completed", endedAt: archived.at(130) },
+      run: { ...previous.run, title: "梳理项目结构与 API 规范", projectId: "project-archive", cwd: "/workspace/archive", status: "completed", endedAt: archived.at(130) },
       nodes: previous.nodes.map(node => terminal(node.status) ? node : { ...node, status: "completed", activity: "结果已交付", endedAt: archived.at(130), updatedAt: archived.at(130) }),
       turns: previous.turns.map(turn => turn.status === "running" ? { ...turn, status: "completed", endedAt: archived.at(130) } : turn),
       delegations: previous.delegations.map(edge => terminal(edge.status) ? edge : { ...edge, status: "completed", endedAt: archived.at(130), deliveredAt: archived.at(130), deliveredVia: "turn", result: { status: "success", summary: "任务完成，结果已交付。", reported: true, finalText: "实现与验证完成。" } }),
@@ -49,19 +55,34 @@ export class DemoClient implements BatonClient {
     this.presets.set("preset-product", { id: "preset-product", name: "产品交付小队", description: "Lead 协调，Codex 实现，pi 独立审查。", lead: defaultAgentSpec(demoAgents, "claude"), members: [{ role: "engineer", ...defaultAgentSpec(demoAgents, "codex"), responsibilities: "代码实现和测试" }, { role: "reviewer", ...defaultAgentSpec(demoAgents, "pi"), responsibilities: "只读审查与边界验证" }], createdAt: ts, updatedAt: ts });
     this.rules.set("rule-demo-read", { id: "rule-demo-read", toolName: "read", pattern: "src/**", decision: "allow", scope: "global", agentId: "codex", createdAt: ts, hits: 1, lastHitAt: ts });
     // Keep a second live Run at the approval gate until the human decides.
-    void this.createRun({ agent: "claude", cwd: "/workspace/atlas", title: "待确认团队 · 实现登录流程", prompt: "实现登录流程，并独立审查会话安全。", policy: { mode: "dynamic", teamApproval: true } });
+    void this.createRun({ projectId: "project-atlas", agent: "claude", cwd: "/workspace/atlas", title: "待确认团队 · 实现登录流程", prompt: "实现登录流程，并独立审查会话安全。", policy: { mode: "dynamic", teamApproval: true } });
     this.setupHumanDemo();
     this.setupConversationDemo();
     const background = createScenario(now() - 600000, "run-background");
     const backgroundLog = background.events.filter(event => Date.parse(event.ts) <= now());
     const backgroundRun = { snapshot: backgroundLog.reduce(applyEvent, background.initial), log: backgroundLog, remaining: [] };
     this.data.set(backgroundRun.snapshot.run.id, backgroundRun);
-    this.emit(backgroundRun, { type: "run.updated", patch: { title: "后台服务 · Vite 与 Python", titleSource: "human" } });
+    this.emit(backgroundRun, { type: "run.updated", patch: { title: "后台服务 · Vite 与 Python", projectId: "project-atlas", titleSource: "human" } });
     demoBackground(backgroundRun.snapshot, now()).forEach(process => this.emit(backgroundRun, { type: "background", process }));
-    const idle = idleScenario(now() - 9_000_000); this.data.set(idle.run.id, { snapshot: idle, log: [], remaining: [] });
+    const idle = idleScenario(now() - 9_000_000); idle.run.projectId = "project-notes"; idle.run.cwd = "/workspace/notes"; this.data.set(idle.run.id, { snapshot: idle, log: [], remaining: [] });
   }
   agents = async () => structuredClone(demoAgents);
-  runs = async () => { this.advance(); return [...this.data.values()].map(data => summarize(data.snapshot)).reverse(); };
+  runs = async (projectId?: string) => { this.advance(); return [...this.data.values()].map(data => summarize(data.snapshot)).filter(run => !projectId || run.projectId === projectId).reverse(); };
+  dirs = async (path = "~") => demoDirs(path, [...this.projectRecords.values()]);
+  projects = async (includeArchived = false): Promise<ProjectSummary[]> => liveProjectSummaries([...this.projectRecords.values()].filter(project => includeArchived || !project.archived).map(project => ({ ...project, exists: true, ...(project.gitRoot ? { gitBranch: "main" } : {}), runCount: 0, activeRunCount: 0, pendingTotal: 0, backgroundCount: 0 })), await this.runs());
+  project = async (id: string): Promise<ProjectSummary> => { const project = (await this.projects(true)).find(project => project.id === id); if (!project) throw new Error("项目不存在"); return project; };
+  async createProject(request: CreateProjectRequest): Promise<ProjectRecord> {
+    const path = demoDirs(request.path, [...this.projectRecords.values()]).path; const old = [...this.projectRecords.values()].find(project => project.path === path);
+    if (old) { if (old.archived) return this.patchProject(old.id, { archived: false }); return structuredClone(old); }
+    const ts = new Date(this.now()).toISOString(); const project = { id: `project-${++this.serial}`, name: request.name?.trim() || pathBasename(path), path, ...(path === "/workspace/atlas" || path.startsWith("/workspace/atlas/") ? { gitRoot: "/workspace/atlas" } : {}), createdAt: ts, updatedAt: ts };
+    this.projectRecords.set(project.id, project); return structuredClone(project);
+  }
+  async patchProject(id: string, request: PatchProjectRequest): Promise<ProjectSummary> {
+    const old = this.projectRecords.get(id); if (!old) throw new Error("项目不存在");
+    if (request.archived && (await this.project(id)).activeRunCount > 0) throw new Error("409 · 项目有活跃 Run，无法归档");
+    if (request.name !== undefined && !request.name.trim()) throw new Error("项目名称不能为空");
+    const project = { ...old, ...request, ...(request.name !== undefined ? { name: request.name.trim() } : {}), updatedAt: new Date(this.now()).toISOString() }; this.projectRecords.set(id, project); return this.project(id);
+  }
   run = async (id: string) => { this.advance(); return structuredClone(this.get(id).snapshot); };
   delegation = async (id: string): Promise<DelegationRecord> => {
     for (const data of this.data.values()) { const delegation = data.snapshot.delegations.find(edge => edge.id === id); if (delegation) return structuredClone(delegation); }
@@ -137,6 +158,12 @@ export class DemoClient implements BatonClient {
     }
   }
   async createRun(request: CreateRunRequest): Promise<RunSnapshot> {
+    if (!request.projectId) throw new Error("400 · projectId 必填");
+    const project = this.projectRecords.get(request.projectId); if (!project) throw new Error("404 · 项目不存在");
+    if (project.archived) throw new Error("400 · 项目已归档");
+    const cwd = request.cwd ? demoPath(request.cwd) : project.path;
+    if (cwd !== project.path && !cwd.startsWith(`${project.path === "/" ? "" : project.path}/`)) throw new Error("工作目录不能越出项目路径");
+    demoDirs(cwd, [...this.projectRecords.values()]);
     if (request.team?.length && request.team.length > (request.policy?.maxTeamSize ?? 5)) throw new Error("团队人数超过 maxTeamSize");
     const id = `run-local-${++this.counter}`; const ts = new Date(this.now()).toISOString(); const rootNodeId = `${id}:root`;
     const preset = request.teamPresetId ? this.presets.get(request.teamPresetId) : undefined;
@@ -144,7 +171,7 @@ export class DemoClient implements BatonClient {
     if (preset && preset.members.length > (request.policy?.maxTeamSize ?? 5)) throw new Error("预设团队人数超过 maxTeamSize");
     const lead = preset?.lead ?? { agentId: request.agent ?? "claude", model: request.model, modeId: request.modeId, thinking: request.thinking };
     const mode = preset ? "preset" : request.policy?.mode ?? "dynamic";
-    const snapshot: RunSnapshot = { run: { id, title: request.title || request.prompt.slice(0, 28), titleSource: request.title ? "human" : "prompt", status: "active", cwd: request.cwd, rootNodeId, createdAt: ts, updatedAt: ts, policy: { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, teamApproval: true, maxTeamSize: 5, stallMinutes: 10, maxRoundsPerDelegation: 3, ...request.policy, mode }, usage: emptyUsage() }, nodes: [{ id: rootNodeId, runId: id, parentNodeId: null, delegationId: null, depth: 0, ...lead, title: request.title || "处理用户请求", status: "running", activity: "分析任务", cwd: request.cwd, usage: emptyUsage(), turns: 1, createdAt: ts, updatedAt: ts }], turns: [{ id: `${id}:t1`, runId: id, nodeId: rootNodeId, status: "running", trigger: "user", startedAt: ts }], delegations: [], permissions: [], questions: [], escalations: [], toolSpans: [], lastSeq: 0 };
+    const snapshot: RunSnapshot = { run: { id, projectId: project.id, title: request.title || request.prompt.slice(0, 28), titleSource: request.title ? "human" : "prompt", status: "active", cwd, rootNodeId, createdAt: ts, updatedAt: ts, policy: { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, teamApproval: true, maxTeamSize: 5, stallMinutes: 10, maxRoundsPerDelegation: 3, ...request.policy, mode }, usage: emptyUsage() }, nodes: [{ id: rootNodeId, runId: id, parentNodeId: null, delegationId: null, depth: 0, ...lead, title: request.title || "处理用户请求", status: "running", activity: "分析任务", cwd, usage: emptyUsage(), turns: 1, createdAt: ts, updatedAt: ts }], turns: [{ id: `${id}:t1`, runId: id, nodeId: rootNodeId, status: "running", trigger: "user", startedAt: ts }], delegations: [], permissions: [], questions: [], escalations: [], toolSpans: [], lastSeq: 0 };
     const data = { snapshot, log: [], remaining: [] }; this.data.set(id, data);
     this.append(data, rootNodeId, { type: "user_message", text: request.prompt });
     this.append(data, rootNodeId, { type: "notice", level: "info", message: "这是浏览器内 demo。消息与操作保存在本次会话中，不会调用本机 agent。" });
@@ -556,7 +583,7 @@ export class DemoClient implements BatonClient {
     else if (data.snapshot.run.policy.autoApprove) await this.resolve(permission.requestId, { response: { behavior: "allow" } }, "policy");
   }
   private setupHumanDemo(): void {
-    void this.createRun({ agent: "claude", cwd: "/workspace/atlas", title: "人工介入 · API 与回归验证", prompt: "实现 API 并检查边界，遇到产品选择时请向我提问。", team: [{ role: "builder", ...defaultAgentSpec(demoAgents, "codex"), responsibilities: "实现 API" }, { role: "tester", ...defaultAgentSpec(demoAgents, "pi"), responsibilities: "验证边界" }], policy: { mode: "dynamic", teamApproval: true } });
+    void this.createRun({ projectId: "project-atlas", agent: "claude", cwd: "/workspace/atlas", title: "人工介入 · API 与回归验证", prompt: "实现 API 并检查边界，遇到产品选择时请向我提问。", team: [{ role: "builder", ...defaultAgentSpec(demoAgents, "codex"), responsibilities: "实现 API" }, { role: "tester", ...defaultAgentSpec(demoAgents, "pi"), responsibilities: "验证边界" }], policy: { mode: "dynamic", teamApproval: true } });
     const data = this.get(`run-local-${this.counter}`); const root = data.snapshot.run.rootNodeId;
     const members = activeMembers(data.snapshot.run.team);
     members.forEach(member => this.queueTask(data, member, { title: `${member.role} · 验证实现`, task: member.responsibilities ?? "检查实现" }));
@@ -573,7 +600,7 @@ export class DemoClient implements BatonClient {
     const scenario = createScenario(this.now() - 180_000, "run-conversation");
     const root = scenario.initial.run.rootNodeId; const at = (offset: number) => new Date(this.now() + offset).toISOString();
     const seed = scenario.events.reduce(applyEvent, scenario.initial);
-    const snapshot: RunSnapshot = { ...seed, run: { ...seed.run, title: "会话体验 · Markdown 与 Mermaid", status: "active", endedAt: undefined, updatedAt: at(-90_000) }, nodes: seed.nodes.filter(node => [root, "run-conversation:review"].includes(node.id)).map(node => ({ ...node, status: "running", endedAt: undefined, activity: "思考中…", updatedAt: at(-65_000) })), turns: [], toolSpans: [], permissions: [], questions: [], escalations: [], delegations: seed.delegations.filter(edge => edge.toNodeId === "run-conversation:review").map(edge => ({ ...edge, status: "running", endedAt: undefined, deliveredAt: undefined, result: undefined })), lastSeq: 0 };
+    const snapshot: RunSnapshot = { ...seed, run: { ...seed.run, title: "会话体验 · Markdown 与 Mermaid", projectId: "project-notes", cwd: "/workspace/notes", status: "active", endedAt: undefined, updatedAt: at(-90_000) }, nodes: seed.nodes.filter(node => [root, "run-conversation:review"].includes(node.id)).map(node => ({ ...node, status: "running", endedAt: undefined, activity: "思考中…", updatedAt: at(-65_000) })), turns: [], toolSpans: [], permissions: [], questions: [], escalations: [], delegations: seed.delegations.filter(edge => edge.toNodeId === "run-conversation:review").map(edge => ({ ...edge, status: "running", endedAt: undefined, deliveredAt: undefined, result: undefined })), lastSeq: 0 };
     snapshot.run.usage = snapshot.nodes.reduce((usage, node) => ({ inputTokens: usage.inputTokens + node.usage.inputTokens, cachedInputTokens: usage.cachedInputTokens + node.usage.cachedInputTokens, outputTokens: usage.outputTokens + node.usage.outputTokens, costUsd: usage.costUsd + node.usage.costUsd }), emptyUsage());
     const data: DemoRun = { snapshot, log: [], remaining: [] }; this.data.set(snapshot.run.id, data);
     const history = (secondsAgo: number, event: RunEvent) => {

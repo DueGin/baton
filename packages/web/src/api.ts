@@ -4,6 +4,7 @@ import type {
   ReassignRequest, TeamPreset, TeamPresetInput, SaveTeamPresetRequest, ApproveTeamProposalRequest, RejectTeamProposalRequest,
   SettingsResponse, UpdateSettingsRequest, TestTitleModelRequest, TestTitleModelResponse,
   ListBackgroundResponse, StopBackgroundRequest, DismissBackgroundRequest, CancelRunRequest,
+  ProjectRecord, ProjectSummary, CreateProjectRequest, PatchProjectRequest, ListDirsResponse,
   SendMessageResponse, InboxItem, AnswerQuestionRequest, ResolveEscalationRequest, PermissionRule, CreatePermissionRuleRequest,
 } from "@baton/protocol";
 
@@ -13,7 +14,12 @@ export type TeamPresetResult = TeamPreset & { warnings?: string[] };
 export interface BatonClient {
   readonly demo: boolean;
   agents(refresh?: boolean): Promise<AgentEntry[]>;
-  runs(): Promise<RunSummary[]>;
+  runs(projectId?: string): Promise<RunSummary[]>;
+  projects(includeArchived?: boolean): Promise<ProjectSummary[]>;
+  project(id: string): Promise<ProjectSummary>;
+  createProject(request: CreateProjectRequest): Promise<ProjectRecord>;
+  patchProject(id: string, request: PatchProjectRequest): Promise<ProjectSummary>;
+  dirs(path?: string): Promise<ListDirsResponse>;
   run(id: string): Promise<RunSnapshot>;
   createRun(request: CreateRunRequest): Promise<RunSnapshot>;
   patchRun(id: string, request: PatchRunRequest): Promise<void>;
@@ -82,7 +88,12 @@ export class ApiClient implements BatonClient {
   }
 
   agents = (refresh = false) => this.request<AgentEntry[]>(`/agents${refresh ? "/refresh" : ""}`, refresh ? "POST" : "GET");
-  runs = () => this.request<RunSummary[]>("/runs");
+  runs = (projectId?: string) => this.request<RunSummary[]>(`/runs${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`);
+  projects = (includeArchived = false) => this.request<ProjectSummary[]>(`/projects${includeArchived ? "?archived=1" : ""}`);
+  project = (id: string) => this.request<ProjectSummary>(`/projects/${encodeURIComponent(id)}`);
+  createProject = (body: CreateProjectRequest) => this.request<ProjectRecord>("/projects", "POST", body);
+  patchProject = (id: string, body: PatchProjectRequest) => this.request<ProjectSummary>(`/projects/${encodeURIComponent(id)}`, "PATCH", body);
+  dirs = (path = "~") => this.request<ListDirsResponse>(`/fs/dirs?path=${encodeURIComponent(path)}`);
   run = (id: string) => this.request<RunSnapshot>(`/runs/${encodeURIComponent(id)}`);
   createRun = (body: CreateRunRequest) => this.request<RunSnapshot>("/runs", "POST", body);
   patchRun = (id: string, body: PatchRunRequest) => this.request<void>(`/runs/${encodeURIComponent(id)}`, "PATCH", body);

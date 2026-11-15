@@ -65,7 +65,7 @@ describe("deterministic demo protocol stream", () => {
   });
   it("creates a usable Run and cascades cancellation without affecting siblings", async () => {
     const client = new DemoClient(() => base + 86000);
-    const created = await client.createRun({ agent: "codex", cwd: "/tmp/demo", prompt: "检查项目", policy: { autoApprove: true, mode: "solo" } });
+    const created = await client.createRun({ projectId: "project-atlas", agent: "codex", prompt: "检查项目", policy: { autoApprove: true, mode: "solo" } });
     expect(created.run.policy.autoApprove).toBe(true);
     expect((await client.items(created.run.rootNodeId)).items).toHaveLength(3);
     await client.cancelNode("run-demo:root");
