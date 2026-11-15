@@ -51,6 +51,7 @@ export class Kernel {
   private replacing = new Set<string>();
   private decidingPermissions = new Set<string>();
   private messageActions = new Set<string>();
+  private drainingMessages = new Set<string>();
   readonly teams: Teams;
   readonly human: HumanInteraction;
   readonly rules: PermissionRules;
@@ -327,6 +328,16 @@ export class Kernel {
     if (!row || row.item.type !== "user_message" || row.item.delivery === undefined) throw new MessageError("Item is not a human message of this node");
     return { ...row, item: row.item };
   }
+  editMessage(id: string, seq: number, text: string): void {
+    if (typeof text !== "string" || !text.trim()) throw new Error("Nonempty text is required");
+    const row = this.humanMessage(id, seq), rt = this.runtime(id), key = `${id}:${seq}`;
+    if (row.item.delivery !== "queued") throw new MessageError("Only queued messages can be edited");
+    if (this.messageActions.has(key) || this.drainingMessages.has(key)) throw new MessageError("Message delivery is already in progress");
+    if (this.stopped || this.canceling.has(id) || !rt.pendingMessages.has(seq)) throw new MessageError("Node is canceled or closed");
+    const next = { ...row, item: { ...row.item, text, editedAt: now() } };
+    rt.queued = rt.queued.map((prompt) => prompt.humanItem?.seq === seq ? { ...prompt, text, humanItem: next } : prompt);
+    this.replaceMessage(id, next);
+  }
   async deliverHumanMessage(id: string, seq: number, mode: "steer" | "interrupt"): Promise<MessageDelivery> {
     if (mode !== "steer" && mode !== "interrupt") throw new Error("Invalid delivery mode");
     const row = this.humanMessage(id, seq), rt = this.runtime(id), key = `${id}:${seq}`;
@@ -416,7 +427,14 @@ export class Kernel {
   }
   private async drainMessages(id: string): Promise<void> {
     const rt = this.runtime(id);
-    if (rt.queued.length && !rt.closed && !rt.interrupting) await this.startPrompts(id, rt.queued.splice(0));
+    if (rt.queued.length && !rt.closed && !rt.interrupting) {
+      const prompts = rt.queued.splice(0), keys = prompts.flatMap((prompt) => prompt.humanItem ? [`${id}:${prompt.humanItem.seq}`] : []);
+      // Reserve before startPrompts awaits session startup; an edit must not race its
+      // captured text, even while the persisted row still says queued.
+      for (const key of keys) this.drainingMessages.add(key);
+      try { await this.startPrompts(id, prompts); }
+      finally { for (const key of keys) this.drainingMessages.delete(key); }
+    }
   }
   private async sendPrompt(id: string, text: string, trigger: TurnTrigger): Promise<void> {
     const n = this.store.node(id), rt = this.runtime(id);
