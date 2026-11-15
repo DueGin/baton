@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { BATON_TOOLS, LEAD_ONLY_TOOLS, emptyUsage, type AgentEntry, type AskHumanInput, type PermissionDecision, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionRequest, type PermissionResponse, type ReportResultInput, type FormTeamInput, type ReplaceMemberInput, type ReassignInput, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type SendMessageResponse, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
+import { BATON_TOOLS, LEAD_ONLY_TOOLS, emptyUsage, type AgentEntry, type AskHumanInput, type PermissionDecision, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionRequest, type PermissionResponse, type ReportResultInput, type FormTeamInput, type ReplaceMemberInput, type ReassignInput, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type SendMessageResponse, type SendMode, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
 import type { DriverEvent, DriverRegistry, DriverSession, OpenSessionSpec } from "../driver/types.js";
 import { Store } from "../store/index.js";
 import { briefPrompt, correctionPrompt, resultsPrompt, systemPrompt } from "./prompts.js";
@@ -25,13 +25,17 @@ const active = (status: string): boolean => ["starting", "running", "waiting_per
 const done = (d: DelegationRecord): boolean => ["completed", "failed", "canceled", "replaced"].includes(d.status);
 const addUsage = (a: UsageTotals, b: UsageTotals): UsageTotals => ({ inputTokens: a.inputTokens + b.inputTokens, cachedInputTokens: a.cachedInputTokens + b.cachedInputTokens, outputTokens: a.outputTokens + b.outputTokens, costUsd: a.costUsd + b.costUsd });
 interface QueuedPrompt { text: string; trigger: TurnTrigger; humanItem?: ItemRecord }
-type MessageDelivery = Pick<SendMessageResponse, "delivery" | "itemSeq">;
+type MessageDelivery = Omit<SendMessageResponse, "accepted">;
+export class MessageError extends Error { readonly status = 409; }
+const HUMAN_INTERRUPT = "interrupted by human message";
 interface Runtime {
   token: string; session?: DriverSession; opening?: Promise<DriverSession>; unsubscribe?: () => void;
   turnId?: string; driverTurnId?: string; report?: ReportResultInput; finalText: string; corrections: number;
   usage: UsageTotals; chain: Promise<void>; queued: QueuedPrompt[]; pendingMessages: Map<number, ItemRecord>;
   pendingItem?: ItemRecord; itemTimer?: NodeJS.Timeout; lastItem?: ItemRecord; closed: boolean;
   idleTimer?: NodeJS.Timeout; stallTimer?: NodeJS.Timeout;
+  /** Hold other prompts while an interrupted turn is being replaced. */
+  interrupting?: string;
 }
 export interface KernelOptions { baseUrl: string; maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; titles?: TitleNaming }
 export class Kernel {
@@ -45,6 +49,7 @@ export class Kernel {
   private delivering = new Set<string>();
   private replacing = new Set<string>();
   private decidingPermissions = new Set<string>();
+  private messageActions = new Set<string>();
   readonly teams: Teams;
   readonly human: HumanInteraction;
   readonly rules: PermissionRules;
@@ -235,18 +240,18 @@ export class Kernel {
   private async startTurn(id: string, text: string, trigger: TurnTrigger): Promise<void> {
     await this.startPrompts(id, [{ text, trigger }]);
   }
-  private async startPrompts(id: string, prompts: QueuedPrompt[]): Promise<MessageDelivery["delivery"]> {
+  private async startPrompts(id: string, prompts: QueuedPrompt[], interrupt = false): Promise<MessageDelivery["delivery"]> {
     if (this.stopped) return "queued";
     const rt = this.runtime(id), n = this.store.node(id);
     // A cancel/close can abandon a message while session startup or steer is awaiting the driver.
     prompts = prompts.filter((p) => !p.humanItem || rt.pendingMessages.has(p.humanItem.seq));
     if (!prompts.length) return "queued";
-    if (rt.turnId) { rt.queued.push(...prompts); return "queued"; }
+    if (rt.turnId || (rt.interrupting && !interrupt)) { rt.queued.push(...prompts); return "queued"; }
     if (["canceled", "replaced"].includes(n.status) || this.canceling.has(id)) throw new Error("Node is canceled");
     const session = await this.session(id);
     prompts = prompts.filter((p) => !p.humanItem || rt.pendingMessages.has(p.humanItem.seq));
     if (!prompts.length) return "queued";
-    if (rt.turnId) { rt.queued.push(...prompts); return "queued"; }
+    if (rt.turnId || (rt.interrupting && !interrupt)) { rt.queued.push(...prompts); return "queued"; }
     const current = this.store.node(id);
     if (["canceled", "replaced"].includes(current.status) || this.canceling.has(id) || this.stopped) throw new Error("Node has been canceled or daemon stopped");
     if (!active(current.status)) this.checkGlobalLimit();
@@ -271,39 +276,106 @@ export class Kernel {
     }
     return "turn";
   }
-  async message(id: string, text: string, clientId?: string): Promise<MessageDelivery> {
+  async message(id: string, text: string, clientId?: string, mode: SendMode = "queue"): Promise<MessageDelivery> {
     if (typeof text !== "string" || !text.trim()) throw new Error("Nonempty text is required");
     if (clientId !== undefined && typeof clientId !== "string") throw new Error("clientId must be a string");
+    if (!["queue", "steer", "interrupt"].includes(mode)) throw new Error("Invalid send mode");
     const n = this.store.node(id), rt = this.runtime(id);
     if (this.stopped) throw new Error("Daemon is shutting down");
     if (["canceled", "replaced"].includes(n.status) || this.canceling.has(id)) throw new Error("Node is canceled");
     const row = this.addItem(id, { type: "user_message", text, delivery: "queued", ...(clientId !== undefined ? { clientId } : {}) });
     rt.pendingMessages.set(row.seq, row);
+    const key = `${id}:${row.seq}`; this.messageActions.add(key);
     try {
-      const turnId = rt.turnId;
-      if (turnId) {
-        let outcome: Awaited<ReturnType<DriverSession["steer"]>> | undefined;
-        try { outcome = await rt.session?.steer(text); }
-        catch (error) { this.log(n.runId, error, id); }
-        if (!rt.pendingMessages.has(row.seq)) return { delivery: "queued", itemSeq: row.seq };
-        if (outcome === "steered") {
-          this.deliverMessage(id, row, "steered", turnId); return { delivery: "steered", itemSeq: row.seq };
-        }
-      }
-      const delivery = await this.startPrompts(id, [{ text, trigger: "user", humanItem: row }]);
-      return { delivery, itemSeq: row.seq };
+      return await this.sendHumanMessage(id, row, mode, false);
     } catch (error) {
       // A failed submission must not discard other messages already waiting on this node.
       rt.queued = rt.queued.filter((p) => p.humanItem?.seq !== row.seq);
       this.abandonMessage(id, row.seq); throw error;
+    } finally { this.messageActions.delete(key); }
+  }
+  private humanMessage(id: string, seq: number): ItemRecord & { item: Extract<TimelineItem, { type: "user_message" }> } {
+    this.store.node(id);
+    const row = this.store.items(id).find((r) => r.seq === seq);
+    if (!row || row.item.type !== "user_message" || row.item.delivery === undefined) throw new MessageError("Item is not a human message of this node");
+    return { ...row, item: row.item };
+  }
+  async deliverHumanMessage(id: string, seq: number, mode: "steer" | "interrupt"): Promise<MessageDelivery> {
+    if (mode !== "steer" && mode !== "interrupt") throw new Error("Invalid delivery mode");
+    const row = this.humanMessage(id, seq), rt = this.runtime(id), key = `${id}:${seq}`;
+    if (this.messageActions.has(key)) throw new MessageError("Message delivery is already in progress");
+    if (row.item.delivery !== "queued" && !(mode === "interrupt" && row.item.delivery === "steered")) throw new MessageError("Message already delivered or retracted");
+    if (this.stopped || this.canceling.has(id) || ["canceled", "replaced"].includes(this.store.node(id).status)) throw new MessageError("Node is canceled or closed");
+    this.messageActions.add(key);
+    // Reserve before awaiting steer/interrupt so the old turn cannot drain this row too.
+    rt.queued = rt.queued.filter((p) => p.humanItem?.seq !== seq);
+    rt.pendingMessages.set(seq, row);
+    try { return await this.sendHumanMessage(id, row, mode, true); }
+    catch (error) {
+      if (rt.pendingMessages.has(seq) && row.item.delivery === "queued" && !rt.queued.some((p) => p.humanItem?.seq === seq)) rt.queued.push({ text: row.item.text, trigger: "user", humanItem: row });
+      if (row.item.delivery === "steered") rt.pendingMessages.delete(seq);
+      throw error;
+    } finally { this.messageActions.delete(key); }
+  }
+  retractMessage(id: string, seq: number): void {
+    const row = this.humanMessage(id, seq), rt = this.runtime(id);
+    if (this.messageActions.has(`${id}:${seq}`)) throw new MessageError("Message delivery is already in progress");
+    if (row.item.delivery !== "queued") throw new MessageError("Only queued messages can be retracted");
+    rt.queued = rt.queued.filter((p) => p.humanItem?.seq !== seq);
+    rt.pendingMessages.delete(seq);
+    this.replaceMessage(id, { ...row, item: { ...row.item, delivery: "retracted" } });
+  }
+  private async sendHumanMessage(id: string, row: ItemRecord, mode: SendMode, escalated: boolean): Promise<MessageDelivery> {
+    if (row.item.type !== "user_message") throw new Error("Expected human message");
+    const rt = this.runtime(id), turnId = rt.turnId;
+    let steerUnsupported = false;
+    if (mode === "interrupt" && turnId) return this.interruptForMessage(id, row);
+    if (mode === "steer" && turnId && !rt.interrupting) {
+      let outcome: Awaited<ReturnType<DriverSession["steer"]>> | undefined;
+      try { outcome = await rt.session?.steer(row.item.text); }
+      catch (error) { this.log(this.store.node(id).runId, error, id); }
+      if (!rt.pendingMessages.has(row.seq)) return { delivery: "queued", itemSeq: row.seq };
+      const interrupted = rt.interrupting === turnId || this.store.snapshot(this.store.node(id).runId).turns.some((t) => t.id === turnId && t.status === "canceled" && t.error === HUMAN_INTERRUPT);
+      if (outcome === "steered" && !interrupted) {
+        this.deliverMessage(id, { ...row, item: { ...row.item, escalated } }, "steered", turnId);
+        return { delivery: "steered", itemSeq: row.seq };
+      }
+      steerUnsupported = outcome === undefined || outcome === "unsupported";
+      // A provider may finish just before refusing steer; consume its terminal event first.
+      if (outcome === "no_active_turn") await rt.chain;
     }
+    const delivery = await this.startPrompts(id, [{ text: row.item.text, trigger: "user", humanItem: row }]);
+    return { delivery, itemSeq: row.seq, ...(steerUnsupported && delivery === "queued" ? { steerUnsupported: true } : {}) };
+  }
+  private async interruptForMessage(id: string, row: ItemRecord): Promise<MessageDelivery> {
+    const rt = this.runtime(id), turnId = rt.turnId;
+    if (rt.interrupting) throw new MessageError("A human interruption is already in progress");
+    if (!turnId || row.item.type !== "user_message") throw new Error("No active turn to interrupt");
+    rt.interrupting = turnId;
+    try {
+      await rt.session?.interrupt();
+      // Driver.interrupt resolves when the old turn can no longer run. Its terminal event
+      // may still be queued on the kernel event chain; finalize it before opening a turn.
+      await rt.chain;
+      if (rt.turnId === turnId) await this.finishTurn(id, "canceled", undefined, HUMAN_INTERRUPT);
+      const delivery = await this.startPrompts(id, [{ text: row.item.text, trigger: "user", humanItem: { ...row, item: { ...row.item, interrupted: true } } }], true);
+      return { delivery, itemSeq: row.seq };
+    } finally {
+      rt.interrupting = undefined;
+      // Notices/results held during the transition can now reach the replacement turn.
+      if (this.store.notices(id).length || this.store.snapshot(this.store.node(id).runId).delegations.some((d) => d.fromNodeId === id && done(d) && d.result && !d.deliveredAt)) this.scheduleDelivery(id);
+    }
+  }
+  private replaceMessage(id: string, row: ItemRecord): void {
+    const rt = this.runtime(id);
+    this.store.appendItem(this.store.node(id).runId, row);
+    if (rt.lastItem?.seq === row.seq) rt.lastItem = row;
   }
   private deliverMessage(id: string, row: ItemRecord, delivery: "turn" | "steered", turnId: string): void {
     const rt = this.runtime(id);
     if (row.item.type !== "user_message" || !rt.pendingMessages.delete(row.seq)) return;
     const next = { ...row, turnId, item: { ...row.item, delivery } };
-    this.store.appendItem(this.store.node(id).runId, next);
-    if (rt.lastItem?.seq === row.seq) rt.lastItem = next;
+    this.replaceMessage(id, next);
   }
   private abandonMessages(id: string): void {
     const rt = this.runtime(id); rt.queued = [];
@@ -314,11 +386,12 @@ export class Kernel {
   }
   private async drainMessages(id: string): Promise<void> {
     const rt = this.runtime(id);
-    if (rt.queued.length && !rt.closed) await this.startPrompts(id, rt.queued.splice(0));
+    if (rt.queued.length && !rt.closed && !rt.interrupting) await this.startPrompts(id, rt.queued.splice(0));
   }
   private async sendPrompt(id: string, text: string, trigger: TurnTrigger): Promise<void> {
     const n = this.store.node(id), rt = this.runtime(id);
     if (["canceled", "replaced"].includes(n.status) || this.canceling.has(id)) throw new Error("Node is canceled");
+    if (rt.interrupting) { rt.queued.push({ text, trigger }); return; }
     if (rt.turnId) {
       const outcome = await rt.session?.steer(text);
       if (outcome === "steered") { this.addItem(id, { type: "user_message", text }); return; }
@@ -600,7 +673,9 @@ export class Kernel {
   }
   private async finishTurn(id: string, status: "completed" | "failed" | "canceled", usage?: Usage, error?: string): Promise<void> {
     const rt = this.runtime(id), n = this.store.node(id); if (!rt.turnId) return;
-    if (status === "canceled") this.abandonMessages(id);
+    const interrupted = rt.interrupting === rt.turnId;
+    if (interrupted) { status = "canceled"; error = HUMAN_INTERRUPT; }
+    if (status === "canceled" && !interrupted) this.abandonMessages(id);
     if (usage) this.usage(id, usage);
     this.flushItem(id);
     this.patchNode(id, { persistence: rt.session?.persistence() ?? undefined });
@@ -608,6 +683,13 @@ export class Kernel {
     this.emit(n.runId, { type: "turn.updated", turnId, patch: { status, endedAt: now(), usage: { inputTokens: rt.usage.inputTokens, cachedInputTokens: rt.usage.cachedInputTokens, outputTokens: rt.usage.outputTokens, totalCostUsd: rt.usage.costUsd }, error } });
     for (const p of this.store.snapshot(n.runId).permissions) if (p.nodeId === id && p.status === "pending") this.emit(n.runId, { type: "permission", permission: { ...p, status: "expired", resolvedAt: now() } });
     for (const span of this.store.snapshot(n.runId).toolSpans) if (span.nodeId === id && span.status === "running") this.emit(n.runId, { type: "tool.span", span: { ...span, status: status === "completed" ? "completed" : status, endedAt: now() } });
+    if (interrupted) {
+      // A human redirect ends only this turn: no result capture, terminal node state,
+      // descendant cancellation, or queue drain. The caller starts the replacement turn.
+      this.patchNode(id, { status: "idle", activity: "Interrupted by human message" });
+      this.updateRun(n.runId);
+      return;
+    }
     const blocking = this.store.snapshot(n.runId).questions.find((q) => q.nodeId === id && q.blocking && q.status === "pending");
     if (status === "completed" && blocking && !rt.report) {
       this.patchNode(id, { status: "idle", activity: `等你回答: ${blocking.question}` }); this.updateRun(n.runId); this.armIdle(id); await this.drainMessages(id); await this.deliver(id); return;
@@ -672,6 +754,7 @@ export class Kernel {
     this.delivering.add(parentId);
     try {
     const parent = this.store.node(parentId), rt = this.runtime(parentId);
+    if (rt.interrupting) return;
     if (["canceled", "failed", "replaced"].includes(parent.status)) return;
     const pending = this.store.snapshot(parent.runId).delegations.filter((d) => d.fromNodeId === parentId && done(d) && d.status !== "replaced" && !this.replacing.has(d.id) && d.result && !d.deliveredAt);
     const notices = this.store.notices(parentId);
