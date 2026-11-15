@@ -473,6 +473,31 @@ describe("human message delivery", () => {
 describe("human queue order", () => {
   const position = (row: ItemRecord | undefined): number | undefined => row?.item.type === "user_message" ? row.item.queuePosition : undefined;
 
+  it("persists deliveryOrder for a reordered batch and omits it for a single delivery", async () => {
+    const firstTurn = gate(), batchTurn = gate();
+    const { server, driver, root, rows, run } = await setup({ script: async (c) => {
+      if (c.turn === 1) await firstTurn.wait(c);
+      if (c.turn === 2) await batchTurn.wait(c);
+    } });
+    const first = await server.kernel.message(root, "first");
+    const second = await server.kernel.message(root, "second");
+    server.kernel.reorderQueue(root, [second.itemSeq, first.itemSeq]);
+    firstTurn.release();
+    await until(() => driver.sessions[0]!.prompts.length === 2);
+    const batchId = server.store.snapshot(run.run.id).turns[1]!.id;
+    expect(driver.sessions[0]!.prompts[1]).toBe("second\n\nfirst");
+    for (const [index, sent] of [second, first].entries()) {
+      expect(rows().find((row) => row.seq === sent.itemSeq)).toMatchObject({ turnId: batchId, item: { delivery: "turn", deliveryOrder: index + 1 } });
+      expect(server.store.events(run.run.id).findLast((event) => event.type === "item" && event.itemSeq === sent.itemSeq)).toMatchObject({ item: { deliveryOrder: index + 1 } });
+    }
+    const single = await server.kernel.message(root, "alone");
+    batchTurn.release();
+    await until(() => server.store.node(root).turns === 3 && server.store.node(root).status === "idle");
+    const row = rows().find((item) => item.seq === single.itemSeq)!;
+    expect(row).toMatchObject({ turnId: server.store.snapshot(run.run.id).turns[2]!.id, item: { delivery: "turn" } });
+    expect(row.item).not.toHaveProperty("deliveryOrder");
+  });
+
   it("assigns ascending positions, appends after the current maximum, and clears removed rows", async () => {
     const hold = gate();
     const { server, root, rows } = await setup({ script: (c) => hold.wait(c) });
