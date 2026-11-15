@@ -23,7 +23,21 @@ describe("API transport", () => {
     const fetchMock = vi.fn().mockResolvedValue(Response.json({ accepted: true, delivery: "queued", itemSeq: 9 }, { status: 202 })); vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("local-secret");
     expect(await client.send("node/1", "hello", "client-1")).toEqual({ accepted: true, delivery: "queued", itemSeq: 9 });
-    expect(fetchMock).toHaveBeenCalledWith("/api/nodes/node%2F1/messages", { method: "POST", headers: { Authorization: "Bearer local-secret", "Content-Type": "application/json" }, body: JSON.stringify({ text: "hello", clientId: "client-1" }) });
+    expect(fetchMock).toHaveBeenCalledWith("/api/nodes/node%2F1/messages", { method: "POST", headers: { Authorization: "Bearer local-secret", "Content-Type": "application/json" }, body: JSON.stringify({ text: "hello", clientId: "client-1", mode: "queue" }) });
+  });
+  it("sends explicit delivery modes and upgrades or retracts an existing row", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => Response.json({ accepted: true, delivery: "queued", itemSeq: 12 })); vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("token");
+    await client.send("node/1", "hello", "c1", "steer");
+    await client.deliver("node/1", 12, { mode: "steer" });
+    await client.deliver("node/1", 12, { mode: "interrupt" });
+    await client.retract("node/1", 12);
+    expect(fetchMock.mock.calls.map(call => [call[0], (call[1] as RequestInit).method])).toEqual([
+      ["/api/nodes/node%2F1/messages", "POST"], ["/api/nodes/node%2F1/messages/12/deliver", "POST"], ["/api/nodes/node%2F1/messages/12/deliver", "POST"], ["/api/nodes/node%2F1/messages/12", "DELETE"],
+    ]);
+    expect(JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string)).toEqual({ text: "hello", clientId: "c1", mode: "steer" });
+    expect(JSON.parse((fetchMock.mock.calls[1]![1] as RequestInit).body as string)).toEqual({ mode: "steer" });
+    expect(JSON.parse((fetchMock.mock.calls[2]![1] as RequestInit).body as string)).toEqual({ mode: "interrupt" });
   });
   it("exposes server error bodies and response status", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: "UNAUTHORIZED", message: "invalid token" } }), { status: 401 })));
