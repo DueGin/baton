@@ -3,6 +3,7 @@ import { applyEvent, type RunEventEnvelope } from "@baton/protocol";
 import { DemoClient } from "./client.js";
 import { richConversation } from "./conversation.js";
 import { codeFences } from "../lib/markdown.js";
+import { conversationRows } from "../lib/conversation.js";
 const base = Date.parse("2026-11-10T07:00:00Z");
 describe("conversation demo", () => {
   it("provides rich Markdown and three complete diagrams with a quiet active turn", async () => {
@@ -97,6 +98,25 @@ describe("conversation demo", () => {
       expect(sent.delivery).toBe("turn");
       expect((await client.items(root)).items.find(row => row.seq === sent.itemSeq)!.item).not.toHaveProperty("interrupted");
     }
+  });
+
+  it("persists reordered queue positions, rejects stale orders, and drains in that order after reload", async () => {
+    let now = base; const client = new DemoClient(() => now); const snapshot = await client.run("run-conversation"); const root = snapshot.run.rootNodeId;
+    const one = await client.send(root, "先做 A"); const two = await client.send(root, "再做 B"); const three = await client.send(root, "最后 C");
+    const order = [three.itemSeq, one.itemSeq, two.itemSeq];
+    expect(await client.reorderQueue(root, { order })).toEqual({ order });
+    const queued = (await client.items(root)).items;
+    for (const [index, seq] of order.entries()) expect(queued.find(row => row.seq === seq)!.item).toMatchObject({ delivery: "queued", queuePosition: index + 1 });
+    for (const stale of [[one.itemSeq], [one.itemSeq, one.itemSeq, two.itemSeq], [...order, 999]]) await expect(client.reorderQueue(root, { order: stale })).rejects.toThrow("409");
+    now += 46_000; const delivered = (await client.items(root)).items;
+    for (const [index, seq] of order.entries()) {
+      const item = delivered.find(row => row.seq === seq)!.item; expect(item).toMatchObject({ delivery: "turn", deliveryOrder: index + 1 }); expect(item).not.toHaveProperty("queuePosition");
+    }
+    expect(conversationRows(delivered, [], root).filter(entry => order.includes(entry.row.seq)).map(entry => entry.row.seq)).toEqual(order);
+    await expect(client.reorderQueue(root, { order })).rejects.toThrow("409");
+    now += 14_000;
+    const reply = (await client.items(root)).items.findLast(row => row.item.type === "assistant_message")!.item;
+    expect(reply.type === "assistant_message" && reply.text.indexOf("最后 C") < reply.text.indexOf("先做 A")).toBe(true);
   });
 
 });

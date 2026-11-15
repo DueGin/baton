@@ -6,6 +6,7 @@ import { deliveryLabel } from "./lib/conversation.js";
 import { mergeItems, RunStore } from "./store.js";
 import { HttpError } from "./api.js";
 import { messageActionKey } from "./lib/conversation.js";
+import { queuedRows, queueDropOrder, queueMoveOrder } from "./lib/conversation.js";
 
 const base = Date.parse("2026-11-10T07:00:00Z");
 afterEach(() => vi.useRealTimers());
@@ -217,5 +218,61 @@ describe("message actions", () => {
     reject!(new Error("response lost")); await action;
     expect(store.getSnapshot().messageActions[key]).toEqual({});
     expect(store.getSnapshot().outgoing.at(-1)?.delivery).toBe("retracted"); store.close();
+  });
+});
+
+describe("queue reordering", () => {
+  async function setup() {
+    const client = new DemoClient(() => base); const store = new RunStore(client);
+    await store.open("run-conversation"); const nodeId = store.getSnapshot().snapshot!.run.rootNodeId;
+    await store.loadItems(nodeId);
+    for (const text of ["第一条", "第二条", "第三条"]) await store.sendMessage(nodeId, text);
+    const order = store.getSnapshot().outgoing.map(message => message.itemSeq!);
+    const visible = () => queuedRows(store.getSnapshot().items[nodeId] ?? [], store.getSnapshot().outgoing, nodeId, store.getSnapshot().queues[nodeId]?.order).map(entry => entry.row.seq);
+    return { client, store, nodeId, order, visible };
+  }
+  it("optimistically moves with keyboard/pointer orders and commits the complete API permutation", async () => {
+    const { client, store, nodeId, order, visible } = await setup();
+    const reorder = client.reorderQueue.bind(client); let finish: (() => void) | undefined;
+    const request = vi.spyOn(client, "reorderQueue").mockImplementation((_node, body) => new Promise(resolve => { finish = () => { void reorder(nodeId, body).then(resolve); }; }));
+    const next = queueMoveOrder(order, order[0]!, 1);
+    const action = store.reorderQueue(nodeId, next);
+    expect(visible()).toEqual(next); expect(store.getSnapshot().queues[nodeId]?.pending).toBe(true);
+    expect(request).toHaveBeenCalledWith(nodeId, { order: next });
+    await store.reorderQueue(nodeId, order); expect(request).toHaveBeenCalledTimes(1);
+    finish!(); await action; request.mockRestore();
+    expect(visible()).toEqual(next); expect(store.getSnapshot().queues[nodeId]?.pending).toBe(false);
+    const pointer = queueDropOrder(next, order[2]!, 0); const second = vi.spyOn(client, "reorderQueue");
+    await store.reorderQueue(nodeId, pointer); expect(second).toHaveBeenCalledWith(nodeId, { order: pointer }); expect(visible()).toEqual(pointer); store.close();
+  });
+  it("rolls back a failed reorder without overwriting new queue events", async () => {
+    const { client, store, nodeId, order, visible } = await setup();
+    vi.spyOn(client, "reorderQueue").mockRejectedValueOnce(new Error("offline"));
+    await store.reorderQueue(nodeId, [...order].reverse());
+    expect(visible()).toEqual(order); expect(store.getSnapshot().queues[nodeId]).toMatchObject({ pending: false, error: "offline" }); store.close();
+  });
+  it("rolls back/refetches after 409 and removes messages that already left the queue", async () => {
+    const { client, store, nodeId, order, visible } = await setup();
+    const initial = store.getSnapshot().items[nodeId]!;
+    const fresh = initial.map(row => row.seq === order[0] && row.item.type === "user_message" ? { ...row, item: { ...row.item, delivery: "retracted" as const } } : row);
+    vi.spyOn(client, "reorderQueue").mockRejectedValueOnce(new HttpError(409, "queue changed"));
+    const items = vi.spyOn(client, "items").mockResolvedValue({ items: fresh, lastSeq: fresh.at(-1)!.seq });
+    await store.reorderQueue(nodeId, [...order].reverse());
+    expect(items).toHaveBeenCalledWith(nodeId); expect(visible()).toEqual(order.slice(1));
+    expect(store.getSnapshot().queues[nodeId]).toMatchObject({ pending: false, error: "队列已变化，已刷新，请重新排序。" }); store.close();
+  });
+  it("keeps a newer SSE reorder when an older HTTP acknowledgement arrives", async () => {
+    const { client, store, nodeId, order, visible } = await setup();
+    let finish: ((response: { order: number[] }) => void) | undefined;
+    vi.spyOn(client, "reorderQueue").mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const action = store.reorderQueue(nodeId, [...order].reverse());
+    const latest = [order[1]!, order[0]!, order[2]!];
+    for (const [index, seq] of latest.entries()) {
+      const snapshot = store.getSnapshot().snapshot!;
+      const original = store.getSnapshot().items[nodeId]!.find(row => row.seq === seq)!;
+      if (original.item.type === "user_message") store.apply({ type: "item", runId: snapshot.run.id, seq: snapshot.lastSeq + 1, nodeId, itemSeq: seq, ts: new Date(base).toISOString(), item: { ...original.item, queuePosition: index + 1 } });
+    }
+    finish!({ order: [...order].reverse() }); await action;
+    expect(visible()).toEqual(latest); store.close();
   });
 });

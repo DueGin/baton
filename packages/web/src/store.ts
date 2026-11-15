@@ -1,5 +1,5 @@
 import { applyEvent, type ItemRecord, type RunEventEnvelope, type RunSnapshot } from "@baton/protocol";
-import { messageActionKey, reconcileOutgoing, type MessageAction, type MessageActionState, type OutgoingMessage } from "./lib/conversation.js";
+import { messageActionKey, queuedRows, reconcileOutgoing, type MessageAction, type MessageActionState, type OutgoingMessage } from "./lib/conversation.js";
 import { HttpError, type BatonClient } from "./api.js";
 
 export type ConnectionState = "loading" | "live" | "reconnecting" | "offline";
@@ -9,11 +9,12 @@ export interface ConsoleState {
   itemStatus: Record<string, "loading" | "ready" | "error">;
   outgoing: OutgoingMessage[];
   messageActions: Record<string, MessageActionState>;
+  queues: Record<string, { pending: boolean; order?: number[]; error?: string }>;
   lastEventAt: Record<string, number>;
   connection: ConnectionState;
   error: string | null;
 }
-const initial = (): ConsoleState => ({ snapshot: null, items: {}, itemStatus: {}, outgoing: [], messageActions: {}, lastEventAt: {}, connection: "loading", error: null });
+const initial = (): ConsoleState => ({ snapshot: null, items: {}, itemStatus: {}, outgoing: [], messageActions: {}, queues: {}, lastEventAt: {}, connection: "loading", error: null });
 
 export function mergeItems(existing: ItemRecord[], incoming: ItemRecord[]): ItemRecord[] {
   const bySeq = new Map(existing.map(item => [item.seq, item]));
@@ -60,7 +61,7 @@ export class RunStore {
       : event.type === "escalation" ? event.escalation.nodeId : undefined;
     if (nodeId) patch.lastEventAt = { ...this.state.lastEventAt, [nodeId]: Date.parse(event.ts) };
     if (event.type === "item") {
-      patch.outgoing = reconcileOutgoing(this.state.outgoing, { seq: event.itemSeq, nodeId: event.nodeId, ts: event.ts, item: event.item });
+      patch.outgoing = reconcileOutgoing(this.state.outgoing, { seq: event.itemSeq, nodeId: event.nodeId, turnId: event.turnId, ts: event.ts, item: event.item });
       const key = messageActionKey(event.nodeId, event.itemSeq);
       if (event.item.type === "user_message" && this.state.messageActions[key]) patch.messageActions = { ...this.state.messageActions, [key]: { ...this.state.messageActions[key], error: undefined, ...(event.item.delivery !== "queued" ? { steerUnsupported: false } : {}) } };
     }
@@ -85,6 +86,31 @@ export class RunStore {
       this.update({ outgoing: rows.reduce(reconcileOutgoing, this.state.outgoing), items: { ...this.state.items, [nodeId]: rows }, itemStatus: { ...this.state.itemStatus, [nodeId]: "ready" } });
     } catch (error) {
       if (generation === this.generation) this.update({ itemStatus: { ...this.state.itemStatus, [nodeId]: "error" }, error: errorText(error) });
+    }
+  }
+
+  async reorderQueue(nodeId: string, order: number[]): Promise<void> {
+    if (this.state.queues[nodeId]?.pending) return;
+    const generation = this.generation;
+    const before = new Map((this.state.items[nodeId] ?? []).map(row => [row.seq, row]));
+    this.update({ queues: { ...this.state.queues, [nodeId]: { pending: true, order } } });
+    try {
+      const response = await this.client.reorderQueue(nodeId, { order });
+      if (generation !== this.generation) return;
+      const current = queuedRows(this.state.items[nodeId] ?? [], this.state.outgoing, nodeId).map(entry => entry.row.seq);
+      if (current.length === response.order.length && current.every(seq => response.order.includes(seq))) {
+        const positions = new Map(response.order.map((seq, index) => [seq, index + 1]));
+        const rows = (this.state.items[nodeId] ?? []).map(row => row === before.get(row.seq) && row.item.type === "user_message" && row.item.delivery === "queued" && positions.has(row.seq) ? { ...row, item: { ...row.item, queuePosition: positions.get(row.seq)! } } : row);
+        this.update({ items: { ...this.state.items, [nodeId]: rows }, outgoing: rows.reduce(reconcileOutgoing, this.state.outgoing.map(message => message.nodeId === nodeId && message.delivery === "queued" && message.itemSeq !== undefined && !rows.some(row => row.seq === message.itemSeq) && positions.has(message.itemSeq) ? { ...message, queuePosition: positions.get(message.itemSeq)! } : message)) });
+      }
+      this.update({ queues: { ...this.state.queues, [nodeId]: { pending: false } } });
+    } catch (error) {
+      if (generation !== this.generation) return;
+      const conflict = error instanceof HttpError && error.status === 409;
+      this.update({ queues: { ...this.state.queues, [nodeId]: { pending: conflict, error: conflict ? "队列已变化，正在刷新…" : errorText(error) } } });
+      if (conflict) await this.loadItems(nodeId, true);
+      if (generation !== this.generation) return;
+      this.update({ queues: { ...this.state.queues, [nodeId]: { pending: false, error: conflict ? this.state.itemStatus[nodeId] === "error" ? "队列已变化，刷新失败，请重试。" : "队列已变化，已刷新，请重新排序。" : errorText(error) } } });
     }
   }
 
@@ -122,7 +148,7 @@ export class RunStore {
       const current = this.state.items[nodeId]?.find(row => row.seq === itemSeq);
       // SSE replacements are authoritative; provide an immediate fallback when HTTP arrives first.
       if (current && current === before && current.item.type === "user_message") {
-        const row: ItemRecord = { ...current, item: { ...current.item, delivery, ...(interruptsTurn && delivery === "turn" ? { interrupted: true } : {}), ...(action === "steer" && delivery === "steered" ? { escalated: true } : {}) } };
+        const row: ItemRecord = { ...current, item: { ...current.item, delivery, queuePosition: delivery === "queued" ? current.item.queuePosition : undefined, ...(interruptsTurn && delivery === "turn" ? { interrupted: true } : {}), ...(action === "steer" && delivery === "steered" ? { escalated: true } : {}) } };
         this.update({ items: { ...this.state.items, [nodeId]: mergeItems(this.state.items[nodeId] ?? [], [row]) }, outgoing: reconcileOutgoing(this.state.outgoing, row) });
       } else if (!current && outgoingBefore) {
         this.update({ outgoing: this.state.outgoing.map(row => row === outgoingBefore ? { ...row, delivery, interrupted: interruptsTurn && delivery === "turn" } : row) });

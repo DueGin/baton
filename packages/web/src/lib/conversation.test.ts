@@ -11,7 +11,7 @@ describe("message delivery", () => {
     expect(conversationRows([], [pending], "n")[0]!.outgoing?.state).toBe("sending");
     const queued = reconcileOutgoing([pending], row);
     expect(queued[0]).toMatchObject({ state: "accepted", itemSeq: 9, delivery: "queued" });
-    expect(conversationRows([row], queued, "n")).toHaveLength(1);
+    expect(conversationRows([row], queued, "n")).toHaveLength(0);
     const delivered = reconcileOutgoing(queued, { ...row, item: { type: "user_message", text: "hello", delivery: "turn" } });
     expect(delivered[0]).toMatchObject({ delivery: "turn" });
     expect(deliveryLabel(delivered[0]!.delivery, delivered[0]!.interrupted)).toBe("已送达");

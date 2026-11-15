@@ -7,7 +7,7 @@ import type { ProjectRecord, ProjectSummary, CreateProjectRequest, PatchProjectR
 import { demoDirs, demoPath, initialDemoProjects } from "./projects.js";
 import { liveProjectSummaries, pathBasename } from "../lib/projects.js";
 import { richConversation } from "./conversation.js";
-import type { SendMode, DeliverMessageRequest } from "@baton/protocol";
+import type { SendMode, DeliverMessageRequest, ReorderQueueRequest, ReorderQueueResponse } from "@baton/protocol";
 import { HttpError } from "../api.js";
 import type { BatonClient, TeamPresetResult } from "../api.js";
 import { summarize, terminal } from "../lib/derive.js";
@@ -110,7 +110,7 @@ export class DemoClient implements BatonClient {
   }
   private append(data: DemoRun, nodeId: string, item: TimelineItem): number {
     const seq = this.nextItemSeq(data, nodeId);
-    this.emit(data, { type: "item", nodeId, itemSeq: seq, turnId: data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running")?.id, ts: new Date(this.now()).toISOString(), item });
+    this.emit(data, { type: "item", nodeId, itemSeq: seq, turnId: item.type === "user_message" && item.delivery === "queued" ? undefined : data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running")?.id, ts: new Date(this.now()).toISOString(), item });
     return seq;
   }
   private nextItemSeq(data: DemoRun, nodeId: string, count = 1): number {
@@ -381,7 +381,8 @@ export class DemoClient implements BatonClient {
       if (previous.item.delivery === "retracted") throw new HttpError(409, "消息已撤回");
       return { accepted: true, delivery: previous.item.delivery ?? "turn", itemSeq: previous.itemSeq };
     }
-    const itemSeq = this.append(data, nodeId, { type: "user_message", text, clientId, delivery: "queued" });
+    const positions = this.queuedMessages(data, nodeId).map(row => row.item.type === "user_message" ? row.item.queuePosition ?? 0 : 0);
+    const itemSeq = this.append(data, nodeId, { type: "user_message", text, clientId, delivery: "queued", queuePosition: Math.max(0, ...positions) + 1 });
     return this.deliverMessage(data, nodeId, itemSeq, mode);
   }
   async deliver(nodeId: string, itemSeq: number, request: DeliverMessageRequest): Promise<SendMessageResponse> {
@@ -401,7 +402,8 @@ export class DemoClient implements BatonClient {
     const delivery = active && mode === "steer" ? "steered" : "turn";
     if (delivery === "turn") this.startReply(data, nodeId, row.item.text);
     const turnId = data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running")?.id;
-    this.emit(data, { type: "item", nodeId, itemSeq, turnId, ts: new Date(this.now()).toISOString(), item: { ...row.item, delivery, ...(interrupted ? { interrupted: true } : {}), ...(mode === "steer" ? { escalated: true } : {}) } });
+    const { queuePosition: _position, ...item } = row.item;
+    this.emit(data, { type: "item", nodeId, itemSeq, turnId, ts: new Date(this.now()).toISOString(), item: { ...item, delivery, ...(interrupted ? { interrupted: true } : {}), ...(mode === "steer" ? { escalated: true } : {}) } });
     return { accepted: true, delivery, itemSeq };
   }
   async retract(nodeId: string, itemSeq: number): Promise<void> {
@@ -409,7 +411,18 @@ export class DemoClient implements BatonClient {
     const row = data.log.findLast(event => event.type === "item" && event.nodeId === nodeId && event.itemSeq === itemSeq);
     if (row?.type !== "item" || row.item.type !== "user_message") throw new HttpError(404, "消息不存在");
     if (row.item.delivery !== "queued") throw new HttpError(409, "只有排队消息可以撤回");
-    this.emit(data, { type: "item", nodeId, itemSeq, ts: new Date(this.now()).toISOString(), item: { ...row.item, delivery: "retracted" } });
+    const { queuePosition: _position, ...item } = row.item;
+    this.emit(data, { type: "item", nodeId, itemSeq, ts: new Date(this.now()).toISOString(), item: { ...item, delivery: "retracted" } });
+  }
+  async reorderQueue(nodeId: string, request: ReorderQueueRequest): Promise<ReorderQueueResponse> {
+    this.advance(); const data = this.forNode(nodeId); const queued = this.queuedMessages(data, nodeId);
+    const order = request.order;
+    if (order.length !== queued.length || new Set(order).size !== order.length || order.some(seq => !queued.some(row => row.itemSeq === seq))) throw new HttpError(409, "队列已变化，请重新拉取");
+    order.forEach((seq, index) => {
+      const row = queued.find(row => row.itemSeq === seq)!;
+      if (row.item.type === "user_message") this.emit(data, { type: "item", nodeId, itemSeq: seq, ts: new Date(this.now()).toISOString(), item: { ...row.item, queuePosition: index + 1 } });
+    });
+    return { order: [...order] };
   }
   private interruptTurn(data: DemoRun, nodeId: string): void {
     const ts = new Date(this.now()).toISOString();
@@ -452,7 +465,7 @@ export class DemoClient implements BatonClient {
   private queuedMessages(data: DemoRun, nodeId: string) {
     const rows = new Map<number, Extract<RunEventEnvelope, { type: "item" }>>();
     for (const event of data.log) if (event.type === "item" && event.nodeId === nodeId) rows.set(event.itemSeq, event);
-    return [...rows.values()].filter(row => row.item.type === "user_message" && row.item.delivery === "queued" && !this.abandonedMessages.has(`${nodeId}:${row.itemSeq}`));
+    return [...rows.values()].filter(row => row.item.type === "user_message" && row.item.delivery === "queued" && !this.abandonedMessages.has(`${nodeId}:${row.itemSeq}`)).sort((a, b) => (a.item.type === "user_message" ? a.item.queuePosition ?? a.itemSeq : a.itemSeq) - (b.item.type === "user_message" ? b.item.queuePosition ?? b.itemSeq : b.itemSeq));
   }
   private deliverQueued(data: DemoRun, nodeId: string): void {
     if (data.snapshot.nodes.some(node => node.id === nodeId && ["canceled", "replaced", "failed", "completed"].includes(node.status))) return;
@@ -460,7 +473,10 @@ export class DemoClient implements BatonClient {
     if (queued.length) {
       this.startReply(data, nodeId, queued.map(row => row.item.type === "user_message" ? row.item.text : "").join("\n\n"));
       const turnId = data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running")?.id;
-      for (const row of queued) if (row.item.type === "user_message") this.emit(data, { type: "item", nodeId, itemSeq: row.itemSeq, turnId, ts: new Date(this.now()).toISOString(), item: { ...row.item, delivery: "turn" } });
+      for (const [index, row] of queued.entries()) if (row.item.type === "user_message") {
+        const { queuePosition: _position, ...item } = row.item;
+        this.emit(data, { type: "item", nodeId, itemSeq: row.itemSeq, turnId, ts: new Date(this.now()).toISOString(), item: { ...item, delivery: "turn", ...(queued.length > 1 ? { deliveryOrder: index + 1 } : {}) } });
+      }
     }
   }
   background = async (status: "running" | "all" = "running"): Promise<ListBackgroundResponse> => {
