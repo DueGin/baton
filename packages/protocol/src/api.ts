@@ -1,6 +1,6 @@
 /** REST request/response bodies (DESIGN §7). */
 import type { PermissionResponse } from "./timeline.js";
-import type { AgentEntry, BackgroundProcess, DelegationRecord, InboxItem, ItemRecord, PermissionRule, RunPolicy, RunSnapshot, RunSummary, TeamMemberSpec, TeamPreset } from "./records.js";
+import type { AgentEntry, BackgroundProcess, ProjectRecord, ProjectSummary, DelegationRecord, InboxItem, ItemRecord, PermissionRule, RunPolicy, RunSnapshot, RunSummary, TeamMemberSpec, TeamPreset } from "./records.js";
 
 export interface CreateRunRequest {
   /** Root agent. Optional when `teamPresetId` is given (the preset's lead is used). */
@@ -8,8 +8,13 @@ export interface CreateRunRequest {
   model?: string;
   modeId?: string;
   thinking?: string;
-  /** Absolute path of the working directory. */
-  cwd: string;
+  /** Project the run belongs to (required). */
+  projectId: string;
+  /**
+   * Working directory: defaults to the project path; when given it must be the project path or a
+   * directory inside it (absolute path).
+   */
+  cwd?: string;
   prompt: string;
   title?: string;
   policy?: Partial<RunPolicy>;
@@ -205,4 +210,33 @@ export interface DismissBackgroundRequest {
 export interface CancelRunRequest {
   /** Also stop the run's running background processes. Default false. */
   stopBackground?: boolean;
+}
+
+// ───────────────────────────── projects ─────────────────────────────
+
+/** GET /api/projects?archived=1 — summaries (default excludes archived). */
+export type ListProjectsResponse = ProjectSummary[];
+
+/** POST /api/projects — register a directory. Returns the existing project when the path is already registered. */
+export interface CreateProjectRequest {
+  /** Absolute path; `~` is expanded. Must be an existing directory. */
+  path: string;
+  name?: string;
+}
+
+/** PATCH /api/projects/:id */
+export interface PatchProjectRequest {
+  name?: string;
+  archived?: boolean;
+}
+
+export type GetProjectResponse = ProjectSummary;
+export type CreateProjectResponse = ProjectRecord;
+
+/** GET /api/fs/dirs?path=<abs or ~> — directory browser for adding projects (directories only). */
+export interface ListDirsResponse {
+  path: string;
+  parent?: string;
+  home: string;
+  dirs: Array<{ name: string; path: string; isGitRepo: boolean; isProject: boolean }>;
 }

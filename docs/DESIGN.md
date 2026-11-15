@@ -52,7 +52,8 @@ packages/
 | 概念 | 说明 |
 |---|---|
 | **Agent**（`AgentEntry`） | 识别出来的一种 agent，例如 `claude`、`codex`、`pi`、`gemini`。字段包括 kind（`native` 或 `acp`）、可用状态、版本、模型、模式 |
-| **Run** | 一次协作。用户在控制台选一个 agent 和工作目录，发出第一条消息，就建了一个 Run 和它的根节点。一个 Run 可以有多轮对话 |
+| **Project**（项目） | 登记过的一个工作目录（realpath，不允许重复）。**所有 Run 都必须属于某个项目**，没有项目就不能开会话。项目可以重命名、归档：归档后从侧栏隐藏，它的 Run 仍然保留、可以查看 |
+| **Run** | 一次协作（会话）。在某个项目下，选一个 agent，发出第一条消息，就建了一个 Run 和它的根节点。工作目录默认就是项目路径，也可以指定项目内的某个子目录。一个 Run 可以有多轮对话 |
 | **Node** | Run 里的一个 agent 会话实例（一个 provider 会话）。根节点由用户创建，其它节点都由委派产生 |
 | **Delegation**（边） | 父节点到子节点的一次委派，带任务书、状态、结果和用量汇总。`kind` 本期只有 `delegate`，以后的协作模式会加新的 kind |
 | **Turn** | 节点的一轮执行。`trigger` 记录这一轮由什么触发：`user`（人发消息）、`delegation`（任务书）、`result`（子节点结果送达）、`followup`（父节点追问） |
@@ -222,6 +223,20 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
 - `POST /api/runs/:id/title/regenerate` 可以强制重新生成，人改过的标题也会被覆盖。
 - 设置存在 `config.json` 的 `titleModel` 字段，文件权限 0600。密钥只写不读，API 永远不返回密钥。也可以改用 `apiKeyEnv` 从环境变量读取。
 
+### 4.9 项目
+
+- **登记**：`POST /api/projects {path, name?}`。
+  - 路径会展开 `~`，再取 realpath。必须是已存在的目录。
+  - 如果这个路径已经登记过，直接返回已有的项目；归档过的会自动恢复。
+  - 名称默认取目录名。如果目录在 git 仓库里，记下 `gitRoot`。
+- **建 Run**：`CreateRunRequest.projectId` 必填，项目不存在或已归档就报错。
+  - `cwd` 不填时用项目路径。填了的话，realpath 之后必须是项目路径本身或项目内的子目录，否则返回 400。
+  - CLI：`baton run --project <id｜路径>`。给的是路径而且还没登记，就自动登记。
+- **迁移**：daemon 启动时，没有 `projectId` 的旧 Run 按 cwd 归组：每个不同的 cwd 自动建一个项目（cwd 已不存在也照建，`exists:false`），再给这些 Run 补上 `projectId`。补的时候发 `run.updated` 事件。迁移只做一次，可以重复执行而不出错。
+- **项目汇总**（`ProjectSummary`）：Run 数、活跃 Run 数、待处理数、后台进程数、最近一次 Run 的时间、git 分支、目录是否还存在。git 分支用 `git -C <path> branch --show-current` 查，超时 1 秒，结果缓存 10 秒。
+- **目录浏览**：`GET /api/fs/dirs?path=…`，给"添加项目"用。只列目录，不读任何文件内容，默认不列隐藏目录。每一项标明是不是 git 仓库、是不是已经登记的项目。和其他 API 一样要 token 鉴权。
+- **归档**：`PATCH archived:true`。有活跃 Run 的项目不能归档，返回 409。不提供硬删除。
+
 ### 4.8 后台进程登记
 
 agent 常会启动长期运行的进程，比如 `npm run dev`、`nohup … &`、watcher，或者 Claude 的 `run_in_background`。人往往不知道这些进程是哪个会话启的，还一直在跑。daemon 负责发现这些进程，记到对应 Run 和节点名下，在控制台里展示，并允许人停止它们。
@@ -313,6 +328,11 @@ agent 常会启动长期运行的进程，比如 `npm run dev`、`nohup … &`�
 | POST | `/api/questions/:id/answer` | `AnswerQuestionRequest` |
 | POST | `/api/escalations/:id/resolve` | `ResolveEscalationRequest` |
 | GET/POST | `/api/permission-rules` | 列出 / 新建审批规则 |
+| GET | `/api/projects?archived=1` | `ProjectSummary[]`（默认不含已归档的） |
+| POST | `/api/projects` | `CreateProjectRequest` → `ProjectRecord`（路径已登记时返回已有项目） |
+| GET/PATCH | `/api/projects/:id` | 项目汇总 / `PatchProjectRequest`（改名、归档） |
+| GET | `/api/runs?projectId=…` | 只看某个项目的 Run |
+| GET | `/api/fs/dirs?path=…` | `ListDirsResponse`，目录浏览 |
 | GET | `/api/background?status=running｜all` | 跨 Run 的后台进程（默认只返回运行中、未隐藏的） |
 | POST | `/api/background/:id/stop` | `StopBackgroundRequest` |
 | POST | `/api/background/:id/dismiss` | `DismissBackgroundRequest` |
@@ -430,6 +450,15 @@ agent 常会启动长期运行的进程，比如 `npm run dev`、`nohup … &`�
    - 键盘可以操作：分隔条用 `role="separator"`，方向键调宽度。
    - 宽度存在 localStorage，Run 详情和节点详情共用这一个宽度。
    - 宽屏时侧栏挤压主内容，拓扑图和时间线随之重新适配；窄屏时侧栏浮在内容上方。
+
+11. **项目**：
+    - 左侧栏按项目分组：每个项目是一个可折叠的分组头，显示名称、git 分支、活跃数和待处理数，下面是它的 Run 列表。
+    - 分组头上有"＋"，在该项目下开新会话；还有菜单：重命名、复制路径、归档。底部有"已归档项目"入口。
+    - 当前项目是最近选中的那个，存在 localStorage，"新建 Run"默认用它。
+    - 一个项目都没有时，主区显示空状态：先添加一个项目（工作目录）才能开会话。
+    - **添加项目**弹窗：可以手动输入路径，也可以用目录浏览器选择。目录浏览器显示 git 仓库标记和"已是项目"标记，有面包屑和返回上级，从 home 开始浏览。
+    - **新建 Run** 弹窗：用项目选择器（必选，默认当前项目）代替原来的工作目录输入框；"高级"里可以填项目内的子目录。会按项目记住上次选的 agent、模型和模式。
+    - RunBar 和 Run 详情里显示所属项目，点击可以切换到这个项目。
 
 9. **左侧导航栏**：
    - 可以隐藏：点按钮或按 ⌘/Ctrl+B，收起成 48px 宽的图标条，只留新建、待处理（带数字）、Agents、团队、设置和展开按钮。

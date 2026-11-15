@@ -103,6 +103,36 @@ export interface UsageTotals {
   costUsd: number;
 }
 
+// ───────────────────────────── project ─────────────────────────────
+
+/** A registered working directory. Every run belongs to exactly one project (DESIGN §3). */
+export interface ProjectRecord {
+  id: string;
+  /** Display name; defaults to the directory basename. */
+  name: string;
+  /** Absolute, symlink-resolved directory path; unique among projects. */
+  path: string;
+  /** Repository root when the path is inside a git work tree. */
+  gitRoot?: string;
+  /** Hidden from the sidebar (its runs stay available under 已归档项目). */
+  archived?: boolean;
+  createdAt: IsoTime;
+  updatedAt: IsoTime;
+}
+
+/** Project plus live counters for the sidebar. */
+export interface ProjectSummary extends ProjectRecord {
+  runCount: number;
+  activeRunCount: number;
+  pendingTotal: number;
+  backgroundCount: number;
+  lastRunAt?: IsoTime;
+  /** Current git branch (cheap `git branch --show-current`), if a git work tree. */
+  gitBranch?: string;
+  /** False when the directory no longer exists. */
+  exists: boolean;
+}
+
 // ───────────────────────────── team ─────────────────────────────
 
 /** A role slot: which agent (and model/mode) does a kind of work. Delegating to a role opens a new
@@ -200,6 +230,8 @@ export interface TeamPreset {
 
 export interface RunRecord {
   id: string;
+  /** Owning project. Always set for new runs; legacy runs are migrated on startup (DESIGN §3). */
+  projectId?: string;
   title: string;
   /**
    * Where the title came from: "prompt" = provisional (start of the first prompt), "generated" =
@@ -521,6 +553,7 @@ export interface RunSnapshot {
 
 export interface RunSummary {
   id: string;
+  projectId?: string;
   title: string;
   titleSource?: RunRecord["titleSource"];
   /** Timestamp of the run's latest event. */
