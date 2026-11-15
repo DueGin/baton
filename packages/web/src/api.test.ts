@@ -44,6 +44,19 @@ describe("API transport", () => {
     expect(JSON.parse((fetchMock.mock.calls[3]![1] as RequestInit).body as string)).toMatchObject({ titleModel: { apiKey: "write-only", apiKeyEnv: null } });
     expect(JSON.parse((fetchMock.mock.calls[4]![1] as RequestInit).body as string)).toEqual({ sample: "实现登录流程", titleModel: { model: "test-model" } });
   });
+  it("lists processes, sends stop/dismiss decisions and optionally stops services on run cancel", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => Response.json({})); vi.stubGlobal("fetch", fetchMock); const client = new ApiClient("token");
+    await client.background(); await client.background("all");
+    await client.stopBackground("123:4", { graceMs: 3000 }); await client.dismissBackground("123:4", { dismissed: true });
+    await client.cancelRun("run/1"); await client.cancelRun("run/1", { stopBackground: true });
+    expect(fetchMock.mock.calls.map(call => [call[0], (call[1] as RequestInit).method])).toEqual([
+      ["/api/background?status=running", "GET"], ["/api/background?status=all", "GET"], ["/api/background/123%3A4/stop", "POST"], ["/api/background/123%3A4/dismiss", "POST"], ["/api/runs/run%2F1/cancel", "POST"], ["/api/runs/run%2F1/cancel", "POST"],
+    ]);
+    expect(JSON.parse((fetchMock.mock.calls[2]![1] as RequestInit).body as string)).toEqual({ graceMs: 3000 });
+    expect(JSON.parse((fetchMock.mock.calls[3]![1] as RequestInit).body as string)).toEqual({ dismissed: true });
+    expect(JSON.parse((fetchMock.mock.calls[4]![1] as RequestInit).body as string)).toEqual({});
+    expect(JSON.parse((fetchMock.mock.calls[5]![1] as RequestInit).body as string)).toEqual({ stopBackground: true });
+  });
   it("sends answers, escalation decisions, remembered permissions and rule mutations", async () => {
     const fetchMock = vi.fn().mockImplementation(async () => new Response(null, { status: 204 })); vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("token");

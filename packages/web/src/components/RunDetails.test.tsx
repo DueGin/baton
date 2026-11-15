@@ -29,6 +29,11 @@ describe("compact Run chrome", () => {
     expect(html).toContain(`aria-label="重命名：${snapshot.run.title}"`);
     expect(html).toContain('aria-label="重新生成标题"'); expect(html).toContain("由标题模型命名");
   });
+  it("lists the same run-wide processes in compact details", async () => {
+    const client = new DemoClient(() => now); const snapshot = await client.run("run-background");
+    const html = renderToStaticMarkup(<RunDetails snapshot={snapshot} client={client} now={now} connection="live" busy={false} close={() => undefined} autoApprove={() => undefined} cancel={() => undefined} openTeam={() => undefined} openPending={() => undefined} />);
+    for (const text of ["后台进程", "background-list is-compact", "npm run dev", "推断", "localhost:5173", "已退出 1 个"]) expect(html).toContain(text);
+  });
   it("keeps status on one line by default and names child waiting time correctly", async () => {
     const snapshot = await new DemoClient(() => now).run("run-demo");
     const waiting = renderToStaticMarkup(<ConversationStatus phase={{ kind: "children", label: "等待 2 个子任务", since: new Date(now - 149_000).toISOString(), quiet: 45, related: [], tokens: 1200 }} snapshot={snapshot} now={now} inspect={() => undefined} />);

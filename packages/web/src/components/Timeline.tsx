@@ -18,6 +18,7 @@ export function Timeline({ snapshot, inspect }: { snapshot: RunSnapshot; inspect
   const drag = useRef<{ x: number; pixel: number; view: TimeViewport; moved: boolean } | null>(null); const resizing = useRef(false);
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null); const pattern = useId().replace(/[^a-zA-Z0-9_-]/g, "");
   const previous = useRef(compressed); const fitMode = useRef(true);
+  const latestModel = useRef(model); latestModel.current = model;
   useEffect(() => { const observer = new ResizeObserver(entries => { const size = entries[0]?.contentRect.width; if (size) setWidth(Math.max(480, size)); }); if (container.current) observer.observe(container.current); return () => observer.disconnect(); }, []);
   useEffect(() => {
     if (previous.current !== compressed) { setView(fitSession(model)); fitMode.current = true; }
@@ -26,6 +27,7 @@ export function Timeline({ snapshot, inspect }: { snapshot: RunSnapshot; inspect
   }, [model, follow, compressed]);
   // Preserve the fitted domain after sidebars resize; manually zoomed domains remain anchored.
   useEffect(() => { if (fitMode.current) setView(fitSession(model)); }, [width, gutter, model]);
+  useEffect(() => { const timer = setTimeout(() => { fitMode.current = true; setView(fitSession(latestModel.current)); }, 100); return () => clearTimeout(timer); }, [width]);
   const rows = useMemo(() => treeOrder(snapshot.nodes), [snapshot.nodes]); const index = useMemo(() => new Map(rows.map((node, row) => [node.id, row])), [rows]);
   const grouped = useMemo(() => {
     const groups = new Map<string, { turns: RunSnapshot["turns"]; tools: RunSnapshot["toolSpans"]; permissions: RunSnapshot["permissions"]; questions: RunSnapshot["questions"]; escalations: RunSnapshot["escalations"] }>();

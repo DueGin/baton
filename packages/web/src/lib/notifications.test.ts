@@ -26,8 +26,8 @@ describe("browser notification decisions", () => {
     const run = (await client.runs()).find(row => row.id === question.runId)!;
     tracker.observeInbox([], false);
     tracker.observeRuns([{ ...run, status: "active" }], false);
-    tracker.observeRuns([{ ...run, status: "idle", activeNodeCount: 0, pendingTotal: 0 }], true);
-    expect(tracker.drain(base + 1000, true)[0]?.title).toContain("Run 完成");
+    tracker.observeRuns([{ ...run, status: "idle", activeNodeCount: 0, pendingTotal: 0, backgroundCount: 2 }], true);
+    const notice = tracker.drain(base + 1000, true)[0]; expect(notice?.title).toContain("Run 完成"); expect(notice?.body).toContain("仍有 2 个后台进程在运行");
     tracker.observeRuns([{ ...run, status: "idle", activeNodeCount: 0, pendingTotal: 0 }], true);
     expect(tracker.drain(base + 32000, true)).toEqual([]);
   });

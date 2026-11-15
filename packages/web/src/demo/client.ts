@@ -1,5 +1,8 @@
 import { applyEvent, emptyUsage, type CreateRunRequest, type DelegationRecord, type GetItemsResponse, type PatchRunRequest, type PermissionDecision, type RunEvent, type RunEventEnvelope, type RunSnapshot, type TimelineItem, type AddMemberRequest, type ReplaceMemberRequest, type ReassignRequest, type TeamPreset, type TeamPresetInput, type SaveTeamPresetRequest, type TeamRecord, type TeamMember, type TeamMemberSpec, type TeamChange, type TeamProposal, type ApproveTeamProposalRequest, type RejectTeamProposalRequest, type InboxItem, type AnswerQuestionRequest, type ResolveEscalationRequest, type PermissionRule, type CreatePermissionRuleRequest, type QuestionRecord, type EscalationRecord, type SendMessageResponse, type SettingsResponse, type UpdateSettingsRequest, type TestTitleModelRequest, type TestTitleModelResponse } from "@baton/protocol";
 import { idleScenario } from "./idle.js";
+import type { BackgroundProcess, CancelRunRequest, DismissBackgroundRequest, StopBackgroundRequest, ListBackgroundResponse } from "@baton/protocol";
+import { demoBackground } from "./background.js";
+import { backgroundActive } from "../lib/background.js";
 import { richConversation } from "./conversation.js";
 import type { BatonClient, TeamPresetResult } from "../api.js";
 import { summarize, terminal } from "../lib/derive.js";
@@ -49,6 +52,12 @@ export class DemoClient implements BatonClient {
     void this.createRun({ agent: "claude", cwd: "/workspace/atlas", title: "待确认团队 · 实现登录流程", prompt: "实现登录流程，并独立审查会话安全。", policy: { mode: "dynamic", teamApproval: true } });
     this.setupHumanDemo();
     this.setupConversationDemo();
+    const background = createScenario(now() - 600000, "run-background");
+    const backgroundLog = background.events.filter(event => Date.parse(event.ts) <= now());
+    const backgroundRun = { snapshot: backgroundLog.reduce(applyEvent, background.initial), log: backgroundLog, remaining: [] };
+    this.data.set(backgroundRun.snapshot.run.id, backgroundRun);
+    this.emit(backgroundRun, { type: "run.updated", patch: { title: "后台服务 · Vite 与 Python", titleSource: "human" } });
+    demoBackground(backgroundRun.snapshot, now()).forEach(process => this.emit(backgroundRun, { type: "background", process }));
     const idle = idleScenario(now() - 9_000_000); this.data.set(idle.run.id, { snapshot: idle, log: [], remaining: [] });
   }
   agents = async () => structuredClone(demoAgents);
@@ -113,7 +122,7 @@ export class DemoClient implements BatonClient {
       const ready = data.remaining.filter(event => Date.parse(event.ts) <= this.now());
       data.remaining = data.remaining.filter(event => Date.parse(event.ts) > this.now());
       for (const event of ready) {
-        if (terminal(data.snapshot.run.status)) continue;
+        if (terminal(data.snapshot.run.status) && event.type !== "background") continue;
         this.emit(data, event);
         if (event.type === "turn.updated" && event.patch.status && event.patch.status !== "running") {
           const nodeId = data.snapshot.turns.find(turn => turn.id === event.turnId)?.nodeId;
@@ -124,7 +133,7 @@ export class DemoClient implements BatonClient {
           if (edge && edge.result) this.append(data, edge.fromNodeId, { type: "user_message", text: demoResultsPrompt([edge]) });
         }
       }
-      if (ready.some(event => event.seq === 0) && data.snapshot.nodes.every(node => node.status === "idle" || terminal(node.status))) this.emit(data, { type: "run.updated", patch: { status: "idle", updatedAt: new Date(this.now()).toISOString() } });
+      if (!terminal(data.snapshot.run.status) && ready.some(event => event.seq === 0 && event.type !== "background") && data.snapshot.nodes.every(node => node.status === "idle" || terminal(node.status))) this.emit(data, { type: "run.updated", patch: { status: "idle", updatedAt: new Date(this.now()).toISOString() } });
     }
   }
   async createRun(request: CreateRunRequest): Promise<RunSnapshot> {
@@ -388,7 +397,29 @@ export class DemoClient implements BatonClient {
       this.emit(data, { type: "item", nodeId, itemSeq: queued.itemSeq, turnId, ts: new Date(this.now()).toISOString(), item: { ...queued.item, delivery: "turn" } });
     }
   }
-  cancelRun = async (id: string): Promise<void> => { const data = this.get(id); await this.cancelNode(data.snapshot.run.rootNodeId); };
+  background = async (status: "running" | "all" = "running"): Promise<ListBackgroundResponse> => {
+    this.advance(); return structuredClone([...this.data.values()].flatMap(data => (data.snapshot.backgroundProcesses ?? []).filter(process => status === "all" || backgroundActive(process)).map(process => ({ ...process, runTitle: data.snapshot.run.title }))));
+  };
+  private backgroundEntry(id: string): { data: DemoRun; process: BackgroundProcess } {
+    for (const data of this.data.values()) { const process = data.snapshot.backgroundProcesses?.find(process => process.id === id); if (process) return { data, process }; }
+    throw new Error("后台进程不存在");
+  }
+  async stopBackground(id: string, request: StopBackgroundRequest = {}): Promise<void> {
+    const { data, process } = this.backgroundEntry(id); if (process.status !== "running") return;
+    this.emit(data, { type: "background", process: { ...process, status: "stopping", stoppedBy: "human" } });
+    const ts = new Date(this.now() + Math.min(request.graceMs ?? 1500, 5000)).toISOString();
+    data.remaining.push({ type: "background", process: { ...process, status: "exited", stoppedBy: "human", exitedAt: ts, lastSeenAt: ts }, runId: data.snapshot.run.id, seq: 0, ts });
+    data.remaining.sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
+  }
+  async dismissBackground(id: string, request: DismissBackgroundRequest): Promise<void> {
+    const { data, process } = this.backgroundEntry(id);
+    data.remaining = data.remaining.map(event => event.type === "background" && event.process.id === id ? { ...event, process: { ...event.process, dismissed: request.dismissed } } : event);
+    this.emit(data, { type: "background", process: { ...process, dismissed: request.dismissed } });
+  }
+  cancelRun = async (id: string, request: CancelRunRequest = {}): Promise<void> => {
+    const data = this.get(id); if (request.stopBackground) for (const process of data.snapshot.backgroundProcesses ?? []) if (backgroundActive(process)) await this.stopBackground(process.id);
+    await this.cancelNode(data.snapshot.run.rootNodeId);
+  };
   async cancelNode(nodeId: string): Promise<void> {
     const data = this.forNode(nodeId); const ids = new Set([nodeId]); const ts = new Date(this.now()).toISOString();
     let size = 0; while (size !== ids.size) { size = ids.size; data.snapshot.nodes.forEach(node => { if (node.parentNodeId && ids.has(node.parentNodeId)) ids.add(node.id); }); data.snapshot.delegations.forEach(edge => { if (ids.has(edge.fromNodeId)) ids.add(edge.toNodeId); }); }
