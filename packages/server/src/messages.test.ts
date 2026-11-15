@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import type { SendMessageResponse } from "@baton/protocol";
+import type { ItemRecord, ReorderQueueResponse, SendMessageResponse } from "@baton/protocol";
 import { startServer, type BatonServer } from "./api/server.js";
 import { FakeDriver, FakeDriverRegistry, type FakeContext, type FakeDriverOptions } from "./driver/fake.js";
 import type { DriverEvent } from "./driver/types.js";
@@ -81,7 +81,7 @@ describe("human message delivery", () => {
     const result = await server.kernel.message(root, "queued request", "queued-client", "steer");
     expect(result).toMatchObject({ delivery: "queued", steerUnsupported: true });
     const queued = rows().find((r) => r.seq === result.itemSeq)!;
-    expect(queued.item).toEqual({ type: "user_message", text: "queued request", clientId: "queued-client", delivery: "queued" });
+    expect(queued.item).toEqual({ type: "user_message", text: "queued request", clientId: "queued-client", delivery: "queued", queuePosition: 1 });
     expect(queued.turnId).toBeUndefined();
     expect(driver.sessions[0]!.prompts).toEqual(["start"]);
     hold.release();
@@ -466,6 +466,152 @@ describe("human message delivery", () => {
     expect(response.status).toBe(202);
     const body = await response.json() as SendMessageResponse;
     expect(body).toEqual({ accepted: true, delivery, itemSeq: expect.any(Number) });
-    expect(rows().find((r) => r.seq === body.itemSeq)?.item).toEqual({ type: "user_message", text: "API request", clientId: "api-client", delivery, ...(delivery === "steered" ? { escalated: false } : {}) });
+    expect(rows().find((r) => r.seq === body.itemSeq)?.item).toEqual({ type: "user_message", text: "API request", clientId: "api-client", delivery, ...(delivery === "steered" ? { escalated: false } : {}), ...(delivery === "queued" ? { queuePosition: 1 } : {}) });
+  });
+});
+
+describe("human queue order", () => {
+  const position = (row: ItemRecord | undefined): number | undefined => row?.item.type === "user_message" ? row.item.queuePosition : undefined;
+
+  it("assigns ascending positions, appends after the current maximum, and clears removed rows", async () => {
+    const hold = gate();
+    const { server, root, rows } = await setup({ script: (c) => hold.wait(c) });
+    const first = await server.kernel.message(root, "first");
+    const second = await server.kernel.message(root, "second");
+    const third = await server.kernel.message(root, "third");
+    expect([first, second, third].map((r) => position(rows().find((row) => row.seq === r.itemSeq)))).toEqual([1, 2, 3]);
+    await server.kernel.deliverHumanMessage(root, second.itemSeq, "steer");
+    server.kernel.retractMessage(root, first.itemSeq);
+    const fourth = await server.kernel.message(root, "fourth");
+    expect(position(rows().find((r) => r.seq === fourth.itemSeq))).toBe(4);
+    expect(position(rows().find((r) => r.seq === second.itemSeq))).toBeUndefined();
+    expect(position(rows().find((r) => r.seq === first.itemSeq))).toBeUndefined();
+    await server.kernel.deliverHumanMessage(root, third.itemSeq, "interrupt");
+    expect(position(rows().find((r) => r.seq === third.itemSeq))).toBeUndefined();
+    expect(position(rows().find((r) => r.seq === fourth.itemSeq))).toBe(4);
+  });
+
+  it("reorders through HTTP, emits only changed rows, and drains to one turn in the requested order", async () => {
+    const hold = gate();
+    const { server, driver, root, run, rows } = await setup({ script: async (c) => { if (c.turn === 1) await hold.wait(c); } });
+    const first = await server.kernel.message(root, "first", "first-id");
+    const second = await server.kernel.message(root, "second", "second-id");
+    const third = await server.kernel.message(root, "third", "third-id");
+    const after = server.store.events(run.run.id).at(-1)!.seq;
+    const order = [third.itemSeq, second.itemSeq, first.itemSeq];
+    const response = await fetch(`${server.url}/api/nodes/${root}/queue`, {
+      method: "PUT", headers: { authorization: `Bearer ${server.token}`, "content-type": "application/json" }, body: JSON.stringify({ order }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json() as ReorderQueueResponse).toEqual({ order });
+    const changed = server.store.events(run.run.id, after).filter((event) => event.type === "item");
+    expect(changed.map((event) => event.type === "item" ? event.itemSeq : null)).toEqual([third.itemSeq, first.itemSeq]);
+    const unchangedAfter = server.store.events(run.run.id).at(-1)!.seq;
+    expect(server.kernel.reorderQueue(root, order)).toEqual({ order });
+    expect(server.store.events(run.run.id, unchangedAfter)).toEqual([]);
+    hold.release();
+    await until(() => server.store.node(root).turns === 2 && server.store.node(root).status === "idle");
+    expect(driver.sessions[0]!.prompts).toEqual(["start", "third\n\nsecond\n\nfirst"]);
+    const turn = server.store.snapshot(run.run.id).turns[1]!;
+    for (const sent of [first, second, third]) {
+      const row = rows().find((r) => r.seq === sent.itemSeq)!;
+      expect(row).toMatchObject({ turnId: turn.id, item: { delivery: "turn" } });
+      expect(position(row)).toBeUndefined();
+    }
+    expect(rows().filter((r) => r.item.type === "user_message")).toHaveLength(4);
+  });
+
+  it("rejects stale, partial, duplicate, and foreign sequences without changing any rows", async () => {
+    const hold = gate();
+    const { server, root, rows, run } = await setup({ script: (c) => hold.wait(c) });
+    const first = await server.kernel.message(root, "first");
+    const second = await server.kernel.message(root, "second");
+    const before = rows(), after = server.store.events(run.run.id).at(-1)!.seq;
+    for (const order of [[], [first.itemSeq], [first.itemSeq, first.itemSeq], [first.itemSeq, 999], [first.itemSeq, second.itemSeq, 999]]) {
+      const response = await fetch(`${server.url}/api/nodes/${root}/queue`, {
+        method: "PUT", headers: { authorization: `Bearer ${server.token}`, "content-type": "application/json" }, body: JSON.stringify({ order }),
+      });
+      expect(response.status).toBe(409);
+    }
+    expect(rows()).toEqual(before);
+    expect(server.store.events(run.run.id, after).filter((event) => event.type === "item")).toEqual([]);
+    server.kernel.retractMessage(root, first.itemSeq);
+    expect(() => server.kernel.reorderQueue(root, [second.itemSeq, first.itemSeq])).toThrow("Queue changed");
+  });
+
+  it("retains kernel prompt slots when human messages are reordered", async () => {
+    const hold = gate();
+    const { server, driver, root } = await setup({ steer: false });
+    await until(() => server.store.node(root).status === "idle");
+    driver.options.script = async (c) => { if (c.turn === 1) await hold.wait(c); };
+    const child = await server.kernel.delegate(root, { agent: "root", title: "child", task: "work" }), id = child.nodeId!;
+    await until(() => server.store.node(id).status === "running");
+    const first = await server.kernel.message(id, "human first");
+    await server.kernel.tool(root, "send", { delegationId: child.delegationId, message: "kernel middle" });
+    const second = await server.kernel.message(id, "human second");
+    server.kernel.reorderQueue(id, [second.itemSeq, first.itemSeq]);
+    hold.release();
+    await until(() => server.store.node(id).turns === 2 && server.store.node(id).status === "completed");
+    expect(driver.sessions[1]!.prompts[1]).toBe("human second\n\nkernel middle\n\nhuman first");
+  });
+
+  it("uses item sequence as fallback for older queued rows without positions", async () => {
+    const hold = gate();
+    const { server, driver, root, rows, run } = await setup({ script: async (c) => { if (c.turn === 1) await hold.wait(c); } });
+    const first = await server.kernel.message(root, "legacy first");
+    const second = await server.kernel.message(root, "legacy second");
+    for (const sent of [first, second]) {
+      const row = rows().find((r) => r.seq === sent.itemSeq)!;
+      if (row.item.type !== "user_message") throw new Error("Expected user message");
+      const { queuePosition: _position, ...item } = row.item;
+      server.store.appendItem(run.run.id, { ...row, item });
+    }
+    hold.release();
+    await until(() => server.store.node(root).turns === 2 && server.store.node(root).status === "idle");
+    expect(driver.sessions[0]!.prompts[1]).toBe("legacy first\n\nlegacy second");
+    expect(() => server.kernel.reorderQueue(root, [second.itemSeq, first.itemSeq])).toThrow("Queue changed");
+    expect(server.kernel.reorderQueue(root, [])).toEqual({ order: [] });
+  });
+
+  it("accepts a reorder during an in-flight drain before the next turn starts", async () => {
+    const hold = gate();
+    const { server, driver, root, run } = await setup({ script: async (c) => { if (c.turn === 1) await hold.wait(c); } });
+    const first = await server.kernel.message(root, "first in flight");
+    const second = await server.kernel.message(root, "second in flight");
+    let reordered = false;
+    const unsubscribe = server.store.subscribe((event) => {
+      if (event.runId === run.run.id && event.type === "turn.updated" && event.patch.status === "completed" && !reordered) {
+        reordered = true;
+        // finishTurn will enter drainMessages and await session() before this microtask.
+        queueMicrotask(() => server.kernel.reorderQueue(root, [second.itemSeq, first.itemSeq]));
+      }
+    });
+    hold.release();
+    await until(() => server.store.node(root).turns === 2 && server.store.node(root).status === "idle");
+    unsubscribe();
+    expect(reordered).toBe(true);
+    expect(driver.sessions[0]!.prompts).toEqual(["start", "second in flight\n\nfirst in flight"]);
+  });
+
+  it("rejects a stale reorder while the driver is still starting the drained turn", async () => {
+    const hold = gate(), next = gate();
+    const { server, driver, root, rows } = await setup({ script: async (c) => { if (c.turn === 1) await hold.wait(c); else await next.wait(c); } });
+    const first = await server.kernel.message(root, "first");
+    const second = await server.kernel.message(root, "second");
+    let entered = false, release = (): void => {};
+    const ready = new Promise<void>((resolve) => { release = resolve; });
+    const session = driver.sessions[0]!, start = session.startTurn.bind(session);
+    session.startTurn = async (prompt) => { entered = true; await ready; return start(prompt); };
+    hold.release();
+    await until(() => entered);
+    expect(() => server.kernel.reorderQueue(root, [second.itemSeq, first.itemSeq])).toThrow("Queue changed");
+    expect(server.kernel.reorderQueue(root, [])).toEqual({ order: [] });
+    for (const sent of [first, second]) {
+      expect(rows().find((row) => row.seq === sent.itemSeq)?.item).toMatchObject({ delivery: "turn" });
+      expect(position(rows().find((row) => row.seq === sent.itemSeq))).toBeUndefined();
+    }
+    release();
+    await until(() => session.prompts.length === 2);
+    expect(session.prompts[1]).toBe("first\n\nsecond");
   });
 });

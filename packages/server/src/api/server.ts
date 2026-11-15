@@ -217,9 +217,14 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
         }
         if (method === "DELETE" && !message[3]) { kernel.retractMessage(id, seq); json(response, 200, { accepted: true }); return; }
       }
-      const node = /^\/api\/nodes\/([^/]+)\/(items|messages|cancel)$/.exec(path);
+      const node = /^\/api\/nodes\/([^/]+)\/(items|messages|cancel|queue)$/.exec(path);
       if (node) {
         const id = node[1]!; store.node(id);
+        if (method === "PUT" && node[2] === "queue") {
+          const input = record(await body(request));
+          if (!Array.isArray(input.order) || !input.order.every((seq: unknown) => typeof seq === "number" && Number.isSafeInteger(seq) && seq > 0)) throw new HttpError(400, "order must be an array of positive item sequences");
+          json(response, 200, kernel.reorderQueue(id, input.order as number[])); return;
+        }
         if (method === "GET" && node[2] === "items") { const after = sequence(url.searchParams.get("after")), items = store.items(id, after); json(response, 200, { items, lastSeq: items.at(-1)?.seq ?? after }); return; }
         if (method === "POST" && node[2] === "messages") {
           const input = record(await body(request));
