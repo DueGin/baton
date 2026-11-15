@@ -74,6 +74,12 @@ export interface DriverSession {
   runtimeInfo(): Promise<{ model?: string | null; modeId?: string | null }>;
   /** Release processes; idempotent. */
   close(): Promise<void>;
+  /**
+   * PIDs of the agent process(es) backing this session (e.g. the claude CLI, codex app-server,
+   * pi rpc). Used to attribute background processes the agent starts (DESIGN §4.8). Optional:
+   * drivers that cannot tell return [] or omit it.
+   */
+  processIds?(): number[];
 }
 
 export interface AgentDriver {

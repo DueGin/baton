@@ -4,6 +4,7 @@
  * Consumers must ignore unknown event types.
  */
 import type {
+  BackgroundProcess,
   DelegationRecord,
   IsoTime,
   NodeRecord,
@@ -38,6 +39,8 @@ export type RunEvent =
   | { type: "question"; question: QuestionRecord }
   /** Upsert by id. */
   | { type: "escalation"; escalation: EscalationRecord }
+  /** Upsert by id. */
+  | { type: "background"; process: BackgroundProcess }
   /** Upsert by permission id. */
   | { type: "permission"; permission: PermissionRecord }
   /**

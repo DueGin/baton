@@ -463,6 +463,42 @@ export type InboxItem =
   | { kind: "question"; runId: string; runTitle: string; question: QuestionRecord }
   | { kind: "escalation"; runId: string; runTitle: string; escalation: EscalationRecord };
 
+// ───────────────────────────── background processes ─────────────────────────────
+
+/** A long-running process an agent of the run started (dev server, watcher, daemon…). DESIGN §4.8. */
+export interface BackgroundProcess {
+  /** `${pid}:${startEpochSeconds}` — stable across scans and daemon restarts. */
+  id: string;
+  runId: string;
+  /** Node that started it, when attributable. */
+  nodeId?: string;
+  pid: number;
+  ppid: number;
+  pgid: number;
+  /** Full command line (truncated to 2000 chars). */
+  command: string;
+  cwd?: string;
+  /** TCP ports it or its folded children listen on. */
+  ports: number[];
+  /** Descendant processes folded into this entry (e.g. `node vite` under `npm run dev`). */
+  children: Array<{ pid: number; command: string; ports: number[] }>;
+  startedAt: IsoTime;
+  status: "running" | "stopping" | "exited";
+  exitedAt?: IsoTime;
+  /**
+   * How it was attributed: "tree" = descendant of the agent process at scan time, "group" = same
+   * process group as a tool shell seen in the agent's tree, "inferred" = orphan that started during
+   * one of the node's shell tool calls in the node's working directory.
+   */
+  attribution: "tree" | "group" | "inferred";
+  /** Shell tool span (ToolSpanRecord.id) that started it, if known. */
+  toolSpanId?: string;
+  stoppedBy?: "human";
+  /** The human said it does not belong to this run / should not be listed. */
+  dismissed?: boolean;
+  lastSeenAt: IsoTime;
+}
+
 export interface RunSnapshot {
   run: RunRecord;
   nodes: NodeRecord[];
@@ -472,6 +508,8 @@ export interface RunSnapshot {
   permissions: PermissionRecord[];
   questions: QuestionRecord[];
   escalations: EscalationRecord[];
+  /** Background processes started by the run's agents (running and recently exited). */
+  backgroundProcesses?: BackgroundProcess[];
   /** Last event seq included in this snapshot; subscribe with after=lastSeq. */
   lastSeq: number;
   /** Timestamp of the event at lastSeq (the run's latest activity; absent for an empty log). */
@@ -493,6 +531,8 @@ export interface RunSummary {
   pendingPermissions: number;
   /** Pending permissions + proposals + questions + escalations. */
   pendingTotal: number;
+  /** Running, non-dismissed background processes. */
+  backgroundCount?: number;
   usage: UsageTotals;
   createdAt: IsoTime;
   updatedAt: IsoTime;

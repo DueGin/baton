@@ -1,6 +1,6 @@
 /** REST request/response bodies (DESIGN §7). */
 import type { PermissionResponse } from "./timeline.js";
-import type { AgentEntry, DelegationRecord, InboxItem, ItemRecord, PermissionRule, RunPolicy, RunSnapshot, RunSummary, TeamMemberSpec, TeamPreset } from "./records.js";
+import type { AgentEntry, BackgroundProcess, DelegationRecord, InboxItem, ItemRecord, PermissionRule, RunPolicy, RunSnapshot, RunSummary, TeamMemberSpec, TeamPreset } from "./records.js";
 
 export interface CreateRunRequest {
   /** Root agent. Optional when `teamPresetId` is given (the preset's lead is used). */
@@ -183,4 +183,26 @@ export interface TestTitleModelResponse {
   title?: string;
   error?: string;
   latencyMs: number;
+}
+
+// ───────────────────────────── background processes ─────────────────────────────
+
+/** GET /api/background?status=running|all — across runs (default: running, not dismissed). */
+export type ListBackgroundResponse = Array<BackgroundProcess & { runTitle: string }>;
+
+/** POST /api/background/:id/stop — SIGTERM the process family, SIGKILL after `graceMs`. */
+export interface StopBackgroundRequest {
+  /** Default 5000. 0 = SIGKILL immediately. */
+  graceMs?: number;
+}
+
+/** POST /api/background/:id/dismiss — hide it (not attributable to this run, or the human knows). */
+export interface DismissBackgroundRequest {
+  dismissed: boolean;
+}
+
+/** POST /api/runs/:runId/cancel — optional body. */
+export interface CancelRunRequest {
+  /** Also stop the run's running background processes. Default false. */
+  stopBackground?: boolean;
 }

@@ -222,6 +222,50 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
 - `POST /api/runs/:id/title/regenerate` 可以强制重新生成，人改过的标题也会被覆盖。
 - 设置存在 `config.json` 的 `titleModel` 字段，文件权限 0600。密钥只写不读，API 永远不返回密钥。也可以改用 `apiKeyEnv` 从环境变量读取。
 
+### 4.8 后台进程登记
+
+agent 常会启动长期运行的进程，比如 `npm run dev`、`nohup … &`、watcher，或者 Claude 的 `run_in_background`。人往往不知道这些进程是哪个会话启的，还一直在跑。daemon 负责发现这些进程，记到对应 Run 和节点名下，在控制台里展示，并允许人停止它们。
+
+**实测事实**（macOS 15）：
+- `ps` 读不到其他进程的环境变量，所以没法靠注入环境变量来标记进程。
+- Claude 的 Bash 工具会为每次工具调用新建一个进程组。`nohup x &` 产生的进程几毫秒后就被 launchd（ppid=1）收养，但保留着那个已退出的 shell 的 pgid。
+
+**归属规则**（按顺序判断，越靠前越确定）：
+1. **`tree`**：扫描时，进程的祖先链能追到某个节点的 agent 进程（`DriverSession.processIds()`）。
+2. **`group`**：进程的 pgid 等于这个节点曾经出现过的某个子孙进程的 pid 或 pgid。daemon 把扫描中见过的、属于该节点的 shell 的 pgid 记下来，进程被收养后仍能据此归属。
+3. **`inferred`**：前两条都不满足的孤儿进程（ppid=1），同时满足两个条件：
+   - 启动时间落在该节点某次 shell 工具调用的窗口内，即 [开始 −1s, 结束 +3s]；
+   - 它的 cwd（realpath）在该节点的 cwd 之下。
+
+   如果多个节点都符合，优先选工具命令文本里包含该进程可执行文件名的那个，再不行就选最近开始的那次调用。UI 上标"推断"。
+
+**判定为"后台"**：归属到某个节点、且不是基础设施的进程，满足以下任一条件：
+- 在监听 TCP 端口；
+- 在启动它的那次 shell 工具调用结束 5 秒后仍然存活；
+- 是孤儿（`inferred` / `group`）。
+
+基础设施要排除：agent 进程本身，以及节点在没有任何 shell 工具调用进行时出现的子孙进程，例如会话启动时的 MCP server、language server。
+
+**折叠**：同一族进程只登记最顶层的那一个，子孙列进 `children`，端口汇总。例如 `npm run dev` 下面的 `node vite` 会折叠进 `npm run dev` 这一条。
+
+**扫描**：
+- 用 `ps -axo pid=,ppid=,pgid=,lstart=,command=`、`lsof -nP -iTCP -sTCP:LISTEN -Fpn`，候选进程的 cwd 用 `lsof -a -d cwd -p … -Fpn` 查。
+- 频率：有活跃回合时每 3 秒一次；每次 shell 工具调用结束后 2 秒补扫一次；其他时候每 20 秒一次。
+- 每个后台进程用 `pid + 启动时间` 作为 id，防止 pid 被复用后认错进程。进程消失，或同一 pid 的启动时间变了，就记为 `exited`。已退出的记录保留 24 小时。
+- 记录落库，daemon 重启后继续跟踪。
+- 支持 macOS 和 Linux；Windows 不支持，直接返回空列表。
+
+**停止**（`POST /api/background/:id/stop`）：只允许停止已登记的进程。
+- 如果它的 pgid 只包含这一族进程，并且不是 daemon 或 agent 的进程组，就对整个组发 `kill(-pgid, SIGTERM)`；否则从最深处开始，逐个对子树里的 pid 发 SIGTERM。
+- 等待 `graceMs`（默认 5 秒）后，对仍存活的发 SIGKILL。
+- 过程中状态为 `stopping`，结束后为 `exited`，并记 `stoppedBy:"human"`。
+
+**其他行为**：
+- `dismiss`：把记录从列表里隐藏，仍然继续跟踪。
+- 取消 Run 时可以选择一并停止后台进程（`CancelRunRequest.stopBackground`，默认否）。
+- Run 完成的通知里会附上"仍有 N 个后台进程在运行"。
+- 节点系统提示里加一句："启动长期运行的进程后，在回复里告诉人它是什么、端口和怎么停止。"
+
 ## 5. Driver 接口（server 和 providers 之间的边界）
 
 契约文件是 `packages/server/src/driver/types.ts`。内核只依赖这个接口：
@@ -256,7 +300,7 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
 | POST | `/api/runs` | `CreateRunRequest` → `RunSnapshot` |
 | GET | `/api/runs/:runId` | `RunSnapshot` |
 | GET | `/api/runs/:runId/events?after=<seq>` | SSE（也支持 `Last-Event-ID`）。非 SSE 请求返回 JSON 数组 |
-| POST | `/api/runs/:runId/cancel` | 取消整个 Run |
+| POST | `/api/runs/:runId/cancel` | 取消整个 Run，可带 `CancelRunRequest.stopBackground` |
 | PATCH | `/api/runs/:runId` | 修改 `title`（记为 `titleSource:"human"`）、`policy` |
 | POST | `/api/runs/:runId/title/regenerate` | 用标题模型重新生成标题（§4.7） |
 | GET/PUT | `/api/settings` | `SettingsResponse` / `UpdateSettingsRequest`（标题模型等） |
@@ -269,6 +313,9 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
 | POST | `/api/questions/:id/answer` | `AnswerQuestionRequest` |
 | POST | `/api/escalations/:id/resolve` | `ResolveEscalationRequest` |
 | GET/POST | `/api/permission-rules` | 列出 / 新建审批规则 |
+| GET | `/api/background?status=running｜all` | 跨 Run 的后台进程（默认只返回运行中、未隐藏的） |
+| POST | `/api/background/:id/stop` | `StopBackgroundRequest` |
+| POST | `/api/background/:id/dismiss` | `DismissBackgroundRequest` |
 | DELETE | `/api/permission-rules/:id` | 删除规则 |
 | GET | `/api/delegations/:id` | 完整的委派记录和结果 |
 | POST | `/api/delegations/:id/reassign` | `ReassignRequest`，人工改派 |
@@ -326,7 +373,20 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
      - 超过 30 秒没有新事件时，附注"已 45s 无新输出"，告诉人 agent 还活着但很安静
 
      节点切换下拉框和节点卡片上也要显示同样的运行中标记。
-   - **推理行**：流式期间默认展开并跟随滚动，本轮结束后自动折叠。
+   - **思考过程（reasoning）的显示**：由浏览器偏好控制，存在 localStorage，设置页可以改，会话工具栏也有快捷切换。三档：
+     - 折叠（**默认**）
+     - 展开
+     - 生成时展开、结束后折叠
+
+     人手动点开或收起某一块，就以人的操作为准，在本页会话内记住。状态条里那一两行推理预览不受这个设置影响。
+   - **后台进程入口**：输入框左上角有一个小标签"后台 N"，N 是本 Run 正在运行、未隐藏的后台进程数，为 0 时不显示。有监听端口的进程时，标签高亮。点开是一个列表，每一条包括：
+     - 状态点、命令（等宽字体，悬停看全文）
+     - 端口，可点击打开 `http://localhost:端口`
+     - 由谁启动：agent 头像、节点标题和角色；归属是推断出来的，就加"推断"标记
+     - 运行时长、pid、cwd（可复制）
+     - 操作：停止（需二次确认）、复制命令、"不是本会话启动的"（隐藏）
+
+     列表底部可以展开"已退出 N 个"。左侧 Run 列表和 Run 详情侧栏也显示后台进程数。
    - **Markdown**：完整支持 GFM，包括标题、列表（含嵌套和任务列表）、表格、引用、删除线、链接、行内代码和代码块。
      - 代码块：语法高亮、语言标签、复制按钮。
      - 安全：不渲染原始 HTML；链接只允许 http、https、mailto，并在新窗口打开。
