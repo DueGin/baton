@@ -11,7 +11,7 @@ import { Markdown } from "./Markdown.js";
 import { reasoningBlockId, reasoningOpen, reasoningPreferences } from "../lib/reasoning.js";
 import { BackgroundPopover } from "./BackgroundProcesses.js";
 import { QueueDock } from "./QueueDock.js";
-import { DeliveryIcon, MessageActionIcons } from "./MessageActions.js";
+import { DeliveryIcon, EditedMarker, MessageActionIcons } from "./MessageActions.js";
 import { ReasoningControls } from "./ReasoningControls.js";
 export { Markdown } from "./Markdown.js";
 
@@ -78,8 +78,8 @@ export function TranscriptRow({ row, node, snapshot, inspect, streaming = false,
   const delivery = item.type === "user_message" ? item.delivery ?? outgoing?.delivery : undefined;
   const canAct = act && row.seq > 0 && (!outgoing || outgoing.state === "accepted");
   return <article className={`message message-${item.type}${outgoing?.state === "failed" ? " message-send-failed" : ""}`}>
-    <div className="message-meta">{item.type === "user_message" ? <span className="user-avatar">U</span> : <AgentMark agent={node.agentId} small />}<strong>{item.type === "user_message" ? "你" : node.agentId}</strong><time dateTime={row.ts}>{clock(row.ts)}</time>{item.type === "user_message" && <DeliveryIcon delivery={delivery} interrupted={item.interrupted ?? outgoing?.interrupted} state={outgoing?.state} />}
-      <div className="message-top-actions">{canAct && <MessageActionIcons delivery={delivery} state={actionState} act={act} />}{outgoing?.state === "failed" && <button type="button" className="icon-button" aria-label="重试发送" title="重试发送" onClick={retry}><Icon name="refresh" size={15} /></button>}</div>
+    <div className="message-meta">{item.type === "user_message" ? <span className="user-avatar">U</span> : <AgentMark agent={node.agentId} small />}<strong>{item.type === "user_message" ? "你" : node.agentId}</strong><time dateTime={row.ts}>{clock(row.ts)}</time>{item.type === "user_message" && <DeliveryIcon delivery={delivery} interrupted={item.interrupted ?? outgoing?.interrupted} state={outgoing?.state} />}{item.type === "user_message" && <EditedMarker at={item.editedAt ?? outgoing?.editedAt} />}
+      <div className="message-top-actions">{canAct && <MessageActionIcons delivery={delivery} state={actionState} act={action => { if (action !== "edit") act(action); }} />}{outgoing?.state === "failed" && <button type="button" className="icon-button" aria-label="重试发送" title="重试发送" onClick={retry}><Icon name="refresh" size={15} /></button>}</div>
     </div>
     <Markdown text={item.text} streaming={streaming && item.type === "assistant_message"} />
     {actionState?.error && <div className="error-text send-error" role="alert">{actionState.error}</div>}
@@ -151,7 +151,7 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
     <div className="transcript-scroll" ref={scroll} onScroll={() => { const el = scroll.current; if (el) setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 100); }}><div className="transcript-content">{itemStatus[node.id] === "loading" && <div className="loading-line">正在加载会话…</div>}{itemStatus[node.id] === "error" && <button className="button" onClick={() => { void store.loadItems(node.id, true); }}>重试加载会话</button>}{messages.map(({ row, outgoing }) => <TranscriptRow key={outgoing?.clientId ?? row.seq} row={row} node={node} snapshot={snapshot} inspect={inspect} outgoing={outgoing} actionState={state.messageActions[messageActionKey(node.id, row.seq)]} act={action => { void store.actOnMessage(node.id, row.seq, action); }} retry={outgoing ? () => { void store.sendMessage(node.id, outgoing.text, outgoing.clientId); } : undefined} streaming={live && inTurn(row) && (row.item.type === "reasoning" || (row.seq === latestText?.seq && phase?.kind === "reply"))} />)}{!messages.length && itemStatus[node.id] === "ready" && <Empty>这个节点还没有消息。</Empty>}<div ref={bottom} /></div></div>
     {phase && <ConversationStatus key={node.id} phase={phase} snapshot={snapshot} now={now} inspect={inspect} />}
     <div className="composer-tools"><BackgroundPopover projectName={projectName} key={snapshot.run.id} snapshot={snapshot} now={now} client={store.client} /></div>
-    <QueueDock key={node.id} entries={queue} actions={state.messageActions} pending={queueState?.pending} error={queueState?.error} reorder={order => { void store.reorderQueue(node.id, order); }} act={(seq, action) => { void store.actOnMessage(node.id, seq, action); }} />
+    <QueueDock key={node.id} entries={queue} actions={state.messageActions} pending={queueState?.pending} error={queueState?.error} reorder={order => { void store.reorderQueue(node.id, order); }} act={(seq, action) => store.actOnMessage(node.id, seq, action)} edit={(seq, text) => store.editMessage(node.id, seq, text)} />
     <form className="composer" onSubmit={event => { event.preventDefault(); submit(); }}><textarea ref={input} aria-label="消息" placeholder={`向 ${node.agentId} 发送消息…${live ? "（运行中也可发送）" : ""}`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); submit(); } }} disabled={["canceled", "replaced"].includes(node.status)} rows={2} /><div className="composer-footer"><span title="送达方式会显示在消息旁">{live ? "运行中 · 发送后排队，可在消息上改为引导或立即发送" : "发送到当前节点"} · ⌘ / Ctrl + Enter</span><button className="button primary" disabled={!draft.trim() || ["canceled", "replaced"].includes(node.status)}><Icon name="arrow" size={15} />发送</button></div></form>
   </div>;
 }

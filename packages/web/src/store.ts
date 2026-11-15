@@ -1,6 +1,7 @@
 import { applyEvent, type ItemRecord, type RunEventEnvelope, type RunSnapshot } from "@baton/protocol";
 import { messageActionKey, queuedRows, reconcileOutgoing, type MessageAction, type MessageActionState, type OutgoingMessage } from "./lib/conversation.js";
 import { HttpError, type BatonClient } from "./api.js";
+import { queueEditError } from "./lib/queue-editor.js";
 
 export type ConnectionState = "loading" | "live" | "reconnecting" | "offline";
 export interface ConsoleState {
@@ -61,12 +62,12 @@ export class RunStore {
       : event.type === "escalation" ? event.escalation.nodeId : undefined;
     if (nodeId) patch.lastEventAt = { ...this.state.lastEventAt, [nodeId]: Date.parse(event.ts) };
     if (event.type === "item") {
-      patch.outgoing = reconcileOutgoing(this.state.outgoing, { seq: event.itemSeq, nodeId: event.nodeId, turnId: event.turnId, ts: event.ts, item: event.item });
+      patch.outgoing = reconcileOutgoing(this.state.outgoing, { seq: event.itemSeq, nodeId: event.nodeId, turnId: event.turnId, ts: event.itemTs, item: event.item });
       const key = messageActionKey(event.nodeId, event.itemSeq);
       if (event.item.type === "user_message" && this.state.messageActions[key]) patch.messageActions = { ...this.state.messageActions, [key]: { ...this.state.messageActions[key], error: undefined, ...(event.item.delivery !== "queued" ? { steerUnsupported: false } : {}) } };
     }
     if (event.type === "item" && this.state.itemStatus[event.nodeId]) {
-      const row: ItemRecord = { seq: event.itemSeq, nodeId: event.nodeId, turnId: event.turnId, ts: event.ts, item: event.item };
+      const row: ItemRecord = { seq: event.itemSeq, nodeId: event.nodeId, turnId: event.turnId, ts: event.itemTs, item: event.item };
       patch.items = { ...this.state.items, [event.nodeId]: mergeItems(this.state.items[event.nodeId] ?? [], [row]) };
     }
     this.update(patch);
@@ -128,6 +129,45 @@ export class RunStore {
       if (generation !== this.generation) return;
       // An SSE acknowledgement is authoritative even if the HTTP response was lost.
       this.update({ outgoing: this.state.outgoing.map(row => row.clientId === clientId && row.state !== "accepted" ? { ...row, state: "failed", error: errorText(error) } : row) });
+    }
+  }
+
+  async editMessage(nodeId: string, itemSeq: number, text: string): Promise<boolean> {
+    const key = messageActionKey(nodeId, itemSeq);
+    if (this.state.messageActions[key]?.pending || itemSeq <= 0) return false;
+    const previous = this.state.messageActions[key];
+    const setAction = (patch: MessageActionState) => this.update({ messageActions: { ...this.state.messageActions, [key]: patch } });
+    const validation = queueEditError(text);
+    if (validation) { setAction({ ...previous, error: validation }); return false; }
+    const generation = this.generation;
+    const before = this.state.items[nodeId]?.find(row => row.seq === itemSeq);
+    const outgoingBefore = this.state.outgoing.find(row => row.nodeId === nodeId && row.itemSeq === itemSeq);
+    setAction({ ...previous, pending: "edit", error: undefined });
+    try {
+      await this.client.edit(nodeId, itemSeq, { text });
+      if (generation !== this.generation) return false;
+      const current = this.state.items[nodeId]?.find(row => row.seq === itemSeq);
+      if (current && current === before && current.item.type === "user_message" && current.item.delivery === "queued") {
+        const row: ItemRecord = { ...current, item: { ...current.item, text, editedAt: new Date().toISOString() } };
+        this.update({ items: { ...this.state.items, [nodeId]: mergeItems(this.state.items[nodeId] ?? [], [row]) }, outgoing: reconcileOutgoing(this.state.outgoing, row) });
+      } else if (!current && outgoingBefore) {
+        this.update({ outgoing: this.state.outgoing.map(row => row === outgoingBefore ? { ...row, text, editedAt: new Date().toISOString() } : row) });
+      }
+      setAction({ ...previous, error: undefined }); return true;
+    } catch (error) {
+      if (generation !== this.generation) return false;
+      const latest = this.state.items[nodeId]?.find(row => row.seq === itemSeq)?.item;
+      if (latest?.type === "user_message" && latest.text === text && latest.editedAt && (before?.item.type !== "user_message" || before.item.editedAt !== latest.editedAt)) {
+        setAction({ ...previous, error: undefined }); return true; // Durable SSE acknowledgement wins over a lost HTTP response.
+      }
+      const conflict = error instanceof HttpError && error.status === 409;
+      if (conflict) await this.loadItems(nodeId, true);
+      if (generation !== this.generation) return false;
+      const message = conflict ? "已送达，无法修改" : errorText(error);
+      setAction({ ...previous, error: message });
+      // The row can leave the dock during this request; keep the conflict visible at the dock level.
+      if (conflict) this.update({ queues: { ...this.state.queues, [nodeId]: { ...this.state.queues[nodeId], pending: this.state.queues[nodeId]?.pending ?? false, error: message } } });
+      return false;
     }
   }
 

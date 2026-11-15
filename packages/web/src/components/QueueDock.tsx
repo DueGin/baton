@@ -1,8 +1,9 @@
-import { useId, useRef, useState, type PointerEvent } from "react";
+import { useEffect, useId, useRef, useState, type PointerEvent } from "react";
 import { clock } from "../lib/derive.js";
 import { messageActionKey, queueDropOrder, queueDropSlot, queueMoveOrder, type ConversationEntry, type MessageAction, type MessageActionState } from "../lib/conversation.js";
+import { QueueMessageEditor } from "./QueueMessageEditor.js";
 import { Icon } from "./common.js";
-import { DeliveryIcon, MessageActionIcons } from "./MessageActions.js";
+import { DeliveryIcon, EditedMarker, MessageActionIcons } from "./MessageActions.js";
 
 interface Props {
   entries: ConversationEntry[];
@@ -10,15 +11,18 @@ interface Props {
   pending?: boolean;
   error?: string;
   reorder: (order: number[]) => void;
-  act: (itemSeq: number, action: MessageAction) => void;
+  act: (itemSeq: number, action: MessageAction) => Promise<void> | void;
+  edit: (itemSeq: number, text: string) => Promise<boolean>;
 }
 interface Drag { seq: number; pointer: number; y: number; slot: number; moved: boolean }
-export function QueueDock({ entries, actions, pending = false, error, reorder, act }: Props) {
+export function QueueDock({ entries, actions, pending = false, error, reorder, act, edit }: Props) {
   const [open, setOpen] = useState(true); const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [editing, setEditing] = useState<number | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null); const dragging = useRef<Drag | null>(null);
   const list = useRef<HTMLDivElement>(null); const id = useId();
+  useEffect(() => { if (editing !== null && !entries.some(({ row }) => row.seq === editing)) setEditing(null); }, [entries, editing]);
   const order = entries.map(entry => entry.row.seq);
-  const locked = pending || entries.some(({ row, outgoing }) => row.seq <= 0 || outgoing?.state === "sending" || Boolean(actions[messageActionKey(row.nodeId, row.seq)]?.pending));
+  const locked = editing !== null || pending || entries.some(({ row, outgoing }) => row.seq <= 0 || outgoing?.state === "sending" || Boolean(actions[messageActionKey(row.nodeId, row.seq)]?.pending));
   const change = (next: number[]) => { if (!locked && next.some((seq, index) => order[index] !== seq)) reorder(next); };
   const endDrag = (event: PointerEvent<HTMLButtonElement>, canceled = false) => {
     const value = dragging.current;
@@ -46,8 +50,9 @@ export function QueueDock({ entries, actions, pending = false, error, reorder, a
           const bounds = [...container.querySelectorAll<HTMLElement>("[data-queue-seq]")].map(card => card.getBoundingClientRect());
           const value = { ...current, moved: current.moved || Math.abs(event.clientY - current.y) > 4, slot: queueDropSlot(event.clientY, bounds) }; dragging.current = value; setDrag(value);
         }} onPointerUp={event => endDrag(event)} onPointerCancel={event => endDrag(event, true)} onLostPointerCapture={() => { dragging.current = null; setDrag(null); }}><Icon name="grip" size={15} /></button><div className="queue-step-controls"><button type="button" className="icon-button" aria-label={`上移第 ${index + 1} 条排队消息`} title="上移" disabled={locked || index === 0} onClick={() => change(queueMoveOrder(order, row.seq, -1))}><Icon name="up" size={12} /></button><button type="button" className="icon-button" aria-label={`下移第 ${index + 1} 条排队消息`} title="下移" disabled={locked || index === entries.length - 1} onClick={() => change(queueMoveOrder(order, row.seq, 1))}><Icon name="down" size={12} /></button></div></div>
-        <div className="queue-card-main"><button type="button" className={`queue-card-text${isExpanded ? " expanded" : ""}`} aria-label={isExpanded ? "收起消息全文" : "展开消息全文"} aria-expanded={isExpanded} onClick={() => setExpanded(previous => { const next = new Set(previous); if (next.has(row.seq)) next.delete(row.seq); else next.add(row.seq); return next; })}>{row.item.text}</button><div className="queue-card-meta"><span className="queue-position">{index + 1}</span><DeliveryIcon delivery="queued" state={outgoing?.state} /><time dateTime={row.ts}>{clock(row.ts)}</time>{action?.steerUnsupported && <span className="queue-unsupported" role="status">该 agent 不支持引导</span>}{action?.error && <span className="error-text" role="alert">{action.error}</span>}</div></div>
-        <MessageActionIcons delivery="queued" state={action} disabled={pending || Boolean(drag?.moved) || row.seq <= 0 || outgoing?.state === "sending"} act={value => act(row.seq, value)} />
+        <div className="queue-card-main">{editing === row.seq ? <QueueMessageEditor text={row.item.text} busy={Boolean(action?.pending)} error={action?.error} save={text => edit(row.seq, text)} cancel={() => setEditing(null)} remove={async () => { await act(row.seq, "retract"); }} /> : <button type="button" className={`queue-card-text${isExpanded ? " expanded" : ""}`} aria-label={isExpanded ? "收起消息全文" : "展开消息全文"} aria-expanded={isExpanded} onClick={() => setExpanded(previous => { const next = new Set(previous); if (next.has(row.seq)) next.delete(row.seq); else next.add(row.seq); return next; })}>{row.item.text}</button>}<div className="queue-card-meta"><span className="queue-position">{index + 1}</span><DeliveryIcon delivery="queued" state={outgoing?.state} /><time dateTime={row.ts}>{clock(row.ts)}</time><EditedMarker at={row.item.editedAt} />{action?.steerUnsupported && <span className="queue-unsupported" role="status">该 agent 不支持引导</span>}{action?.error && editing !== row.seq && <span className="error-text" role="alert">{action.error}</span>}</div></div>
+        {editing !== row.seq && <MessageActionIcons delivery="queued" state={action} disabled={editing !== null || pending || Boolean(drag?.moved) || row.seq <= 0 || outgoing?.state === "sending"} act={value => { if (value === "edit") setEditing(row.seq); else void act(row.seq, value); }} />}
+
       </div>;
     })}</div>}
   </section>;

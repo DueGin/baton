@@ -7,7 +7,7 @@ import type { ProjectRecord, ProjectSummary, CreateProjectRequest, PatchProjectR
 import { demoDirs, demoPath, initialDemoProjects } from "./projects.js";
 import { liveProjectSummaries, pathBasename } from "../lib/projects.js";
 import { richConversation } from "./conversation.js";
-import type { SendMode, DeliverMessageRequest, ReorderQueueRequest, ReorderQueueResponse } from "@baton/protocol";
+import type { SendMode, DeliverMessageRequest, EditMessageRequest, ReorderQueueRequest, ReorderQueueResponse } from "@baton/protocol";
 import { HttpError } from "../api.js";
 import type { BatonClient, TeamPresetResult } from "../api.js";
 import { summarize, terminal } from "../lib/derive.js";
@@ -96,6 +96,11 @@ export class DemoClient implements BatonClient {
     if (!data) throw new Error("节点不存在"); return data;
   }
   private emit(data: DemoRun, event: RunEvent): void {
+    if (event.type === "item") {
+      const { nodeId, itemSeq } = event;
+      const previous = data.log.findLast(row => row.type === "item" && row.nodeId === nodeId && row.itemSeq === itemSeq);
+      if (previous?.type === "item") event = { ...event, itemTs: previous.itemTs };
+    }
     const envelope = { ...event, runId: data.snapshot.run.id, seq: data.snapshot.lastSeq + 1, ts: new Date(this.now()).toISOString() } as RunEventEnvelope;
     data.snapshot = applyEvent(data.snapshot, envelope); data.log.push(envelope);
     this.listeners.forEach(listener => listener(envelope));
@@ -110,7 +115,7 @@ export class DemoClient implements BatonClient {
   }
   private append(data: DemoRun, nodeId: string, item: TimelineItem): number {
     const seq = this.nextItemSeq(data, nodeId);
-    this.emit(data, { type: "item", nodeId, itemSeq: seq, turnId: item.type === "user_message" && item.delivery === "queued" ? undefined : data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running")?.id, ts: new Date(this.now()).toISOString(), item });
+    this.emit(data, { type: "item", nodeId, itemSeq: seq, turnId: item.type === "user_message" && item.delivery === "queued" ? undefined : data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running")?.id, itemTs: new Date(this.now()).toISOString(), item });
     return seq;
   }
   private nextItemSeq(data: DemoRun, nodeId: string, count = 1): number {
@@ -368,7 +373,7 @@ export class DemoClient implements BatonClient {
   async items(nodeId: string, after = 0): Promise<GetItemsResponse> {
     this.advance(); const data = this.forNode(nodeId);
     const rows = new Map<number, GetItemsResponse["items"][number]>();
-    for (const event of data.log) if (event.type === "item" && event.nodeId === nodeId) rows.set(event.itemSeq, { seq: event.itemSeq, nodeId, ts: event.ts, item: event.item, turnId: event.turnId });
+    for (const event of data.log) if (event.type === "item" && event.nodeId === nodeId) rows.set(event.itemSeq, { seq: event.itemSeq, nodeId, ts: event.itemTs, item: event.item, turnId: event.turnId });
     const items = [...rows.values()].filter(row => row.seq > after).sort((a, b) => a.seq - b.seq);
     return structuredClone({ items, lastSeq: items.at(-1)?.seq ?? after });
   }
@@ -403,7 +408,7 @@ export class DemoClient implements BatonClient {
     if (delivery === "turn") this.startReply(data, nodeId, row.item.text);
     const turnId = data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running")?.id;
     const { queuePosition: _position, ...item } = row.item;
-    this.emit(data, { type: "item", nodeId, itemSeq, turnId, ts: new Date(this.now()).toISOString(), item: { ...item, delivery, ...(interrupted ? { interrupted: true } : {}), ...(mode === "steer" ? { escalated: true } : {}) } });
+    this.emit(data, { type: "item", nodeId, itemSeq, turnId, itemTs: row.itemTs, item: { ...item, delivery, ...(interrupted ? { interrupted: true } : {}), ...(mode === "steer" ? { escalated: true } : {}) } });
     return { accepted: true, delivery, itemSeq };
   }
   async retract(nodeId: string, itemSeq: number): Promise<void> {
@@ -412,7 +417,15 @@ export class DemoClient implements BatonClient {
     if (row?.type !== "item" || row.item.type !== "user_message") throw new HttpError(404, "消息不存在");
     if (row.item.delivery !== "queued") throw new HttpError(409, "只有排队消息可以撤回");
     const { queuePosition: _position, ...item } = row.item;
-    this.emit(data, { type: "item", nodeId, itemSeq, ts: new Date(this.now()).toISOString(), item: { ...item, delivery: "retracted" } });
+    this.emit(data, { type: "item", nodeId, itemSeq, itemTs: row.itemTs, item: { ...item, delivery: "retracted" } });
+  }
+  async edit(nodeId: string, itemSeq: number, request: EditMessageRequest): Promise<void> {
+    if (!request.text.trim()) throw new HttpError(400, "消息不能为空");
+    this.advance(); const data = this.forNode(nodeId);
+    const row = data.log.findLast(event => event.type === "item" && event.nodeId === nodeId && event.itemSeq === itemSeq);
+    if (row?.type !== "item" || row.item.type !== "user_message") throw new HttpError(404, "消息不存在");
+    if (row.item.delivery !== "queued" || ["canceled", "replaced"].includes(data.snapshot.nodes.find(node => node.id === nodeId)!.status)) throw new HttpError(409, "已送达，无法修改");
+    this.emit(data, { type: "item", nodeId, itemSeq, itemTs: row.itemTs, item: { ...row.item, text: request.text, editedAt: new Date(this.now()).toISOString() } });
   }
   async reorderQueue(nodeId: string, request: ReorderQueueRequest): Promise<ReorderQueueResponse> {
     this.advance(); const data = this.forNode(nodeId); const queued = this.queuedMessages(data, nodeId);
@@ -420,7 +433,7 @@ export class DemoClient implements BatonClient {
     if (order.length !== queued.length || new Set(order).size !== order.length || order.some(seq => !queued.some(row => row.itemSeq === seq))) throw new HttpError(409, "队列已变化，请重新拉取");
     order.forEach((seq, index) => {
       const row = queued.find(row => row.itemSeq === seq)!;
-      if (row.item.type === "user_message") this.emit(data, { type: "item", nodeId, itemSeq: seq, ts: new Date(this.now()).toISOString(), item: { ...row.item, queuePosition: index + 1 } });
+      if (row.item.type === "user_message") this.emit(data, { type: "item", nodeId, itemSeq: seq, itemTs: row.itemTs, item: { ...row.item, queuePosition: index + 1 } });
     });
     return { order: [...order] };
   }
@@ -447,7 +460,7 @@ export class DemoClient implements BatonClient {
     this.emit(data, { type: "run.updated", patch: { status: "active", endedAt: undefined, updatedAt: ts } });
     const first = this.nextItemSeq(data, nodeId, 3);
     const schedule = (seconds: number, event: RunEvent) => data.remaining.push({ ...event, runId: data.snapshot.run.id, seq: 0, ts: new Date(this.now() + seconds * 1000).toISOString() });
-    const row = (seconds: number, itemSeq: number, item: TimelineItem) => schedule(seconds, { type: "item", nodeId, itemSeq, turnId, ts, item });
+    const row = (seconds: number, itemSeq: number, item: TimelineItem) => schedule(seconds, { type: "item", nodeId, itemSeq, turnId, itemTs: new Date(this.now() + seconds * 1000).toISOString(), item });
     row(1, first, { type: "reasoning", text: "先确认补充信息对现有计划的影响。" });
     row(3, first, { type: "reasoning", text: "先确认补充信息对现有计划的影响。\n检查当前任务、验收条件和已交付结果，再调整实现。" });
     schedule(4, { type: "node.updated", nodeId, patch: { activity: "思考中…" } });
@@ -475,7 +488,7 @@ export class DemoClient implements BatonClient {
       const turnId = data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running")?.id;
       for (const [index, row] of queued.entries()) if (row.item.type === "user_message") {
         const { queuePosition: _position, ...item } = row.item;
-        this.emit(data, { type: "item", nodeId, itemSeq: row.itemSeq, turnId, ts: new Date(this.now()).toISOString(), item: { ...item, delivery: "turn", ...(queued.length > 1 ? { deliveryOrder: index + 1 } : {}) } });
+        this.emit(data, { type: "item", nodeId, itemSeq: row.itemSeq, turnId, itemTs: row.itemTs, item: { ...item, delivery: "turn", ...(queued.length > 1 ? { deliveryOrder: index + 1 } : {}) } });
       }
     }
   }
@@ -662,12 +675,15 @@ export class DemoClient implements BatonClient {
       const envelope = { ...event, runId: snapshot.run.id, seq: data.snapshot.lastSeq + 1, ts: at(-secondsAgo * 1000) } as RunEventEnvelope;
       data.snapshot = applyEvent(data.snapshot, envelope); data.log.push(envelope);
     };
-    history(170, { type: "item", nodeId: root, itemSeq: 1, ts: at(-170_000), item: { type: "user_message", text: "请展示完整 Markdown、Mermaid，以及运行中继续发送消息的体验。", delivery: "turn" } });
-    history(140, { type: "item", nodeId: root, itemSeq: 2, ts: at(-140_000), item: { type: "assistant_message", text: richConversation } });
+    history(170, { type: "item", nodeId: root, itemSeq: 1, itemTs: at(-170_000), item: { type: "user_message", text: "请展示完整 Markdown、Mermaid，以及运行中继续发送消息的体验。", delivery: "turn" } });
+    history(140, { type: "item", nodeId: root, itemSeq: 2, itemTs: at(-140_000), item: { type: "assistant_message", text: richConversation } });
     for (const node of snapshot.nodes) {
       const turnId = `${node.id}:quiet`;
       history(100, { type: "turn.started", turn: { id: turnId, nodeId: node.id, runId: snapshot.run.id, trigger: "user", status: "running", startedAt: at(-100_000) } });
-      history(65, { type: "item", nodeId: node.id, itemSeq: node.id === root ? 3 : 1, turnId, ts: at(-65_000), item: { type: "reasoning", text: "正在梳理复杂边界。此 demo 故意保持较长静默，仍会显示本轮计时与无新输出时长。\n默认发送会排队；Claude 可将消息改为引导，pi 不支持引导。尝试引导后可立即发送，中断本轮。" } });
+    }
+    for (const node of snapshot.nodes) {
+      const turnId = `${node.id}:quiet`;
+      history(65, { type: "item", nodeId: node.id, itemSeq: node.id === root ? 3 : 1, turnId, itemTs: at(-65_000), item: { type: "reasoning", text: "正在梳理复杂边界。此 demo 故意保持较长静默，仍会显示本轮计时与无新输出时长。\n默认发送会排队；Claude 可将消息改为引导，pi 不支持引导。尝试引导后可立即发送，中断本轮。" } });
       data.remaining.push({ type: "node.updated", nodeId: node.id, patch: { status: "idle", activity: "本轮完成" }, runId: snapshot.run.id, seq: 0, ts: at(45_000) });
       data.remaining.push({ type: "turn.updated", turnId, patch: { status: "completed", endedAt: at(45_000) }, runId: snapshot.run.id, seq: 0, ts: at(45_000) });
     }

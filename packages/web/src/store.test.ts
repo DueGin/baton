@@ -20,10 +20,12 @@ describe("RunStore and protocol integration", () => {
     const nodeId = before.run.rootNodeId;
     await store.loadItems(nodeId);
     const count = store.getSnapshot().items[nodeId]!.length;
-    const next: RunEventEnvelope = { runId: before.run.id, seq: before.lastSeq + 1, ts: new Date(base + 90000).toISOString(), type: "item", nodeId, itemSeq: 1, item: { type: "user_message", text: "replaced" } };
+    const next: RunEventEnvelope = { runId: before.run.id, seq: before.lastSeq + 1, ts: new Date(base + 90000).toISOString(), itemTs: new Date(base).toISOString(), type: "item", nodeId, itemSeq: 1, item: { type: "user_message", text: "replaced" } };
     store.apply(next);
     expect(store.getSnapshot().items[nodeId]).toHaveLength(count);
     expect(store.getSnapshot().items[nodeId]![0]!.item).toEqual({ type: "user_message", text: "replaced" });
+    expect(store.getSnapshot().items[nodeId]![0]!.ts).toBe(next.itemTs);
+    expect(store.getSnapshot().lastEventAt[nodeId]).toBe(Date.parse(next.ts));
     expect(store.getSnapshot().snapshot).toEqual(applyEvent(before, next));
     const same = store.getSnapshot();
     store.apply(next);
@@ -42,7 +44,7 @@ describe("RunStore and protocol integration", () => {
     const nodeId = snapshot.run.rootNodeId;
     const loading = store.loadItems(nodeId);
     const row = { seq: 1, nodeId, ts: snapshot.run.createdAt, item: { type: "assistant_message" as const, text: "old" } };
-    store.apply({ type: "item", runId: snapshot.run.id, seq: snapshot.lastSeq + 1, itemSeq: 1, ts: row.ts, nodeId, item: { type: "assistant_message", text: "new stream content" } });
+    store.apply({ type: "item", runId: snapshot.run.id, seq: snapshot.lastSeq + 1, itemSeq: 1, ts: row.ts, itemTs: row.ts, nodeId, item: { type: "assistant_message", text: "new stream content" } });
     resolveItems!({ items: [row], lastSeq: 1 });
     await loading;
     expect(store.getSnapshot().items[nodeId]![0]!.item).toEqual({ type: "assistant_message", text: "new stream content" });
@@ -78,7 +80,7 @@ describe("RunStore and protocol integration", () => {
   it("tracks the latest run event including item-only activity and clears it on run change", async () => {
     const client = new DemoClient(() => base); const store = new RunStore(client);
     await store.open("run-idle-gaps"); const snapshot = store.getSnapshot().snapshot!;
-    store.apply({ type: "item", runId: snapshot.run.id, seq: snapshot.lastSeq + 1, ts: new Date(base).toISOString(), nodeId: snapshot.run.rootNodeId, itemSeq: 1, item: { type: "assistant_message", text: "latest activity" } });
+    store.apply({ type: "item", runId: snapshot.run.id, seq: snapshot.lastSeq + 1, ts: new Date(base).toISOString(), itemTs: new Date(base).toISOString(), nodeId: snapshot.run.rootNodeId, itemSeq: 1, item: { type: "assistant_message", text: "latest activity" } });
     expect(store.getSnapshot().snapshot!.lastEventAt).toBe(new Date(base).toISOString());
     const next = await client.run("run-conversation");
     await store.open(next.run.id); expect(store.getSnapshot().snapshot!.lastEventAt).toBe(next.lastEventAt);
@@ -107,7 +109,7 @@ describe("optimistic sending", () => {
     expect(local.state).toBe("sending");
     expect(client.send).toHaveBeenCalledWith(nodeId, "hello", local.clientId, "queue");
     const ts = new Date(base).toISOString();
-    store.apply({ type: "item", runId: before.run.id, seq: before.lastSeq + 1, nodeId, itemSeq: 8, ts, item: { type: "user_message", text: "hello", clientId: local.clientId, delivery: "queued" } });
+    store.apply({ type: "item", runId: before.run.id, seq: before.lastSeq + 1, nodeId, itemSeq: 8, ts, itemTs: ts, item: { type: "user_message", text: "hello", clientId: local.clientId, delivery: "queued" } });
     expect(store.getSnapshot().outgoing[0]!.state).toBe("accepted");
     expect(store.getSnapshot().lastEventAt[nodeId]).toBe(base);
     rejectSend(new Error("response lost")); await sending;
@@ -132,7 +134,7 @@ describe("optimistic sending", () => {
     const snapshot = store.getSnapshot().snapshot!; const nodeId = snapshot.run.rootNodeId;
     const sending = store.sendMessage(nodeId, "start a new turn");
     const clientId = store.getSnapshot().outgoing[0]!.clientId;
-    const event: RunEventEnvelope = { type: "item", runId: snapshot.run.id, seq: snapshot.lastSeq + 1, nodeId, itemSeq: 10, ts: new Date(base).toISOString(), item: { type: "user_message", text: "start a new turn", delivery: "queued", clientId } };
+    const event: RunEventEnvelope = { type: "item", runId: snapshot.run.id, seq: snapshot.lastSeq + 1, nodeId, itemSeq: 10, ts: new Date(base).toISOString(), itemTs: new Date(base).toISOString(), item: { type: "user_message", text: "start a new turn", delivery: "queued", clientId } };
     store.apply(event);
     store.apply({ ...event, seq: event.seq + 1, item: { type: "user_message", text: "start a new turn", delivery: "turn", clientId } });
     accept({ accepted: true, delivery: "turn", itemSeq: 10 }); await sending;
@@ -204,7 +206,7 @@ describe("message actions", () => {
     vi.spyOn(client, "deliver").mockImplementation(() => new Promise(resolve => { finish = resolve; }));
     const action = store.actOnMessage(nodeId, itemSeq, "steer");
     const snapshot = store.getSnapshot().snapshot!;
-    store.apply({ type: "item", nodeId, itemSeq, seq: snapshot.lastSeq + 1, runId: snapshot.run.id, ts: new Date(base).toISOString(), item: { type: "user_message", text: "新的要求", delivery: "turn", interrupted: true } });
+    store.apply({ type: "item", nodeId, itemSeq, seq: snapshot.lastSeq + 1, runId: snapshot.run.id, ts: new Date(base).toISOString(), itemTs: new Date(base).toISOString(), item: { type: "user_message", text: "新的要求", delivery: "turn", interrupted: true } });
     finish!({ accepted: true, delivery: "steered", itemSeq }); await action;
     expect(store.getSnapshot().items[nodeId]!.find(row => row.seq === itemSeq)!.item).toMatchObject({ delivery: "turn", interrupted: true }); store.close();
   });
@@ -214,7 +216,7 @@ describe("message actions", () => {
     vi.spyOn(client, "retract").mockImplementation(() => new Promise((_resolve, failure) => { reject = failure; }));
     const action = store.actOnMessage(nodeId, itemSeq, "retract");
     const snapshot = store.getSnapshot().snapshot!;
-    store.apply({ type: "item", nodeId, itemSeq, seq: snapshot.lastSeq + 1, runId: snapshot.run.id, ts: new Date(base).toISOString(), item: { type: "user_message", text: "新的要求", delivery: "retracted" } });
+    store.apply({ type: "item", nodeId, itemSeq, seq: snapshot.lastSeq + 1, runId: snapshot.run.id, ts: new Date(base).toISOString(), itemTs: new Date(base).toISOString(), item: { type: "user_message", text: "新的要求", delivery: "retracted" } });
     reject!(new Error("response lost")); await action;
     expect(store.getSnapshot().messageActions[key]).toEqual({});
     expect(store.getSnapshot().outgoing.at(-1)?.delivery).toBe("retracted"); store.close();
@@ -270,9 +272,68 @@ describe("queue reordering", () => {
     for (const [index, seq] of latest.entries()) {
       const snapshot = store.getSnapshot().snapshot!;
       const original = store.getSnapshot().items[nodeId]!.find(row => row.seq === seq)!;
-      if (original.item.type === "user_message") store.apply({ type: "item", runId: snapshot.run.id, seq: snapshot.lastSeq + 1, nodeId, itemSeq: seq, ts: new Date(base).toISOString(), item: { ...original.item, queuePosition: index + 1 } });
+      if (original.item.type === "user_message") store.apply({ type: "item", runId: snapshot.run.id, seq: snapshot.lastSeq + 1, nodeId, itemSeq: seq, ts: new Date(base).toISOString(), itemTs: new Date(base).toISOString(), item: { ...original.item, queuePosition: index + 1 } });
     }
     finish!({ order: [...order].reverse() }); await action;
     expect(visible()).toEqual(latest); store.close();
+  });
+});
+
+describe("editing queued messages", () => {
+  async function setup() {
+    const client = new DemoClient(() => base); const store = new RunStore(client);
+    await store.open("run-conversation"); const nodeId = store.getSnapshot().snapshot!.run.rootNodeId;
+    await store.loadItems(nodeId); await store.sendMessage(nodeId, "原始要求");
+    const itemSeq = store.getSnapshot().outgoing.at(-1)!.itemSeq!;
+    return { client, store, nodeId, itemSeq, key: messageActionKey(nodeId, itemSeq) };
+  }
+  it("saves in place, keeps original row time/position, and reconciles edited outgoing text", async () => {
+    const { client, store, nodeId, itemSeq, key } = await setup(); const edit = vi.spyOn(client, "edit");
+    const original = store.getSnapshot().items[nodeId]!.find(row => row.seq === itemSeq)!;
+    expect(await store.editMessage(nodeId, itemSeq, "新的要求\n第二行")).toBe(true);
+    expect(edit).toHaveBeenCalledWith(nodeId, itemSeq, { text: "新的要求\n第二行" });
+    const changed = store.getSnapshot().items[nodeId]!.find(row => row.seq === itemSeq)!;
+    expect(changed.ts).toBe(original.ts); expect(changed.item).toMatchObject({ text: "新的要求\n第二行", delivery: "queued", queuePosition: 1, editedAt: new Date(base).toISOString() });
+    expect(store.getSnapshot().outgoing.at(-1)).toMatchObject({ text: "新的要求\n第二行", editedAt: new Date(base).toISOString() });
+    expect(store.getSnapshot().messageActions[key]?.pending).toBeUndefined(); store.close();
+  });
+  it("rejects empty drafts locally and leaves failed saves retryable", async () => {
+    const { client, store, nodeId, itemSeq, key } = await setup(); const edit = vi.spyOn(client, "edit").mockRejectedValueOnce(new Error("offline"));
+    expect(await store.editMessage(nodeId, itemSeq, " \n ")).toBe(false); expect(edit).not.toHaveBeenCalled(); expect(store.getSnapshot().messageActions[key]?.error).toBe("消息不能为空");
+    expect(await store.editMessage(nodeId, itemSeq, "新草稿")).toBe(false); expect(store.getSnapshot().messageActions[key]?.error).toBe("offline");
+    expect(store.getSnapshot().outgoing.at(-1)?.text).toBe("原始要求");
+    expect(await store.editMessage(nodeId, itemSeq, "新草稿")).toBe(true); store.close();
+  });
+  it("guards duplicate saves and uses the HTTP fallback when SSE has not arrived", async () => {
+    const { client, store, nodeId, itemSeq, key } = await setup(); let resolve: (() => void) | undefined;
+    const edit = vi.spyOn(client, "edit").mockImplementation(() => new Promise(done => { resolve = done; }));
+    const saving = store.editMessage(nodeId, itemSeq, "新内容"); expect(store.getSnapshot().messageActions[key]?.pending).toBe("edit");
+    expect(await store.editMessage(nodeId, itemSeq, "重复")).toBe(false); expect(edit).toHaveBeenCalledTimes(1);
+    resolve!(); expect(await saving).toBe(true);
+    expect(store.getSnapshot().items[nodeId]!.find(row => row.seq === itemSeq)!.item).toMatchObject({ text: "新内容", delivery: "queued", editedAt: expect.any(String) }); store.close();
+  });
+  it("refreshes a 409 and keeps the conflict visible after the message leaves the dock", async () => {
+    const { client, store, nodeId, itemSeq, key } = await setup();
+    const rows = store.getSnapshot().items[nodeId]!.map(row => row.seq === itemSeq && row.item.type === "user_message" ? { ...row, item: { ...row.item, delivery: "turn" as const } } : row);
+    vi.spyOn(client, "edit").mockRejectedValue(new HttpError(409, "not queued")); const items = vi.spyOn(client, "items").mockResolvedValue({ items: rows, lastSeq: rows.at(-1)!.seq });
+    expect(await store.editMessage(nodeId, itemSeq, "太晚的草稿")).toBe(false); expect(items).toHaveBeenCalledWith(nodeId);
+    expect(store.getSnapshot().messageActions[key]?.error).toBe("已送达，无法修改"); expect(store.getSnapshot().queues[nodeId]?.error).toBe("已送达，无法修改");
+    expect(queuedRows(store.getSnapshot().items[nodeId]!, store.getSnapshot().outgoing, nodeId)).toHaveLength(0); store.close();
+  });
+  it("trusts a durable edit acknowledgement when HTTP is lost and never overwrites a newer replacement", async () => {
+    const { client, store, nodeId, itemSeq, key } = await setup(); let fail: ((error: Error) => void) | undefined;
+    vi.spyOn(client, "edit").mockImplementation(() => new Promise((_resolve, reject) => { fail = reject; }));
+    const saving = store.editMessage(nodeId, itemSeq, "新内容"); const snapshot = store.getSnapshot().snapshot!;
+    store.apply({ type: "item", runId: snapshot.run.id, seq: snapshot.lastSeq + 1, nodeId, itemSeq, itemTs: new Date(base).toISOString(), ts: new Date(base + 5000).toISOString(), item: { type: "user_message", text: "新内容", delivery: "queued", queuePosition: 1, editedAt: new Date(base + 5000).toISOString() } });
+    fail!(new Error("response lost")); expect(await saving).toBe(true); expect(store.getSnapshot().messageActions[key]?.error).toBeUndefined();
+    expect(store.getSnapshot().lastEventAt[nodeId]).toBe(base + 5000); store.close();
+  });
+  it("does not regress an edit when a newer SSE replacement precedes the HTTP response", async () => {
+    const { client, store, nodeId, itemSeq } = await setup(); let resolve: (() => void) | undefined;
+    vi.spyOn(client, "edit").mockImplementation(() => new Promise(done => { resolve = done; }));
+    const saving = store.editMessage(nodeId, itemSeq, "旧草稿"); const snapshot = store.getSnapshot().snapshot!;
+    store.apply({ type: "item", runId: snapshot.run.id, seq: snapshot.lastSeq + 1, nodeId, itemSeq, itemTs: new Date(base).toISOString(), ts: new Date(base + 5000).toISOString(), item: { type: "user_message", text: "另一个标签页的新内容", delivery: "turn", editedAt: new Date(base + 5000).toISOString() } });
+    resolve!(); expect(await saving).toBe(true);
+    expect(store.getSnapshot().items[nodeId]!.find(row => row.seq === itemSeq)!.item).toMatchObject({ text: "另一个标签页的新内容", delivery: "turn" }); store.close();
   });
 });

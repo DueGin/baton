@@ -1130,3 +1130,14 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .message-user_message { margin-left: 31px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-hover); padding: 9px 12px; }
 .message-user_message > .markdown { margin-left: 0; border: 0; border-radius: 0; padding: 0; background: none; }
 .message-user_message > .message-meta { margin-bottom: 6px; }
+
+.queue-message-editor textarea { width: 100%; min-height: 66px; max-height: 180px; resize: vertical; padding: 7px 8px; font: inherit; font-size: 12px; line-height: 1.5; background: var(--surface); }
+.queue-editor-toolbar { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+.queue-editor-actions { display: flex; gap: 2px; margin-left: auto; flex: none; }
+.queue-editor-actions .icon-button { width: 27px; height: 26px; padding: 5px; }
+.queue-editor-actions .icon-button > span { display: inline-flex; }
+.queue-editor-hint { font-size: 9px; color: var(--text-dim); }
+.queue-delete { color: var(--red); }
+.queue-save { color: var(--accent); }
+.queue-edit-error { font-size: 11px; margin: 5px 0; }
+.message-edited { display: inline-flex; align-items: center; gap: 3px; color: var(--text-dim); font-size: 9px; white-space: nowrap; }
