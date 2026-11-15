@@ -271,7 +271,8 @@ export class Kernel {
     const turnId = randomUUID(); rt.turnId = turnId; rt.driverTurnId = undefined; rt.report = undefined; rt.finalText = ""; rt.usage = emptyUsage(); rt.lastItem = undefined;
     this.emit(n.runId, { type: "turn.started", turn: { id: turnId, runId: n.runId, nodeId: id, trigger, delegationId: n.delegationId ?? undefined, status: "running", startedAt: now() } });
     this.patchNode(id, { status: "running", activity: "Thinking…", turns: n.turns + 1, error: undefined, endedAt: undefined });
-    for (const prompt of prompts) if (prompt.humanItem) this.deliverMessage(id, prompt.humanItem, "turn", turnId);
+    let deliveryOrder = 0;
+    for (const prompt of prompts) if (prompt.humanItem) this.deliverMessage(id, prompt.humanItem, "turn", turnId, humans.length >= 2 ? ++deliveryOrder : undefined);
     // Human rows already exist. Only kernel prompts need a new transcript row for this batch.
     const kernelText = prompts.filter((p) => !p.humanItem).map((p) => p.text).join("\n\n");
     if (kernelText) this.addItem(id, { type: "user_message", text: kernelText });
@@ -399,11 +400,11 @@ export class Kernel {
     this.store.appendItem(this.store.node(id).runId, row);
     if (rt.lastItem?.seq === row.seq) rt.lastItem = row;
   }
-  private deliverMessage(id: string, row: ItemRecord, delivery: "turn" | "steered", turnId: string): void {
+  private deliverMessage(id: string, row: ItemRecord, delivery: "turn" | "steered", turnId: string, deliveryOrder?: number): void {
     const rt = this.runtime(id);
     if (row.item.type !== "user_message" || !rt.pendingMessages.delete(row.seq)) return;
-    const { queuePosition: _position, ...item } = row.item;
-    const next = { ...row, turnId, item: { ...item, delivery } };
+    const { queuePosition: _position, deliveryOrder: _order, ...item } = row.item;
+    const next = { ...row, turnId, item: { ...item, delivery, ...(deliveryOrder !== undefined ? { deliveryOrder } : {}) } };
     this.replaceMessage(id, next);
   }
   private abandonMessages(id: string): void {
