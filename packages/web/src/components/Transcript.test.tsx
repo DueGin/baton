@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { Markdown, ToolDetail, TranscriptRow } from "./Transcript.js";
 import { createScenario, replay } from "../demo/scenario.js";
 import { demoBriefPrompt, demoResultsPrompt } from "../demo/prompts.js";
+import { reasoningBlockId, reasoningPreferences } from "../lib/reasoning.js";
 
 describe("safe agent content rendering", () => {
   it("escapes HTML while supporting code, lists and emphasis", () => {
@@ -47,11 +48,24 @@ describe("safe agent content rendering", () => {
     const notice = render('<baton-notice>任务已改派 <img src=x onerror="bad()"></baton-notice>');
     expect(notice).toContain("团队通知"); expect(notice).toContain("baton-notice-card"); expect(notice).not.toContain("<img");
   });
-  it("expands live reasoning, collapses completed reasoning and shows streaming reply carets", () => {
+  it("defaults live reasoning to collapsed, follows the selected preference and shows streaming reply carets", () => {
     const snapshot = replay(createScenario(0), 86000); const node = snapshot.nodes[0]!;
     const row = { seq: 1, nodeId: node.id, ts: snapshot.run.createdAt, item: { type: "reasoning" as const, text: "Thinking **live**" } };
+    expect(renderToStaticMarkup(<TranscriptRow row={row} node={node} streaming />)).not.toContain('open=""');
+    expect(renderToStaticMarkup(<TranscriptRow row={row} node={node} />)).not.toContain('open=""');
+    reasoningPreferences.setPreference("streaming");
     expect(renderToStaticMarkup(<TranscriptRow row={row} node={node} streaming />)).toContain('open=""');
     expect(renderToStaticMarkup(<TranscriptRow row={row} node={node} />)).not.toContain('open=""');
+    reasoningPreferences.setPreference("expanded");
+    expect(renderToStaticMarkup(<TranscriptRow row={row} node={node} />)).toContain('open=""');
+    reasoningPreferences.setPreference("collapsed");
+    const manual = { ...row, seq: 999 };
+    reasoningPreferences.setBlocks([reasoningBlockId(node.id, manual.seq)], true);
+    expect(renderToStaticMarkup(<TranscriptRow row={manual} node={node} />)).toContain('open=""');
+    reasoningPreferences.setBlocks([reasoningBlockId(node.id, manual.seq)], false);
+    reasoningPreferences.setPreference("expanded");
+    expect(renderToStaticMarkup(<TranscriptRow row={manual} node={node} streaming />)).not.toContain('open=""');
+    reasoningPreferences.setPreference("collapsed");
     const reply = renderToStaticMarkup(<TranscriptRow row={{ ...row, item: { type: "assistant_message", text: "Partial reply" } }} node={node} streaming />);
     expect(reply).toContain("streaming-text");
     const failed = renderToStaticMarkup(<TranscriptRow row={{ ...row, item: { type: "user_message", text: "try again" } }} node={node} outgoing={{ nodeId: node.id, clientId: "c", text: "try again", ts: row.ts, state: "failed", error: "offline" }} retry={() => undefined} />);

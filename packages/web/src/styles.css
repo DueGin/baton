@@ -930,3 +930,82 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .timeline-legend { padding-top: 8px; padding-bottom: 8px; }
 .timeline-tool-legend { padding-bottom: 8px; }
 @media (max-width: 680px) { .title-model-fields { grid-template-columns: 1fr; } .timeline-stats { gap: 8px 12px; padding: 7px 14px; } .timeline-stats small { display: none; } .timeline-toolbar .toolbar-actions { gap: 8px; } .timeline-mode > button { padding: 5px 6px; } .run-title-control { min-width: 30px; } .title-regenerate { width: 20px; } }
+
+/* Reasoning preferences share one page-session state across transcript and inspector. */
+.reasoning-toolbar-controls { display: flex; align-items: center; gap: 6px; flex: none; }
+.reasoning-toolbar-controls > label { display: flex; align-items: center; gap: 5px; color: var(--text-dim); font-size: 10px; }
+.reasoning-toolbar-controls select { width: 81px; height: 25px; padding: 2px 4px; font-size: 10px; }
+.reasoning-bulk-menu { position: relative; color: var(--text-dim); font-size: 10px; }
+.reasoning-bulk-menu > summary { cursor: pointer; white-space: nowrap; }
+.reasoning-bulk-menu > div { position: absolute; top: 22px; right: 0; width: 106px; z-index: 25; padding: 4px; border: 1px solid var(--border-strong); background: var(--surface-raised); border-radius: 5px; box-shadow: var(--shadow); }
+.reasoning-bulk-menu button { display: block; width: 100%; text-align: left; padding: 7px; background: transparent; border: 0; font-size: 11px; }
+.reasoning-bulk-menu button:hover { background: var(--surface-hover); }
+.reasoning-settings-control { padding: 4px 0 16px; }
+.reasoning-settings-control > label { display: flex; align-items: center; justify-content: space-between; gap: 14px; font-size: 12px; }
+.reasoning-settings-control select { max-width: 240px; font-size: 12px; }
+.reasoning-settings-control p { font-size: 11px; line-height: 1.7; margin-bottom: 0; }
+
+/* Run-wide process registry sits just above the message composer. */
+.composer-tools { flex: none; display: flex; min-height: 0; margin: 3px 18px 0; max-width: 840px; }
+.composer-tools:has(.background-pill) { min-height: 25px; }
+.background-popover-anchor { position: relative; }
+.background-pill { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text-secondary); border-radius: 5px; padding: 3px 7px; font-size: 10px; line-height: 16px; }
+.background-pill.has-ports, .node-background-badge.has-ports { border-color: color-mix(in srgb, var(--green) 45%, var(--border)); background: var(--green-soft); color: var(--green); }
+.background-pill:hover { border-color: var(--accent); }
+.background-popover { position: absolute; left: 0; bottom: calc(100% + 7px); width: min(510px, calc(100vw - 92px)); max-height: min(470px, 62dvh); z-index: 30; display: flex; flex-direction: column; background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: 9px; box-shadow: var(--shadow); overflow: hidden; }
+.background-popover:focus { outline: none; }
+.background-popover > header { display: flex; gap: 10px; align-items: center; padding: 10px 13px; border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
+.background-popover > header > small { color: var(--text-dim); font-size: 10px; }
+.background-popover > header > button { margin-left: auto; }
+.background-list { overflow: auto; min-height: 0; }
+.background-entry { padding: 12px 14px; border-bottom: 1px solid var(--border); min-width: 0; font-size: 11px; }
+.background-command-row { display: flex; align-items: center; gap: 7px; }
+.background-command-row > code { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px var(--font-mono); }
+.background-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--text-dim); }
+.background-dot.running { background: var(--green); }
+.background-dot.stopping { background: var(--amber); animation: pulse 1.4s infinite; }
+.background-state { flex: none; color: var(--text-dim); font-size: 9px; }
+.background-stopping .background-state { color: var(--amber); }
+.background-ports { display: flex; flex-wrap: wrap; gap: 6px; padding: 7px 0 0 13px; }
+.background-port { color: var(--green); font: 10px var(--font-mono); text-decoration: none; padding: 2px 5px; border-radius: 3px; background: var(--green-soft); }
+.background-port:hover { text-decoration: underline; }
+.background-owner { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); margin-top: 9px; min-width: 0; }
+.background-owner > .agent-mark { width: 17px; height: 17px; font-size: 8px; flex: none; }
+.background-owner > span:first-of-type { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.background-owner small { font-size: 9px; color: var(--text-dim); flex: none; }
+.attribution-badge { color: var(--amber); background: var(--amber-soft); border-radius: 3px; padding: 1px 4px; font-size: 9px; flex: none; }
+.attribution-help { color: var(--text-dim); cursor: help; font-size: 11px; }
+.background-meta { display: flex; flex-wrap: wrap; gap: 5px 12px; color: var(--text-dim); font: 9px var(--font-mono); margin: 7px 0; }
+.background-cwd { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.background-cwd > code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 9px var(--font-mono); color: var(--text-dim); }
+.background-cwd > button { flex: none; font-size: 9px; }
+.background-children { padding: 8px 0 1px; color: var(--text-dim); font-size: 10px; }
+.background-children summary { cursor: pointer; }
+.background-children > div { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; border-left: 1px solid var(--border-strong); padding: 6px 8px; margin-top: 5px; }
+.background-children code { flex: 1; min-width: 50px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
+.background-children small { font-size: 9px; }
+.background-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 9px; }
+.background-actions button { font-size: 10px; }
+.danger-text { color: var(--red); }
+.background-empty { padding: 0 14px; font-size: 11px; }
+.background-exited { padding: 9px 0; }
+.background-exited .background-entry { opacity: .8; }
+.background-confirm-command { display: block; padding: 12px; background: var(--bg); font-size: 12px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.background-list.is-compact .background-entry { padding: 11px 0; }
+.background-list.is-compact .background-owner { flex-wrap: wrap; }
+.background-list.is-compact .background-owner > span:first-of-type { max-width: 180px; }
+.background-list.is-compact .background-command-row { flex-wrap: wrap; }
+.background-list.is-compact .background-empty { padding: 0; }
+.run-background-count { display: inline-flex; align-items: center; gap: 3px; color: var(--green); }
+.node-background-badge { border: 1px solid var(--border); border-radius: 3px; font-size: 9px; color: var(--text-dim); padding: 1px 4px; }
+@media (max-width: 900px) { .reasoning-toolbar-controls > label > span { display: none; } .conversation-toolbar-actions { gap: 7px; } }
+@media (max-width: 680px) { .composer-tools { margin-left: 10px; margin-right: 10px; } .reasoning-toolbar-controls select { width: 64px; } .reasoning-settings-control > label { flex-wrap: wrap; } }
+
+/* Run details and inspector share a persisted width and one left-edge handle. */
+.resizable-right-panel { position: relative; display: flex; flex: 0 0 var(--right-panel-width); width: var(--right-panel-width); min-width: 0; min-height: 0; z-index: 5; }
+.resizable-right-panel > .run-details, .resizable-right-panel > .inspector { position: relative; inset: auto; flex: 1; width: 100%; min-width: 0; max-width: none; box-shadow: none; }
+.right-panel-resizer { position: absolute; left: -3px; top: 0; bottom: 0; width: 7px; cursor: col-resize; touch-action: none; z-index: 10; }
+.right-panel-resizer:hover, .right-panel-resizer:focus-visible { outline: none; background: color-mix(in srgb, var(--accent) 30%, transparent); }
+@media (max-width: 1200px) { .resizable-right-panel { position: absolute; right: 0; top: 0; bottom: 0; box-shadow: -12px 0 40px #0002; } }
+.background-exited > summary { margin: 0 14px 4px; font-size: 11px; color: var(--text-dim); cursor: pointer; }
+.background-list.is-compact .background-exited > summary { margin-left: 0; }

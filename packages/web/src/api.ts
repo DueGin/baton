@@ -3,6 +3,7 @@ import type {
   PermissionDecision, RunEventEnvelope, RunSnapshot, RunSummary, AddMemberRequest, ReplaceMemberRequest,
   ReassignRequest, TeamPreset, TeamPresetInput, SaveTeamPresetRequest, ApproveTeamProposalRequest, RejectTeamProposalRequest,
   SettingsResponse, UpdateSettingsRequest, TestTitleModelRequest, TestTitleModelResponse,
+  ListBackgroundResponse, StopBackgroundRequest, DismissBackgroundRequest, CancelRunRequest,
   SendMessageResponse, InboxItem, AnswerQuestionRequest, ResolveEscalationRequest, PermissionRule, CreatePermissionRuleRequest,
 } from "@baton/protocol";
 
@@ -20,7 +21,10 @@ export interface BatonClient {
   settings(): Promise<SettingsResponse>;
   updateSettings(request: UpdateSettingsRequest): Promise<SettingsResponse>;
   testTitleModel(request: TestTitleModelRequest): Promise<TestTitleModelResponse>;
-  cancelRun(id: string): Promise<void>;
+  cancelRun(id: string, request?: CancelRunRequest): Promise<void>;
+  background(status?: "running" | "all"): Promise<ListBackgroundResponse>;
+  stopBackground(id: string, request?: StopBackgroundRequest): Promise<void>;
+  dismissBackground(id: string, request: DismissBackgroundRequest): Promise<void>;
   items(nodeId: string, after?: number): Promise<GetItemsResponse>;
   send(nodeId: string, text: string, clientId?: string): Promise<SendMessageResponse>;
   cancelNode(nodeId: string): Promise<void>;
@@ -86,7 +90,10 @@ export class ApiClient implements BatonClient {
   settings = () => this.request<SettingsResponse>("/settings");
   updateSettings = (body: UpdateSettingsRequest) => this.request<SettingsResponse>("/settings", "PUT", body);
   testTitleModel = (body: TestTitleModelRequest) => this.request<TestTitleModelResponse>("/settings/title-model/test", "POST", body);
-  cancelRun = (id: string) => this.request<void>(`/runs/${encodeURIComponent(id)}/cancel`, "POST", {});
+  cancelRun = (id: string, body: CancelRunRequest = {}) => this.request<void>(`/runs/${encodeURIComponent(id)}/cancel`, "POST", body);
+  background = (status: "running" | "all" = "running") => this.request<ListBackgroundResponse>(`/background?status=${status}`);
+  stopBackground = (id: string, body: StopBackgroundRequest = {}) => this.request<void>(`/background/${encodeURIComponent(id)}/stop`, "POST", body);
+  dismissBackground = (id: string, body: DismissBackgroundRequest) => this.request<void>(`/background/${encodeURIComponent(id)}/dismiss`, "POST", body);
   items = (nodeId: string, after = 0) => this.request<GetItemsResponse>(`/nodes/${encodeURIComponent(nodeId)}/items?after=${after}`);
   send = (nodeId: string, text: string, clientId?: string) => this.request<SendMessageResponse>(`/nodes/${encodeURIComponent(nodeId)}/messages`, "POST", { text, ...(clientId ? { clientId } : {}) });
   cancelNode = (id: string) => this.request<void>(`/nodes/${encodeURIComponent(id)}/cancel`, "POST", {});

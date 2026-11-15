@@ -20,7 +20,7 @@ export class NotificationTracker {
   observeRuns(runs: RunSummary[], hidden: boolean): void {
     for (const run of runs) {
       const done = (run.status === "idle" || run.status === "completed") && run.activeNodeCount === 0 && !this.blockers.has(run.id);
-      if (hidden && this.runs.get(run.id) === false && done) this.queue({ runId: run.id, title: `${run.title} · Run 完成`, body: "根节点已空闲，所有节点已结束当前工作。", completion: true });
+      if (hidden && this.runs.get(run.id) === false && done) this.queue({ runId: run.id, title: `${run.title} · Run 完成`, body: `根节点已空闲，所有节点已结束当前工作。${(run.backgroundCount ?? 0) > 0 ? `仍有 ${run.backgroundCount} 个后台进程在运行。` : ""}`, completion: true });
       this.runs.set(run.id, done);
     }
   }
