@@ -216,6 +216,11 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
           json(response, 202, result); return;
         }
         if (method === "DELETE" && !message[3]) { kernel.retractMessage(id, seq); json(response, 200, { accepted: true }); return; }
+        if (method === "PATCH" && !message[3]) {
+          const input = record(await body(request));
+          kernel.editMessage(id, seq, input.text as string);
+          json(response, 200, { accepted: true }); return;
+        }
       }
       const node = /^\/api\/nodes\/([^/]+)\/(items|messages|cancel|queue)$/.exec(path);
       if (node) {

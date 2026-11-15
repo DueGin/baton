@@ -640,3 +640,100 @@ describe("human queue order", () => {
     expect(session.prompts[1]).toBe("first\n\nsecond");
   });
 });
+
+describe("editing queued human messages", () => {
+  it("replaces text in place and drains the edited text with its position and metadata intact", async () => {
+    const hold = gate();
+    const { server, driver, root, rows, run } = await setup({ script: async (c) => { if (c.turn === 1) await hold.wait(c); } });
+    const first = await server.kernel.message(root, "original first", "edit-client");
+    const second = await server.kernel.message(root, "second");
+    server.kernel.reorderQueue(root, [second.itemSeq, first.itemSeq]);
+    const before = rows().find((row) => row.seq === first.itemSeq)!;
+    const response = await fetch(`${server.url}/api/nodes/${root}/messages/${first.itemSeq}`, {
+      method: "PATCH", headers: { authorization: `Bearer ${server.token}`, "content-type": "application/json" }, body: JSON.stringify({ text: "  edited first  " }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ accepted: true });
+    const edited = rows().find((row) => row.seq === first.itemSeq)!;
+    expect(edited).toEqual({ ...before, item: { ...before.item, text: "  edited first  ", editedAt: expect.any(String) } });
+    if (edited.item.type !== "user_message") throw new Error("Expected user message");
+    expect(Number.isNaN(Date.parse(edited.item.editedAt!))).toBe(false);
+    expect(rows().filter((row) => row.item.type === "user_message")).toHaveLength(3);
+    expect(server.store.events(run.run.id).findLast((event) => event.type === "item" && event.itemSeq === first.itemSeq)).toMatchObject({ item: { text: "  edited first  ", editedAt: edited.item.editedAt } });
+    hold.release();
+    await until(() => server.store.node(root).turns === 2 && server.store.node(root).status === "idle");
+    expect(driver.sessions[0]!.prompts[1]).toBe("second\n\n  edited first  ");
+    expect(rows().find((row) => row.seq === first.itemSeq)).toMatchObject({
+      seq: before.seq, ts: before.ts, turnId: server.store.snapshot(run.run.id).turns[1]!.id,
+      item: { text: "  edited first  ", delivery: "turn", deliveryOrder: 2, clientId: "edit-client", editedAt: edited.item.editedAt },
+    });
+  });
+
+  it.each(["steered", "delivered", "retracted", "kernel", "missing"] as const)("rejects editing a %s message with 409", async (state) => {
+    const hold = gate();
+    const { server, root, rows } = await setup({ script: (c) => hold.wait(c) });
+    const queued = await server.kernel.message(root, "original");
+    let seq = queued.itemSeq;
+    if (state === "steered") await server.kernel.deliverHumanMessage(root, seq, "steer");
+    if (state === "delivered") await server.kernel.deliverHumanMessage(root, seq, "interrupt");
+    if (state === "retracted") server.kernel.retractMessage(root, seq);
+    if (state === "kernel") seq = 1;
+    if (state === "missing") seq = 999;
+    const before = rows();
+    const response = await fetch(`${server.url}/api/nodes/${root}/messages/${seq}`, {
+      method: "PATCH", headers: { authorization: `Bearer ${server.token}`, "content-type": "application/json" }, body: JSON.stringify({ text: "unwanted edit" }),
+    });
+    expect(response.status).toBe(409);
+    expect(rows().filter((row) => row.item.type === "user_message")).toEqual(before.filter((row) => row.item.type === "user_message"));
+  });
+
+  it("rejects empty and invalid text with 400 without changing the queued row", async () => {
+    const hold = gate();
+    const { server, root, rows } = await setup({ script: (c) => hold.wait(c) });
+    const queued = await server.kernel.message(root, "original"), before = rows();
+    for (const text of ["", " \n\t ", null, 123, undefined]) {
+      const response = await fetch(`${server.url}/api/nodes/${root}/messages/${queued.itemSeq}`, {
+        method: "PATCH", headers: { authorization: `Bearer ${server.token}`, "content-type": "application/json" }, body: JSON.stringify({ text }),
+      });
+      expect(response.status).toBe(400);
+    }
+    expect(rows()).toEqual(before);
+  });
+
+  it("rejects an edit after the drain reserved the row but before starting a turn", async () => {
+    const hold = gate();
+    const { server, driver, root, run, rows } = await setup({ script: async (c) => { if (c.turn === 1) await hold.wait(c); } });
+    const queued = await server.kernel.message(root, "reserved original");
+    let checked = false, failure: unknown, observedDelivery: unknown;
+    const unsubscribe = server.store.subscribe((event) => {
+      if (event.runId === run.run.id && event.type === "turn.updated" && event.patch.status === "completed" && !checked) {
+        checked = true;
+        queueMicrotask(() => {
+          observedDelivery = rows().find((row) => row.seq === queued.itemSeq)?.item;
+          try { server.kernel.editMessage(root, queued.itemSeq, "too late"); }
+          catch (error) { failure = error; }
+        });
+      }
+    });
+    hold.release();
+    await until(() => server.store.node(root).turns === 2 && server.store.node(root).status === "idle");
+    unsubscribe();
+    expect(observedDelivery).toMatchObject({ delivery: "queued" });
+    expect(failure).toMatchObject({ status: 409, message: "Message delivery is already in progress" });
+    expect(driver.sessions[0]!.prompts[1]).toBe("reserved original");
+    expect(rows().find((row) => row.seq === queued.itemSeq)?.item).not.toHaveProperty("editedAt");
+  });
+
+  it("rejects editing a queued message reserved by a pending steer", async () => {
+    const hold = gate();
+    const { server, driver, root, rows } = await setup({ script: (c) => hold.wait(c) });
+    const queued = await server.kernel.message(root, "being steered");
+    let resolveSteer: () => void = () => {};
+    driver.sessions[0]!.steer = () => new Promise((resolve) => { resolveSteer = () => resolve("unsupported"); });
+    const sending = server.kernel.deliverHumanMessage(root, queued.itemSeq, "steer");
+    expect(() => server.kernel.editMessage(root, queued.itemSeq, "racing edit")).toThrow("already in progress");
+    resolveSteer(); await sending;
+    server.kernel.editMessage(root, queued.itemSeq, "after refusal");
+    expect(rows().find((row) => row.seq === queued.itemSeq)?.item).toMatchObject({ delivery: "queued", text: "after refusal", editedAt: expect.any(String) });
+  });
+});

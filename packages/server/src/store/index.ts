@@ -55,7 +55,7 @@ export class Store {
         case "background": upsert("background_processes", event.process); break;
         case "item": {
           const localSeq = event.itemSeq;
-          const item: ItemRecord = { nodeId: event.nodeId, seq: localSeq, turnId: event.turnId, ts: event.ts, item: event.item };
+          const item: ItemRecord = { nodeId: event.nodeId, seq: localSeq, turnId: event.turnId, ts: event.itemTs, item: event.item };
           this.db.prepare("INSERT INTO items VALUES (?, ?, ?, ?) ON CONFLICT(node_id, seq) DO UPDATE SET data=excluded.data").run(event.nodeId, localSeq, runId, JSON.stringify(item));
           break;
         }
@@ -66,8 +66,8 @@ export class Store {
     return event;
   }
   appendItem(runId: string, item: ItemRecord): RunEventEnvelope {
-    const { seq, ...rest } = item;
-    return this.append(runId, { type: "item", ...rest, itemSeq: seq });
+    const { seq, ts, ...rest } = item;
+    return this.append(runId, { type: "item", ...rest, itemSeq: seq, itemTs: ts });
   }
   events(runId: string, after = 0): RunEventEnvelope[] {
     return this.db.prepare("SELECT data FROM events WHERE run_id=? AND seq>? ORDER BY seq").all(runId, after).map((r) => JSON.parse(String(r.data)) as RunEventEnvelope);
