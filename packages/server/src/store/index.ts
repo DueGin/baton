@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { applyEvent, type BackgroundProcess, type ItemRecord, type RunEvent, type RunEventEnvelope, type RunSnapshot, type RunSummary, type TeamPreset, type PermissionRule, type InboxItem, type QuestionRecord, type EscalationRecord } from "@baton/protocol";
+import { applyEvent, type ProjectRecord, type BackgroundProcess, type ItemRecord, type RunEvent, type RunEventEnvelope, type RunSnapshot, type RunSummary, type TeamPreset, type PermissionRule, type InboxItem, type QuestionRecord, type EscalationRecord } from "@baton/protocol";
 
 const tables = ["nodes", "delegations", "turns", "tool_spans", "permissions", "questions", "escalations", "background_processes"] as const;
 export class Store {
@@ -8,6 +8,7 @@ export class Store {
   constructor(path: string) {
     this.db = new DatabaseSync(path);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
+      CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS permission_rules (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS delegation_round_limits (id TEXT PRIMARY KEY, extra INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS notices (id TEXT PRIMARY KEY, node_id TEXT NOT NULL, run_id TEXT NOT NULL, text TEXT NOT NULL);
@@ -82,8 +83,9 @@ export class Store {
     const row = this.db.prepare("SELECT data FROM delegations WHERE id=?").get(id);
     if (!row) throw new Error(`Delegation not found: ${id}`); return JSON.parse(String(row.data)) as RunSnapshot["delegations"][number];
   }
-  list(): RunSummary[] {
-    return this.db.prepare("SELECT id FROM runs ORDER BY rowid DESC").all().map((r) => {
+  list(projectId?: string): RunSummary[] {
+    const rows = projectId === undefined ? this.db.prepare("SELECT id FROM runs ORDER BY rowid DESC").all() : this.db.prepare("SELECT id FROM runs WHERE json_extract(data, '$.projectId')=? ORDER BY rowid DESC").all(projectId);
+    return rows.map((r) => {
       const s = this.snapshot(String(r.id));
       return { ...s.run, ...(s.lastEventAt ? { lastEventAt: s.lastEventAt } : {}), rootAgentId: s.nodes.find((n) => n.id === s.run.rootNodeId)?.agentId ?? "", agents: [...new Set(s.nodes.map((n) => n.agentId))], nodeCount: s.nodes.length, activeNodeCount: s.nodes.filter((n) => ["starting", "running", "waiting_permission"].includes(n.status)).length, pendingPermissions: s.permissions.filter((p) => p.status === "pending").length, pendingTotal: this.inboxFor(s).length, backgroundCount: backgroundCount(s.backgroundProcesses) };
     });
@@ -123,6 +125,10 @@ export class Store {
   deletePreset(id: string): void { this.preset(id); this.db.prepare("DELETE FROM team_presets WHERE id=?").run(id); }
   background(): BackgroundProcess[] { return visibleBackground(this.db.prepare("SELECT data FROM background_processes ORDER BY rowid").all().map((r) => JSON.parse(String(r.data)) as BackgroundProcess)); }
   backgroundProcess(id: string): BackgroundProcess { const p = this.background().find((p) => p.id === id); if (!p) throw new Error("Background process not found"); return p; }
+  projects(): ProjectRecord[] { return this.db.prepare("SELECT data FROM projects ORDER BY rowid").all().map((r) => JSON.parse(String(r.data)) as ProjectRecord); }
+  project(id: string): ProjectRecord { const row = this.db.prepare("SELECT data FROM projects WHERE id=?").get(id); if (!row) throw new Error("Project not found"); return JSON.parse(String(row.data)) as ProjectRecord; }
+  projectAt(path: string): ProjectRecord | undefined { const row = this.db.prepare("SELECT data FROM projects WHERE path=?").get(path); return row ? JSON.parse(String(row.data)) as ProjectRecord : undefined; }
+  saveProject(project: ProjectRecord): void { this.db.prepare("INSERT INTO projects VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET path=excluded.path, data=excluded.data").run(project.id, project.path, JSON.stringify(project)); }
   close(): void { this.listeners.clear(); this.db.close(); }
 }
 export function backgroundCount(processes: BackgroundProcess[] = []): number { return processes.filter((p) => p.status !== "exited" && !p.dismissed).length; }

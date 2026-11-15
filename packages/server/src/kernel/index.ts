@@ -1,5 +1,4 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { isAbsolute } from "node:path";
 import { BATON_TOOLS, LEAD_ONLY_TOOLS, emptyUsage, type AgentEntry, type AskHumanInput, type PermissionDecision, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionRequest, type PermissionResponse, type ReportResultInput, type FormTeamInput, type ReplaceMemberInput, type ReassignInput, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type SendMessageResponse, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
 import type { DriverEvent, DriverRegistry, DriverSession, OpenSessionSpec } from "../driver/types.js";
 import { Store } from "../store/index.js";
@@ -10,6 +9,7 @@ import { PermissionRules, HUMAN_DENIAL } from "./permission-rules.js";
 import { validateSchema } from "./schema.js";
 import type { TitleNaming } from "../titles/index.js";
 import type { ProcessSource } from "../background/attribution.js";
+import { Projects } from "../projects/index.js";
 
 /** True when a permission request is for one of baton's own MCP tools (Claude names them
  * mcp__baton__*, Codex asks via an MCP elicitation carrying serverName "baton"). */
@@ -48,7 +48,9 @@ export class Kernel {
   readonly teams: Teams;
   readonly human: HumanInteraction;
   readonly rules: PermissionRules;
+  readonly projects: Projects;
   constructor(readonly store: Store, readonly registry: DriverRegistry, readonly options: KernelOptions) {
+    this.projects = new Projects(store);
     this.rules = new PermissionRules(store);
     this.human = new HumanInteraction(store, {
       activity: (id, activity) => this.patchNode(id, { activity }),
@@ -139,7 +141,8 @@ export class Kernel {
     if ((b.maxCostUsd !== undefined && r.usage.costUsd >= b.maxCostUsd) || (b.maxTokens !== undefined && r.usage.inputTokens + r.usage.outputTokens >= b.maxTokens) || (b.maxWallMinutes !== undefined && Date.now() - Date.parse(r.createdAt) >= b.maxWallMinutes * 60000)) throw new Error("Run budget exceeded");
   }
   async createRun(input: CreateRunRequest): Promise<RunSnapshot> {
-    if (!input || typeof input.prompt !== "string" || !input.prompt.trim() || typeof input.cwd !== "string" || !isAbsolute(input.cwd)) throw new Error("Nonempty prompt and absolute cwd are required");
+    if (!input || typeof input.prompt !== "string" || !input.prompt.trim()) throw new Error("Nonempty prompt is required");
+    const cwd = await this.projects.cwd(input.projectId, input.cwd);
     const preset = input.teamPresetId ? this.store.preset(input.teamPresetId) : undefined;
     const agent = input.agent ?? preset?.lead.agentId;
     const leadDefaults = input.agent && input.agent !== preset?.lead.agentId ? undefined : preset?.lead;
@@ -150,9 +153,10 @@ export class Kernel {
     const members = await this.teams.validateMembers(preset?.members ?? input.team ?? []);
     if (members.length > (policy.maxTeamSize ?? 5)) throw new Error(`Team size exceeds maxTeamSize (${policy.maxTeamSize ?? 5})`);
     await this.available(agent); this.checkGlobalLimit();
+    if (this.store.project(input.projectId).archived) throw new Error("Project is archived");
     const runId = randomUUID(), nodeId = randomUUID(), ts = now();
-    this.emit(runId, { type: "run.created", run: { id: runId, rootNodeId: nodeId, title: input.title || input.prompt.slice(0, 100), titleSource: input.title ? "human" : "prompt", cwd: input.cwd, status: "active", policy, createdAt: ts, updatedAt: ts, usage: emptyUsage() } });
-    this.emit(runId, { type: "node.created", node: { id: nodeId, runId, parentNodeId: null, delegationId: null, depth: 0, agentId: agent, model: input.model ?? leadDefaults?.model, modeId: input.modeId ?? leadDefaults?.modeId, thinking: input.thinking ?? leadDefaults?.thinking, title: input.title || input.prompt.slice(0, 100), cwd: input.cwd, status: "starting", createdAt: ts, updatedAt: ts, usage: emptyUsage(), turns: 0 } });
+    this.emit(runId, { type: "run.created", run: { id: runId, rootNodeId: nodeId, projectId: input.projectId, title: input.title || input.prompt.slice(0, 100), titleSource: input.title ? "human" : "prompt", cwd, status: "active", policy, createdAt: ts, updatedAt: ts, usage: emptyUsage() } });
+    this.emit(runId, { type: "node.created", node: { id: nodeId, runId, parentNodeId: null, delegationId: null, depth: 0, agentId: agent, model: input.model ?? leadDefaults?.model, modeId: input.modeId ?? leadDefaults?.modeId, thinking: input.thinking ?? leadDefaults?.thinking, title: input.title || input.prompt.slice(0, 100), cwd, status: "starting", createdAt: ts, updatedAt: ts, usage: emptyUsage(), turns: 0 } });
     if (preset || input.team) this.teams.initialize(runId, members, preset ? "preset" : "human", preset);
     try { await this.startTurn(nodeId, input.prompt, "user"); } catch (error) { this.failNode(nodeId, error); }
     if (!input.title) void this.generateTitle(runId, input.prompt);

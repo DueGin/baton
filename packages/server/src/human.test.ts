@@ -22,7 +22,7 @@ async function api<T>(s: BatonServer, path: string, method = "GET", body?: unkno
   const response = await fetch(s.url + path, { method, headers: { authorization: `Bearer ${s.token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) }, body: body === undefined ? undefined : JSON.stringify(body) });
   if (!response.ok) throw new Error(await response.text()); return await response.json() as T;
 }
-async function create(s: BatonServer, policy: Partial<RunPolicy> = {}): Promise<RunSnapshot> { return s.kernel.createRun({ agent: "root", cwd: tmpdir(), prompt: "test", policy: { teamApproval: false, ...policy } }); }
+async function create(s: BatonServer, policy: Partial<RunPolicy> = {}): Promise<RunSnapshot> { return s.kernel.createRun({ projectId: (await s.kernel.projects.create({ path: tmpdir() })).id, agent: "root", cwd: tmpdir(), prompt: "test", policy: { teamApproval: false, ...policy } }); }
 
 describe("human questions", () => {
   it("asks a blocking question over MCP, suspends a child assignment and resumes on answer", async () => {

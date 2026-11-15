@@ -31,7 +31,7 @@ describe("teams over actual HTTP MCP", () => {
       await c.call("delegate", { role: "builder", title: "Build", task: "Implement", model: "override" });
       observed = await c.call("get_team", {});
     }, worker: async (c) => { c.text("Built"); await c.call("report_result", { status: "success", summary: "Built" }); } });
-    const run = await s.kernel.createRun({ agent: "lead", cwd: tmpdir(), prompt: "Build", policy: { teamApproval: false } });
+    const run = await s.kernel.createRun({ projectId: (await s.kernel.projects.create({ path: tmpdir() })).id, agent: "lead", cwd: tmpdir(), prompt: "Build", policy: { teamApproval: false } });
     await until(() => delegates(s, run.run.id).some((d) => d.status === "completed") && !!observed); await delay(100);
     const snapshot = s.store.snapshot(run.run.id), m = snapshot.run.team!.members[0]!, d = snapshot.delegations[0]!;
     expect(m).toMatchObject({ role: "builder", addedBy: "lead", status: "active" });
@@ -44,7 +44,7 @@ describe("teams over actual HTTP MCP", () => {
     await expect(s.kernel.tool(run.run.rootNodeId, "form_team", { rationale: "duplicate", members: [{ role: "builder", agent: "worker", responsibilities: "x" }] })).rejects.toThrow(/replace_member/);
   });
   it("auto-adds unique ad-hoc members for direct agent delegation", async () => {
-    const s = await setup(), run = await s.kernel.createRun({ agent: "lead", cwd: tmpdir(), prompt: "ad hoc", policy: { teamApproval: false } });
+    const s = await setup(), run = await s.kernel.createRun({ projectId: (await s.kernel.projects.create({ path: tmpdir() })).id, agent: "lead", cwd: tmpdir(), prompt: "ad hoc", policy: { teamApproval: false } });
     await Promise.all([1, 2, 3].map((n) => s.kernel.delegate(run.run.rootNodeId, { agent: "worker", title: `Task ${n}`, task: "x" })));
     const team = s.store.snapshot(run.run.id).run.team!;
     expect(team.members).toHaveLength(3); expect(new Set(team.members.map((m) => m.role)).size).toBe(3);
@@ -59,21 +59,21 @@ describe("teams over actual HTTP MCP", () => {
       await c.call("delegate", { role: "reviewer", title: "Review", task: "review" }); c.text("Built");
     }, replacement: idle });
     const preset = await s.kernel.teams.savePreset({ name: "Engineering", lead: { agentId: "lead", model: "lead-model" }, members: [member(), { role: "reviewer", agentId: "replacement", responsibilities: "Own tests" }] });
-    const run = await s.kernel.createRun({ teamPresetId: preset.id, cwd: tmpdir(), prompt: "preset" });
+    const run = await s.kernel.createRun({ projectId: (await s.kernel.projects.create({ path: tmpdir() })).id, teamPresetId: preset.id, cwd: tmpdir(), prompt: "preset" });
     await until(() => delegates(s, run.run.id).length === 2 && rejected);
     expect(s.store.node(run.run.rootNodeId)).toMatchObject({ agentId: "lead", model: "lead-model" });
     expect(s.store.snapshot(run.run.id).nodes.map((n) => n.depth)).toEqual([0, 1, 2]);
     expect(s.store.snapshot(run.run.id).run.team?.members.every((m) => m.addedBy === "preset")).toBe(true);
     await expect(s.kernel.tool(run.run.rootNodeId, "form_team", { rationale: "x", members: [{ role: "x", agent: "worker", responsibilities: "x" }] })).rejects.toThrow(/dynamic/);
-    const override = await s.kernel.createRun({ agent: "replacement", teamPresetId: preset.id, cwd: tmpdir(), prompt: "override" }); expect(s.store.node(override.run.rootNodeId).agentId).toBe("replacement");
+    const override = await s.kernel.createRun({ projectId: (await s.kernel.projects.create({ path: tmpdir() })).id, agent: "replacement", teamPresetId: preset.id, cwd: tmpdir(), prompt: "override" }); expect(s.store.node(override.run.rootNodeId).agentId).toBe("replacement");
   });
   it("solo injects only human questions, prohibits delegation and rejects invalid modes", async () => {
-    const s = await setup(), run = await s.kernel.createRun({ agent: "lead", cwd: tmpdir(), prompt: "solo", policy: { mode: "solo" } });
+    const s = await setup(), run = await s.kernel.createRun({ projectId: (await s.kernel.projects.create({ path: tmpdir() })).id, agent: "lead", cwd: tmpdir(), prompt: "solo", policy: { mode: "solo" } });
     const session = (s.kernel.registry as FakeDriverRegistry).get("lead")!.sessions[0]!;
     expect(session.spec.mcpServers.baton?.type).toBe("http"); expect(session.spec.systemPrompt).toContain("Work alone");
     await expect(s.kernel.delegate(run.run.rootNodeId, { agent: "worker", title: "x", task: "x" })).rejects.toThrow(/Solo/);
     await expect(s.kernel.tool(run.run.rootNodeId, "list_agents", {})).rejects.toThrow(/Solo/);
-    await expect(api(s, "/api/runs", "POST", { agent: "lead", cwd: tmpdir(), prompt: "bad", policy: { mode: "bogus" } })).rejects.toThrow(/mode/);
+    await expect(api(s, "/api/runs", "POST", { projectId: (await s.kernel.projects.create({ path: tmpdir() })).id, agent: "lead", cwd: tmpdir(), prompt: "bad", policy: { mode: "bogus" } })).rejects.toThrow(/mode/);
   });
   it("replaces an active member, carries progress/files, resolves wait with replacement and suppresses old results", async () => {
     const s = await setup({ lead: idle, worker: async (c) => {
@@ -82,7 +82,7 @@ describe("teams over actual HTTP MCP", () => {
       await c.call("delegate", { role: "helper", title: "Nested", task: "nested" });
       await c.sleep(10000);
     }, replacement: idle, helper: async (c) => { await c.sleep(10000); } }, 60);
-    const run = await s.kernel.createRun({ agent: "lead", cwd: tmpdir(), prompt: "replace", policy: { teamApproval: false }, team: [member(), { role: "helper", agentId: "helper", responsibilities: "Own fixtures" }] });
+    const run = await s.kernel.createRun({ projectId: (await s.kernel.projects.create({ path: tmpdir() })).id, agent: "lead", cwd: tmpdir(), prompt: "replace", policy: { teamApproval: false }, team: [member(), { role: "helper", agentId: "helper", responsibilities: "Own fixtures" }] });
     const old = await s.kernel.delegate(run.run.rootNodeId, { role: "builder", title: "Build", task: "Original task", context: "Original context" });
     await until(() => delegates(s, run.run.id).length === 2);
     const wait = s.kernel.tool(run.run.rootNodeId, "wait", { delegationIds: [old.delegationId], timeoutSec: 2 });
@@ -101,7 +101,7 @@ describe("teams over actual HTTP MCP", () => {
   });
   it("human reassigns through REST and notifies a running parent, while remove keeps assignments", async () => {
     const s = await setup({ lead: async (c) => { await c.sleep(10000); }, worker: async (c) => { c.text("Progress"); await c.sleep(10000); }, replacement: idle });
-    const run = await s.kernel.createRun({ agent: "lead", cwd: tmpdir(), prompt: "human", policy: { teamApproval: false }, team: [member(), { role: "reviewer", agentId: "replacement" }] });
+    const run = await s.kernel.createRun({ projectId: (await s.kernel.projects.create({ path: tmpdir() })).id, agent: "lead", cwd: tmpdir(), prompt: "human", policy: { teamApproval: false }, team: [member(), { role: "reviewer", agentId: "replacement" }] });
     const old = await s.kernel.delegate(run.run.rootNodeId, { role: "builder", title: "Build", task: "x" });
     const reviewer = s.store.snapshot(run.run.id).run.team!.members.find((m) => m.role === "reviewer")!;
     const successor = await api<{ delegationId: string }>(s, `/api/delegations/${old.delegationId}/reassign`, "POST", { memberId: reviewer.id, reason: "Human changed owner" });
@@ -120,7 +120,7 @@ describe("teams over actual HTTP MCP", () => {
     const preset = await api<TeamPreset>(s, "/api/teams", "POST", { name: "Team", lead: { agentId: "lead" }, members: [member()] });
     expect(await api<TeamPreset[]>(s, "/api/teams")).toHaveLength(1);
     const updated = await api<TeamPreset>(s, `/api/teams/${preset.id}`, "PUT", { name: "Updated", lead: { agentId: "lead" }, members: [member("review")] }); expect(updated.name).toBe("Updated");
-    const run = await s.kernel.createRun({ teamPresetId: preset.id, cwd: tmpdir(), prompt: "preset save" });
+    const run = await s.kernel.createRun({ projectId: (await s.kernel.projects.create({ path: tmpdir() })).id, teamPresetId: preset.id, cwd: tmpdir(), prompt: "preset save" });
     const saved = await api<TeamPreset>(s, `/api/runs/${run.run.id}/team/save-preset`, "POST", { name: "Saved" }); expect(saved.members[0]?.role).toBe("review");
     await api(s, `/api/teams/${preset.id}`, "DELETE"); expect(await api<TeamPreset[]>(s, "/api/teams")).toHaveLength(1);
     await expect(api(s, "/api/teams", "POST", { name: "Bad", lead: { agentId: "unknown" }, members: [] })).rejects.toThrow(/Unknown agent/);
@@ -135,7 +135,7 @@ describe("team approval gate", () => {
       await c.call("delegate", { role: "builder", title: "Build", task: "x" });
       await c.call("delegate", { role: "reviewer", title: "Review", task: "x" });
     }, worker: idle, replacement: idle });
-    const run = await s.kernel.createRun({ agent: "lead", cwd: tmpdir(), prompt: "approval" });
+    const run = await s.kernel.createRun({ projectId: (await s.kernel.projects.create({ path: tmpdir() })).id, agent: "lead", cwd: tmpdir(), prompt: "approval" });
     await until(() => delegates(s, run.run.id).length === 2);
     return { s, runId: run.run.id, root: run.run.rootNodeId, proposalId: s.store.snapshot(run.run.id).run.team!.proposals[0]!.id };
   }
@@ -175,7 +175,7 @@ describe("team approval gate", () => {
   });
   it("proposes ad-hoc additions and replacement; human changes bypass approval", async () => {
     const s = await setup({ lead: idle, worker: async (c) => { c.text("work"); await c.sleep(10000); }, replacement: idle });
-    const run = await s.kernel.createRun({ agent: "lead", cwd: tmpdir(), prompt: "ad hoc" });
+    const run = await s.kernel.createRun({ projectId: (await s.kernel.projects.create({ path: tmpdir() })).id, agent: "lead", cwd: tmpdir(), prompt: "ad hoc" });
     const task = await s.kernel.delegate(run.run.rootNodeId, { agent: "worker", title: "Ad-hoc", task: "x" }); expect(task.status).toBe("pending_approval");
     await api(s, `/api/runs/${run.run.id}/team/proposals/${task.proposalId}/approve`, "POST", {});
     await until(() => s.store.delegation(task.delegationId).status === "running");
@@ -192,7 +192,7 @@ describe("team approval gate", () => {
 
 describe("team recovery and reassignment approval", () => {
   it("persists blocked work across restart and migrates legacy delegation policy", async () => {
-    const s = await setup(), run = await s.kernel.createRun({ agent: "lead", cwd: tmpdir(), prompt: "restart" });
+    const s = await setup(), run = await s.kernel.createRun({ projectId: (await s.kernel.projects.create({ path: tmpdir() })).id, agent: "lead", cwd: tmpdir(), prompt: "restart" });
     await until(() => s.store.node(run.run.rootNodeId).status === "idle");
     const task = await s.kernel.delegate(run.run.rootNodeId, { agent: "worker", title: "Queued", task: "x" });
     s.store.append(run.run.id, { type: "run.updated", patch: { policy: { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, delegation: "lead" } as unknown as typeof run.run.policy } });
@@ -207,7 +207,7 @@ describe("team recovery and reassignment approval", () => {
     expect(registry.get("worker")!.sessions).toHaveLength(1);
   });
   it("delivers a persisted approval notice after restart", async () => {
-    const s = await setup(), run = await s.kernel.createRun({ agent: "lead", cwd: tmpdir(), prompt: "notice restart" });
+    const s = await setup(), run = await s.kernel.createRun({ projectId: (await s.kernel.projects.create({ path: tmpdir() })).id, agent: "lead", cwd: tmpdir(), prompt: "notice restart" });
     await until(() => s.store.node(run.run.rootNodeId).status === "idle");
     const proposed = await s.kernel.tool(run.run.rootNodeId, "form_team", { rationale: "Build", members: [{ role: "builder", agent: "worker", responsibilities: "Own src" }] }) as { proposalId: string };
     await s.kernel.teams.approve(run.run.id, proposed.proposalId, { note: "Approved before restart" });
@@ -219,7 +219,7 @@ describe("team recovery and reassignment approval", () => {
   });
   it("keeps the predecessor running during an agent reassign proposal; rejection retains it", async () => {
     const s = await setup({ lead: idle, worker: async (c) => { await c.sleep(10000); }, replacement: idle });
-    const run = await s.kernel.createRun({ agent: "lead", cwd: tmpdir(), prompt: "reassign", team: [member()] });
+    const run = await s.kernel.createRun({ projectId: (await s.kernel.projects.create({ path: tmpdir() })).id, agent: "lead", cwd: tmpdir(), prompt: "reassign", team: [member()] });
     const old = await s.kernel.delegate(run.run.rootNodeId, { role: "builder", title: "Build", task: "x" });
     await until(() => s.store.delegation(old.delegationId).status === "running");
     const pending = await s.kernel.tool(run.run.rootNodeId, "reassign", { delegationId: old.delegationId, agent: "replacement", reason: "try another" }) as { delegationId: string; proposalId: string; status: string };
@@ -237,7 +237,7 @@ describe("dynamic team demo", () => {
   it("stays pending until console approval, replaces the failed member, then completes", async () => {
     const home = await mkdtemp(join(tmpdir(), "baton-teams-")); homes.push(home);
     const s = await startServer({ home, port: 0, fake: true, deliveryDebounceMs: 25 }); servers.push(s);
-    const run = await s.kernel.createRun({ agent: "fake-claude", cwd: tmpdir(), prompt: "Build a feature with a team", policy: { autoApprove: true } });
+    const run = await s.kernel.createRun({ projectId: s.store.projects().find((p) => p.name === "Demo project")!.id, agent: "fake-claude", prompt: "Build a feature with a team", policy: { autoApprove: true } });
     await until(() => s.store.snapshot(run.run.id).run.team?.proposals[0]?.status === "pending");
     await delay(100); expect(delegates(s, run.run.id)).toHaveLength(0);
     const formation = s.store.snapshot(run.run.id).run.team!.proposals[0]!;
