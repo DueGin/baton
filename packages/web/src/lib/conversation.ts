@@ -2,23 +2,24 @@ import type { ItemRecord, NodeRecord, RunSnapshot } from "@baton/protocol";
 
 export type Delivery = "turn" | "steered" | "queued" | "retracted";
 export type MessageAction = "steer" | "interrupt" | "retract";
-export interface MessageActionState { pending?: MessageAction; steerUnsupported?: boolean; error?: string }
+export type MessageControl = "steer" | "interrupt" | "edit";
+export interface MessageActionState { pending?: MessageAction | "edit"; steerUnsupported?: boolean; error?: string }
 export function messageActionKey(nodeId: string, itemSeq: number): string { return `${nodeId}:${itemSeq}`; }
 /** Sending follows a ladder: queued → try steering → interrupt. */
-export function messageActions(delivery: Delivery | undefined, state?: MessageActionState): MessageAction[] {
-  if (delivery === "queued") return [state?.steerUnsupported ? "interrupt" : "steer", "retract"];
+export function messageActions(delivery: Delivery | undefined, state?: MessageActionState): MessageControl[] {
+  if (delivery === "queued") return [state?.steerUnsupported ? "interrupt" : "steer", "edit"];
   return delivery === "steered" ? ["interrupt"] : [];
 }
 export interface OutgoingMessage {
   clientId: string; nodeId: string; text: string; ts: string;
   state: "sending" | "accepted" | "failed"; delivery?: Delivery; itemSeq?: number; interrupted?: boolean; error?: string;
-  turnId?: string; queuePosition?: number; deliveryOrder?: number;
+  turnId?: string; queuePosition?: number; deliveryOrder?: number; editedAt?: string;
 }
 export function reconcileOutgoing(messages: OutgoingMessage[], row: ItemRecord): OutgoingMessage[] {
   const item = row.item;
   if (item.type !== "user_message") return messages;
   return messages.map(message => message.nodeId === row.nodeId && (item.clientId === message.clientId || row.seq === message.itemSeq)
-    ? { ...message, state: "accepted", itemSeq: row.seq, delivery: item.delivery ?? message.delivery, interrupted: item.interrupted, turnId: row.turnId ?? message.turnId, queuePosition: item.queuePosition, deliveryOrder: item.deliveryOrder, error: undefined } : message);
+    ? { ...message, state: "accepted", text: item.text, ts: row.ts, itemSeq: row.seq, delivery: item.delivery ?? message.delivery, interrupted: item.interrupted, turnId: row.turnId ?? message.turnId, queuePosition: item.queuePosition, deliveryOrder: item.deliveryOrder, editedAt: item.editedAt, error: undefined } : message);
 }
 export function deliveryLabel(delivery?: Delivery, interrupted = false): string {
   return delivery === "queued" ? "排队中" : delivery === "steered" ? "已插入当前回合" : delivery === "retracted" ? "已撤回" : delivery === "turn" ? interrupted ? "已中断并立即发送" : "已送达" : "";
@@ -27,7 +28,7 @@ export interface ConversationEntry { row: ItemRecord; outgoing?: OutgoingMessage
 export function messageRows(rows: ItemRecord[], outgoing: OutgoingMessage[], nodeId: string): ConversationEntry[] {
   const messages = outgoing.filter(message => message.nodeId === nodeId);
   const result = rows.filter(row => row.nodeId === nodeId).map(row => ({ row, outgoing: messages.find(message => row.item.type === "user_message" && (row.item.clientId === message.clientId || row.seq === message.itemSeq)) }));
-  for (const [index, message] of messages.entries()) if (!result.some(entry => entry.outgoing?.clientId === message.clientId)) result.push({ row: { seq: message.itemSeq ?? -(index + 1), nodeId, turnId: message.turnId, ts: message.ts, item: { type: "user_message", text: message.text, clientId: message.clientId, delivery: message.delivery, interrupted: message.interrupted, queuePosition: message.queuePosition, deliveryOrder: message.deliveryOrder } }, outgoing: message });
+  for (const [index, message] of messages.entries()) if (!result.some(entry => entry.outgoing?.clientId === message.clientId)) result.push({ row: { seq: message.itemSeq ?? -(index + 1), nodeId, turnId: message.turnId, ts: message.ts, item: { type: "user_message", text: message.text, clientId: message.clientId, delivery: message.delivery, interrupted: message.interrupted, queuePosition: message.queuePosition, deliveryOrder: message.deliveryOrder, editedAt: message.editedAt } }, outgoing: message });
   return result;
 }
 

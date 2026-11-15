@@ -20,8 +20,8 @@ describe("message delivery", () => {
     expect(deliveryLabel("queued")).toBe("排队中");
   });
   it("only reveals interruption after steering, and labels all terminal delivery states", () => {
-    expect(messageActions("queued")).toEqual(["steer", "retract"]);
-    expect(messageActions("queued", { steerUnsupported: true })).toEqual(["interrupt", "retract"]);
+    expect(messageActions("queued")).toEqual(["steer", "edit"]);
+    expect(messageActions("queued", { steerUnsupported: true })).toEqual(["interrupt", "edit"]);
     expect(messageActions("steered")).toEqual(["interrupt"]);
     expect(messageActions("turn")).toEqual([]);
     expect(messageActions("retracted")).toEqual([]);

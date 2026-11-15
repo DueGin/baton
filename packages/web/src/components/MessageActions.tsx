@@ -1,4 +1,4 @@
-import { deliveryLabel, messageActions, type Delivery, type MessageAction, type MessageActionState } from "../lib/conversation.js";
+import { deliveryLabel, messageActions, type Delivery, type MessageControl, type MessageActionState } from "../lib/conversation.js";
 import { Icon } from "./common.js";
 
 export function DeliveryIcon({ delivery, interrupted, state }: { delivery?: Delivery; interrupted?: boolean; state?: "sending" | "accepted" | "failed" }) {
@@ -8,8 +8,12 @@ export function DeliveryIcon({ delivery, interrupted, state }: { delivery?: Deli
   return <span className={`delivery-icon delivery-${delivery ?? state}${state === "sending" ? " is-spinning" : ""}`} title={delivery === "queued" ? "排队中 · 当前回合结束后送达" : label} role="img" aria-label={label}><Icon name={name} size={13} /></span>;
 }
 
-export function MessageActionIcons({ delivery, state, disabled = false, act }: { delivery?: Delivery; state?: MessageActionState; disabled?: boolean; act: (action: MessageAction) => void }) {
-  const labels = { steer: "引导发送", interrupt: "立即发送", retract: "撤回" };
-  const icons = { steer: "steer", interrupt: "lightning", retract: "undo" } as const;
-  return <div className="message-action-icons" aria-busy={Boolean(state?.pending)}>{messageActions(delivery, state).map(action => <button type="button" className={`icon-button message-action-${action}`} key={action} aria-label={labels[action]} disabled={disabled || Boolean(state?.pending)} onClick={() => act(action)} title={action === "interrupt" ? "立即发送 · 中断当前回合，立即以这条消息开始新一轮" : action === "steer" ? "引导发送 · 将这条消息插入当前回合" : "撤回这条排队消息"}><span className={state?.pending === action ? "message-action-spinner" : undefined}><Icon name={state?.pending === action ? "refresh" : icons[action]} size={15} /></span></button>)}</div>;
+export function MessageActionIcons({ delivery, state, disabled = false, act }: { delivery?: Delivery; state?: MessageActionState; disabled?: boolean; act: (action: MessageControl) => void }) {
+  const labels = { steer: "引导发送", interrupt: "立即发送", edit: "编辑" };
+  const icons = { steer: "steer", interrupt: "lightning", edit: "edit" } as const;
+  return <div className="message-action-icons" aria-busy={Boolean(state?.pending)}>{messageActions(delivery, state).map(action => <button type="button" className={`icon-button message-action-${action}`} key={action} aria-label={labels[action]} disabled={disabled || Boolean(state?.pending)} onClick={() => act(action)} title={action === "interrupt" ? "立即发送 · 中断当前回合，立即以这条消息开始新一轮" : action === "steer" ? "引导发送 · 将这条消息插入当前回合" : "编辑这条排队消息"}><span className={state?.pending === action ? "message-action-spinner" : undefined}><Icon name={state?.pending === action ? "refresh" : icons[action]} size={15} /></span></button>)}</div>;
+}
+
+export function EditedMarker({ at }: { at?: string }) {
+  return at ? <span className="message-edited" title={`已编辑 · ${new Date(at).toLocaleString("zh-CN")}`}><Icon name="edit" size={10} />已编辑</span> : null;
 }

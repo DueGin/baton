@@ -118,5 +118,35 @@ describe("conversation demo", () => {
     const reply = (await client.items(root)).items.findLast(row => row.item.type === "assistant_message")!.item;
     expect(reply.type === "assistant_message" && reply.text.indexOf("最后 C") < reply.text.indexOf("先做 A")).toBe(true);
   });
+  it("edits queued text in place and preserves itemTs across edits, reorder, and delivery", async () => {
+    let now = base; const client = new DemoClient(() => now); const snapshot = await client.run("run-conversation"); const root = snapshot.run.rootNodeId;
+    const first = await client.send(root, "旧内容", "edit-1"); const second = await client.send(root, "另一个要求", "edit-2");
+    const original = (await client.items(root)).items.find(row => row.seq === first.itemSeq)!;
+    const events: RunEventEnvelope[] = []; const controller = new AbortController();
+    const stream = client.events(snapshot.run.id, (await client.run(snapshot.run.id)).lastSeq, event => events.push(event), controller.signal);
+    now += 2000; await client.edit(root, first.itemSeq, { text: "新内容\n先验证" });
+    now += 2000; await client.reorderQueue(root, { order: [second.itemSeq, first.itemSeq] });
+    const changed = (await client.items(root)).items.find(row => row.seq === first.itemSeq)!;
+    expect(changed.ts).toBe(original.ts); expect(changed.item).toMatchObject({ text: "新内容\n先验证", editedAt: new Date(base + 2000).toISOString(), queuePosition: 2 });
+    expect(events.filter(event => event.type === "item").every(event => event.itemTs === original.ts)).toBe(true);
+    expect(events.every((event, index) => index === 0 || event.ts >= events[index - 1]!.ts)).toBe(true);
+    expect(events.at(-1)?.ts).toBe(new Date(now).toISOString());
+    for (const text of ["", " \n\t"]) await expect(client.edit(root, first.itemSeq, { text })).rejects.toThrow("400");
+    now += 46_000; const delivered = (await client.items(root)).items.find(row => row.seq === first.itemSeq)!;
+    expect(delivered.ts).toBe(original.ts); expect(delivered.item).toMatchObject({ delivery: "turn", text: "新内容\n先验证", editedAt: new Date(base + 2000).toISOString() });
+    await expect(client.edit(root, first.itemSeq, { text: "已晚" })).rejects.toThrow("409");
+    now += 14_000; const reply = (await client.items(root)).items.findLast(row => row.item.type === "assistant_message")!.item;
+    expect(reply.type === "assistant_message" && reply.text.includes("新内容\n先验证")).toBe(true);
+    controller.abort(); await stream;
+  });
+  it("deletes an edited queued message without delivering it", async () => {
+    let now = base; const client = new DemoClient(() => now); const snapshot = await client.run("run-conversation"); const root = snapshot.run.rootNodeId;
+    const sent = await client.send(root, "可以删除"); now += 1000;
+    await client.edit(root, sent.itemSeq, { text: "编辑后删除" }); await client.retract(root, sent.itemSeq); now += 60_000;
+    const row = (await client.items(root)).items.find(entry => entry.seq === sent.itemSeq)!;
+    expect(row.item).toMatchObject({ text: "编辑后删除", delivery: "retracted", editedAt: new Date(base + 1000).toISOString() });
+    await expect(client.edit(root, sent.itemSeq, { text: "无法再改" })).rejects.toThrow("409");
+    expect((await client.run(snapshot.run.id)).turns.filter(turn => turn.nodeId === root)).toHaveLength(1);
+  });
 
 });

@@ -44,6 +44,11 @@ describe("API transport", () => {
     expect(await new ApiClient("token").reorderQueue("node/1", { order: [9, 4, 7] })).toEqual({ order: [9, 4, 7] });
     expect(fetchMock).toHaveBeenCalledWith("/api/nodes/node%2F1/queue", { method: "PUT", headers: { Authorization: "Bearer token", "Content-Type": "application/json" }, body: JSON.stringify({ order: [9, 4, 7] }) });
   });
+  it("edits only the queued message text at its encoded PATCH endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 })); vi.stubGlobal("fetch", fetchMock);
+    await new ApiClient("token").edit("node/1", 7, { text: "更新任务\n保留换行" });
+    expect(fetchMock).toHaveBeenCalledWith("/api/nodes/node%2F1/messages/7", { method: "PATCH", headers: { Authorization: "Bearer token", "Content-Type": "application/json" }, body: JSON.stringify({ text: "更新任务\n保留换行" }) });
+  });
   it("exposes server error bodies and response status", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: "UNAUTHORIZED", message: "invalid token" } }), { status: 401 })));
     await expect(new ApiClient("bad").runs()).rejects.toThrow("401");

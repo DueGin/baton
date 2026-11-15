@@ -26,9 +26,9 @@ export function createScenario(base = Date.now() - 86000, id = "run-demo"): Demo
   const nid = (key: string): string => `${id}:${key}`;
   function item(offset: number, key: string, content: TimelineItem, replace?: number): number {
     const nodeId = nid(key); const seq = replace ?? (itemCounters[key] = (itemCounters[key] ?? 0) + 1);
-    const row = { seq, nodeId, ts: at(offset), item: content };
+    const row = { seq, nodeId, ts: items[nodeId]?.find(entry => entry.seq === seq)?.ts ?? at(offset), item: content };
     const current = items[nodeId] ?? []; items[nodeId] = [...current.filter(entry => entry.seq !== seq), row].sort((a, b) => a.seq - b.seq);
-    emit(offset, { type: "item", nodeId, itemSeq: seq, ts: at(offset), item: content }); return seq;
+    emit(offset, { type: "item", nodeId, itemSeq: seq, itemTs: row.ts, item: content }); return seq;
   }
   function node(offset: number, key: string, title: string, agentId: string, parent: string | null): void {
     const member = memberFor[key];
