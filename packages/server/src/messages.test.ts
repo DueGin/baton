@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,6 +40,16 @@ async function until(test: () => boolean): Promise<void> {
 }
 
 describe("human message delivery", () => {
+  it("queues by default while busy without attempting steer", async () => {
+    const hold = gate();
+    const { server, driver, root, rows } = await setup({ script: (c) => hold.wait(c) });
+    const steer = vi.spyOn(driver.sessions[0]!, "steer");
+    const result = await server.kernel.message(root, "wait for my turn");
+    expect(result.delivery).toBe("queued");
+    expect(steer).not.toHaveBeenCalled();
+    expect(rows().find((r) => r.seq === result.itemSeq)?.item).toMatchObject({ delivery: "queued", text: "wait for my turn" });
+  });
+
   it("records an idle message as a new turn with its client id and item seq", async () => {
     const { server, driver, root, rows, run } = await setup();
     await until(() => server.store.node(root).status === "idle");
@@ -55,11 +65,11 @@ describe("human message delivery", () => {
   it("records a message steered into a running turn", async () => {
     const hold = gate();
     const { server, driver, root, rows, run } = await setup({ script: (c) => hold.wait(c) });
-    const result = await server.kernel.message(root, "change approach", "steer-client");
+    const result = await server.kernel.message(root, "change approach", "steer-client", "steer");
     expect(result.delivery).toBe("steered");
     expect(rows().find((r) => r.seq === result.itemSeq)).toMatchObject({
       turnId: run.turns[0]!.id,
-      item: { type: "user_message", text: "change approach", clientId: "steer-client", delivery: "steered" },
+      item: { type: "user_message", text: "change approach", clientId: "steer-client", delivery: "steered", escalated: false },
     });
     expect(driver.sessions[0]!.steered).toEqual(["change approach"]);
     expect(driver.sessions[0]!.prompts).toEqual(["start"]);
@@ -68,8 +78,8 @@ describe("human message delivery", () => {
   it("persists unsupported steer immediately and updates the same row when drained", async () => {
     const hold = gate();
     const { server, driver, root, rows, run } = await setup({ steer: false, script: async (c) => { if (c.turn === 1) await hold.wait(c); } });
-    const result = await server.kernel.message(root, "queued request", "queued-client");
-    expect(result.delivery).toBe("queued");
+    const result = await server.kernel.message(root, "queued request", "queued-client", "steer");
+    expect(result).toMatchObject({ delivery: "queued", steerUnsupported: true });
     const queued = rows().find((r) => r.seq === result.itemSeq)!;
     expect(queued.item).toEqual({ type: "user_message", text: "queued request", clientId: "queued-client", delivery: "queued" });
     expect(queued.turnId).toBeUndefined();
@@ -165,7 +175,7 @@ describe("human message delivery", () => {
     const { server, driver, root, rows } = await setup({ script: (c) => hold.wait(c) });
     let resolveSteer: (outcome: "unsupported") => void = () => {};
     driver.sessions[0]!.steer = () => new Promise((resolve) => { resolveSteer = resolve; });
-    const sending = server.kernel.message(root, "cancel while steering", "racing-client");
+    const sending = server.kernel.message(root, "cancel while steering", "racing-client", "steer");
     const row = rows().find((r) => r.item.type === "user_message" && r.item.clientId === "racing-client")!;
     expect(row.item).toMatchObject({ delivery: "queued" });
     await server.kernel.cancelNode(root);
@@ -180,7 +190,7 @@ describe("human message delivery", () => {
     const { server, driver, root, rows } = await setup({ script: async (c) => { if (c.turn === 1) await hold.wait(c); } });
     let resolveSteer: (outcome: "no_active_turn") => void = () => {};
     driver.sessions[0]!.steer = () => new Promise((resolve) => { resolveSteer = resolve; });
-    const sending = server.kernel.message(root, "late refusal", "late-client");
+    const sending = server.kernel.message(root, "late refusal", "late-client", "steer");
     expect(rows().find((r) => r.item.type === "user_message" && r.item.clientId === "late-client")?.item).toMatchObject({ delivery: "queued" });
     hold.release();
     await until(() => server.store.node(root).status === "idle");
@@ -221,22 +231,241 @@ describe("human message delivery", () => {
     const hold = gate();
     const { server, driver, root, rows } = await setup({ script: async (c) => { if (c.turn === 1) await hold.wait(c); } });
     driver.sessions[0]!.steer = async () => { throw new Error("steer refused"); };
-    const queued = await server.kernel.message(root, "refused steer", "refused-client");
-    expect(queued.delivery).toBe("queued");
+    const queued = await server.kernel.message(root, "refused steer", "refused-client", "steer");
+    expect(queued).toMatchObject({ delivery: "queued", steerUnsupported: true });
     expect(rows().find((r) => r.seq === queued.itemSeq)?.item).toMatchObject({ delivery: "queued" });
     hold.release();
     await until(() => server.store.node(root).turns === 2 && server.store.node(root).status === "idle");
     expect(rows().find((r) => r.seq === queued.itemSeq)?.item).toMatchObject({ delivery: "turn" });
   });
 
+  it("interrupts only the active turn and drains other queued messages after the replacement turn", async () => {
+    const first = gate(), replacement = gate();
+    const { server, driver, root, rows, run } = await setup({ script: async (c) => {
+      if (c.turn === 1) await first.wait(c);
+      if (c.turn === 2) await replacement.wait(c);
+    } });
+    const waiting = await server.kernel.message(root, "deliver later", "later");
+    const sent = await server.kernel.message(root, "redirect now", "interrupt-client", "interrupt");
+    expect(sent.delivery).toBe("turn");
+    expect(driver.sessions[0]!.prompts).toEqual(["start", "redirect now"]);
+    expect(rows().find((r) => r.seq === sent.itemSeq)?.item).toMatchObject({ text: "redirect now", delivery: "turn", interrupted: true, clientId: "interrupt-client" });
+    expect(rows().find((r) => r.seq === waiting.itemSeq)?.item).toMatchObject({ delivery: "queued" });
+    expect(server.store.node(root).status).toBe("running");
+    const turns = server.store.snapshot(run.run.id).turns;
+    expect(turns[0]).toMatchObject({ status: "canceled", error: "interrupted by human message" });
+    expect(turns[1]).toMatchObject({ status: "running", trigger: "user" });
+    expect(rows().filter((r) => r.item.type === "notice")).toHaveLength(0);
+    replacement.release();
+    await until(() => server.store.node(root).turns === 3 && server.store.node(root).status === "idle");
+    expect(driver.sessions[0]!.prompts).toEqual(["start", "redirect now", "deliver later"]);
+    expect(rows().find((r) => r.seq === waiting.itemSeq)?.item).toMatchObject({ delivery: "turn" });
+  });
+
+  it("does not capture interrupted delegate results or cancel its children", async () => {
+    const hold = gate();
+    const { server, driver, root, run } = await setup();
+    await until(() => server.store.node(root).status === "idle");
+    driver.options.script = async (c) => { c.text("partial response, not a result"); await hold.wait(c); };
+    const child = await server.kernel.delegate(root, { agent: "root", title: "child", task: "work" });
+    await until(() => driver.sessions.length === 2 && driver.sessions[1]!.turns === 1);
+    const grandchild = await server.kernel.delegate(child.nodeId!, { agent: "root", title: "grandchild", task: "keep working" });
+    await until(() => driver.sessions.length === 3 && driver.sessions[2]!.turns === 1);
+    await server.kernel.tool(child.nodeId!, "report_result", { status: "success", summary: "Old report must be discarded" });
+    const sent = await server.kernel.message(child.nodeId!, "take a new approach", undefined, "interrupt");
+    expect(sent.delivery).toBe("turn");
+    expect(server.store.delegation(child.delegationId)).toMatchObject({ status: "running", round: 1 });
+    expect(server.store.delegation(child.delegationId).result).toBeUndefined();
+    expect(server.store.delegation(child.delegationId).deliveredAt).toBeUndefined();
+    expect(server.store.node(child.nodeId!).status).toBe("running");
+    expect(server.store.node(grandchild.nodeId!).status).toBe("running");
+    expect(server.store.delegation(grandchild.delegationId).status).toBe("running");
+    expect(driver.sessions[1]!.closed).toBe(false);
+    expect(driver.sessions[2]!.closed).toBe(false);
+    expect(driver.sessions[0]!.prompts).toEqual(["start"]);
+    expect(driver.sessions[0]!.steered).toEqual([]);
+    expect(server.store.snapshot(run.run.id).turns.filter((t) => t.nodeId === child.nodeId)[0]).toMatchObject({ status: "canceled", error: "interrupted by human message" });
+  });
+
+  it("does not mark a late steer accepted by an interrupted turn as delivered", async () => {
+    const hold = gate();
+    const { server, driver, root, rows } = await setup({ script: (c) => hold.wait(c) });
+    let resolveSteer: () => void = () => {};
+    driver.sessions[0]!.steer = () => new Promise((resolve) => { resolveSteer = () => resolve("steered"); });
+    const steering = server.kernel.message(root, "late old steer", "late-old-steer", "steer");
+    const redirect = await server.kernel.message(root, "interrupt first", undefined, "interrupt");
+    expect(redirect.delivery).toBe("turn");
+    resolveSteer();
+    const pending = await steering;
+    expect(pending.delivery).toBe("queued");
+    expect(rows().find((r) => r.seq === pending.itemSeq)?.item).toMatchObject({ delivery: "queued" });
+    hold.release();
+    await until(() => server.store.node(root).turns === 3 && server.store.node(root).status === "idle");
+    expect(driver.sessions[0]!.prompts).toEqual(["start", "interrupt first", "late old steer"]);
+  });
+
+  it("preserves a successful steer if its turn completes before the steer response returns", async () => {
+    const hold = gate();
+    const { server, driver, root, rows, run } = await setup({ script: (c) => hold.wait(c) });
+    let resolveSteer: () => void = () => {};
+    driver.sessions[0]!.steer = () => new Promise((resolve) => { resolveSteer = () => resolve("steered"); });
+    const steering = server.kernel.message(root, "accepted before completion", undefined, "steer");
+    hold.release();
+    await until(() => server.store.node(root).status === "idle");
+    resolveSteer();
+    const sent = await steering;
+    expect(sent.delivery).toBe("steered");
+    expect(rows().find((r) => r.seq === sent.itemSeq)).toMatchObject({ turnId: run.turns[0]!.id, item: { delivery: "steered", escalated: false } });
+    expect(driver.sessions[0]!.prompts).toEqual(["start"]);
+  });
+
+  it("starts the replacement even when the driver emits no canceled event", async () => {
+    const hold = gate();
+    const { server, driver, root, run } = await setup({ script: (c) => hold.wait(c) });
+    const open = driver.open.bind(driver);
+    driver.open = async (spec) => {
+      const session = await open(spec), subscribe = session.subscribe.bind(session);
+      session.subscribe = (listener) => subscribe((event) => { if (event.type !== "turn_canceled") listener(event); });
+      return session;
+    };
+    const child = await server.kernel.delegate(root, { agent: "root", title: "quiet cancel", task: "work" });
+    await until(() => driver.sessions.length === 2 && driver.sessions[1]!.turns === 1);
+    await server.kernel.message(child.nodeId!, "restart after quiet cancel", undefined, "interrupt");
+    expect(driver.sessions[1]!.prompts).toHaveLength(2);
+    expect(server.store.snapshot(run.run.id).turns.filter((t) => t.nodeId === child.nodeId)[0]).toMatchObject({ status: "canceled", error: "interrupted by human message" });
+    expect(server.store.delegation(child.delegationId).result).toBeUndefined();
+  });
+
+  it("can start an idle node with a previously steered row, without another transcript row", async () => {
+    const hold = gate();
+    const { server, driver, root, rows } = await setup({ script: async (c) => { if (c.turn === 1) await hold.wait(c); } });
+    const sent = await server.kernel.message(root, "steered then idle", "idle-escalation", "steer");
+    hold.release();
+    await until(() => server.store.node(root).status === "idle");
+    expect(await server.kernel.deliverHumanMessage(root, sent.itemSeq, "interrupt")).toEqual({ delivery: "turn", itemSeq: sent.itemSeq });
+    expect(driver.sessions[0]!.prompts).toEqual(["start", "steered then idle"]);
+    expect(rows().find((r) => r.seq === sent.itemSeq)?.item).toMatchObject({ delivery: "turn", escalated: false });
+    expect(rows().filter((r) => r.item.type === "user_message")).toHaveLength(2);
+  });
+
+  it("escalates a queued row to steer and removes it from the drain", async () => {
+    const hold = gate();
+    const { server, driver, root, rows } = await setup({ script: async (c) => { if (c.turn === 1) await hold.wait(c); } });
+    const first = await server.kernel.message(root, "steer this", "escalated");
+    const second = await server.kernel.message(root, "still queued");
+    expect(await server.kernel.deliverHumanMessage(root, first.itemSeq, "steer")).toEqual({ delivery: "steered", itemSeq: first.itemSeq });
+    expect(rows().find((r) => r.seq === first.itemSeq)?.item).toMatchObject({ delivery: "steered", escalated: true, clientId: "escalated" });
+    expect(driver.sessions[0]!.steered).toEqual(["steer this"]);
+    hold.release();
+    await until(() => server.store.node(root).turns === 2 && server.store.node(root).status === "idle");
+    expect(driver.sessions[0]!.prompts).toEqual(["start", "still queued"]);
+    expect(rows().find((r) => r.seq === second.itemSeq)?.item).toMatchObject({ delivery: "turn" });
+    expect(rows().filter((r) => r.item.type === "user_message")).toHaveLength(3);
+  });
+
+  it("keeps an unsupported escalation queued, and interrupt reuses its row", async () => {
+    const hold = gate();
+    const { server, driver, root, rows } = await setup({ steer: false, script: (c) => hold.wait(c) });
+    const queued = await server.kernel.message(root, "urgent", "same-row");
+    expect(await server.kernel.deliverHumanMessage(root, queued.itemSeq, "steer")).toEqual({ delivery: "queued", itemSeq: queued.itemSeq, steerUnsupported: true });
+    expect(await server.kernel.deliverHumanMessage(root, queued.itemSeq, "interrupt")).toEqual({ delivery: "turn", itemSeq: queued.itemSeq });
+    expect(rows().find((r) => r.seq === queued.itemSeq)?.item).toEqual({ type: "user_message", text: "urgent", clientId: "same-row", delivery: "turn", interrupted: true });
+    expect(driver.sessions[0]!.prompts).toEqual(["start", "urgent"]);
+    expect(rows().filter((r) => r.item.type === "user_message")).toHaveLength(2);
+  });
+
+  it.each([false, true])("interrupts a steered message on the same row (escalated=%s)", async (escalated) => {
+    const hold = gate();
+    const { server, driver, root, rows, run } = await setup({ script: (c) => hold.wait(c) });
+    const message = await server.kernel.message(root, "urgent steer", "steered-then-interrupted", escalated ? "queue" : "steer");
+    if (escalated) await server.kernel.deliverHumanMessage(root, message.itemSeq, "steer");
+    const result = await server.kernel.deliverHumanMessage(root, message.itemSeq, "interrupt");
+    expect(result).toEqual({ delivery: "turn", itemSeq: message.itemSeq });
+    expect(rows().find((r) => r.seq === message.itemSeq)).toMatchObject({
+      turnId: server.store.snapshot(run.run.id).turns[1]!.id,
+      item: { delivery: "turn", interrupted: true, escalated, clientId: "steered-then-interrupted" },
+    });
+    expect(driver.sessions[0]!.prompts).toEqual(["start", "urgent steer"]);
+    expect(driver.sessions[0]!.steered).toEqual(["urgent steer"]);
+    expect(rows().filter((r) => r.item.type === "user_message")).toHaveLength(2);
+  });
+
+  it("retracts only a queued message, leaving its row visible and skipping drain", async () => {
+    const hold = gate();
+    const { server, driver, root, rows } = await setup({ script: async (c) => { if (c.turn === 1) await hold.wait(c); } });
+    const retracted = await server.kernel.message(root, "withdraw this", "withdraw");
+    const waiting = await server.kernel.message(root, "send this");
+    server.kernel.retractMessage(root, retracted.itemSeq);
+    expect(rows().find((r) => r.seq === retracted.itemSeq)?.item).toEqual({ type: "user_message", text: "withdraw this", delivery: "retracted", clientId: "withdraw" });
+    await expect(server.kernel.deliverHumanMessage(root, retracted.itemSeq, "interrupt")).rejects.toMatchObject({ status: 409 });
+    expect(() => server.kernel.retractMessage(root, retracted.itemSeq)).toThrow("Only queued");
+    hold.release();
+    await until(() => server.store.node(root).turns === 2 && server.store.node(root).status === "idle");
+    expect(driver.sessions[0]!.prompts).toEqual(["start", "send this"]);
+    expect(rows().find((r) => r.seq === waiting.itemSeq)?.item).toMatchObject({ delivery: "turn" });
+    expect(rows().filter((r) => r.item.type === "notice")).toHaveLength(0);
+  });
+
+  it.each(["steer", "interrupt"] as const)("starts one turn if an escalated %s is reserved while the old turn ends", async (mode) => {
+    const hold = gate();
+    const { server, driver, root, rows } = await setup({ script: async (c) => { if (c.turn === 1) await hold.wait(c); } });
+    const queued = await server.kernel.message(root, "race to deliver", "race");
+    let release: () => void = () => {};
+    const ready = new Promise<void>((resolve) => { release = resolve; });
+    if (mode === "steer") driver.sessions[0]!.steer = async () => { await ready; return "no_active_turn"; };
+    else {
+      const interrupt = driver.sessions[0]!.interrupt.bind(driver.sessions[0]);
+      driver.sessions[0]!.interrupt = async () => { await ready; await interrupt(); };
+    }
+    const delivering = server.kernel.deliverHumanMessage(root, queued.itemSeq, mode);
+    hold.release();
+    await until(() => server.store.node(root).status === "idle");
+    release();
+    expect(await delivering).toEqual({ delivery: "turn", itemSeq: queued.itemSeq });
+    await until(() => server.store.node(root).status === "idle");
+    expect(driver.sessions[0]!.prompts).toEqual(["start", "race to deliver"]);
+    expect(rows().filter((r) => r.item.type === "user_message")).toHaveLength(2);
+  });
+
+  it("exposes delivery/retract controls and rejects invalid states and modes over HTTP", async () => {
+    const hold = gate();
+    const { server, root } = await setup({ script: (c) => hold.wait(c) });
+    const request = (path: string, method: string, input?: unknown) => fetch(`${server.url}/api/nodes/${root}/messages${path}`, {
+      method, headers: { authorization: `Bearer ${server.token}`, "content-type": "application/json" }, ...(input === undefined ? {} : { body: JSON.stringify(input) }),
+    });
+    const posted = await request("", "POST", { text: "HTTP queue", clientId: "http-queue" });
+    expect(posted.status).toBe(202);
+    const queued = await posted.json() as SendMessageResponse;
+    expect(queued).toMatchObject({ accepted: true, delivery: "queued" });
+    const steered = await request(`/${queued.itemSeq}/deliver`, "POST", { mode: "steer" });
+    expect(steered.status).toBe(202);
+    expect(await steered.json()).toEqual({ accepted: true, delivery: "steered", itemSeq: queued.itemSeq });
+    expect((await request(`/${queued.itemSeq}/deliver`, "POST", { mode: "steer" })).status).toBe(409);
+    expect((await request(`/${queued.itemSeq}`, "DELETE")).status).toBe(409);
+    const interrupted = await request(`/${queued.itemSeq}/deliver`, "POST", { mode: "interrupt" });
+    expect(interrupted.status).toBe(202);
+    expect(await interrupted.json()).toEqual({ accepted: true, delivery: "turn", itemSeq: queued.itemSeq });
+    const duplicate = await request(`/${queued.itemSeq}/deliver`, "POST", { mode: "interrupt" });
+    expect(duplicate.status).toBe(409);
+    expect(await duplicate.text()).toContain("already delivered");
+    const withdrawn = await (await request("", "POST", { text: "retract over HTTP" })).json() as SendMessageResponse;
+    expect((await request(`/${withdrawn.itemSeq}`, "DELETE")).status).toBe(200);
+    expect((await request(`/${withdrawn.itemSeq}`, "DELETE")).status).toBe(409);
+    expect((await request("/1/deliver", "POST", { mode: "interrupt" })).status).toBe(409); // initial kernel prompt
+    expect((await request("/999/deliver", "POST", { mode: "steer" })).status).toBe(409);
+    expect((await request("/0/deliver", "POST", { mode: "steer" })).status).toBe(400);
+    expect((await request(`/${withdrawn.itemSeq}/deliver`, "POST", { mode: "queue" })).status).toBe(400);
+    expect((await request("", "POST", { text: "bad mode", mode: "unknown" })).status).toBe(400);
+  });
+
   it.each(["turn", "steered", "queued"] as const)("returns the 202 API response for %s delivery", async (delivery) => {
     const hold = gate();
     const { server, root, rows } = await setup({ steer: delivery !== "queued", script: async (c) => { if (delivery !== "turn") await hold.wait(c); } });
     if (delivery === "turn") await until(() => server.store.node(root).status === "idle");
-    const response = await fetch(`${server.url}/api/nodes/${root}/messages`, { method: "POST", headers: { authorization: `Bearer ${server.token}`, "content-type": "application/json" }, body: JSON.stringify({ text: "API request", clientId: "api-client" }) });
+    const response = await fetch(`${server.url}/api/nodes/${root}/messages`, { method: "POST", headers: { authorization: `Bearer ${server.token}`, "content-type": "application/json" }, body: JSON.stringify({ text: "API request", clientId: "api-client", ...(delivery === "steered" ? { mode: "steer" } : {}) }) });
     expect(response.status).toBe(202);
     const body = await response.json() as SendMessageResponse;
     expect(body).toEqual({ accepted: true, delivery, itemSeq: expect.any(Number) });
-    expect(rows().find((r) => r.seq === body.itemSeq)?.item).toEqual({ type: "user_message", text: "API request", clientId: "api-client", delivery });
+    expect(rows().find((r) => r.seq === body.itemSeq)?.item).toEqual({ type: "user_message", text: "API request", clientId: "api-client", delivery, ...(delivery === "steered" ? { escalated: false } : {}) });
   });
 });

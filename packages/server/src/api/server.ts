@@ -8,7 +8,7 @@ import type { CreateProjectRequest, PatchProjectRequest, CreatePermissionRuleReq
 import type { DriverRegistry } from "../driver/types.js";
 import { FakeDriverRegistry } from "../driver/fake.js";
 import { Store } from "../store/index.js";
-import { DEFAULT_POLICY, Kernel } from "../kernel/index.js";
+import { DEFAULT_POLICY, Kernel, MessageError } from "../kernel/index.js";
 import { handleMcp } from "../mcp/index.js";
 import { Notifications, desktopNotifier, type Notifier } from "../notifications/index.js";
 import { exportRun, type ExportFormat } from "../telemetry/index.js";
@@ -73,7 +73,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
     void route(request, response).catch((error: unknown) => {
       if (response.headersSent) { response.end(); return; }
       const message = error instanceof Error ? error.message : String(error);
-      const status = error instanceof HttpError || error instanceof ProjectError ? error.status : /not found/i.test(message) ? 404 : 400;
+      const status = error instanceof HttpError || error instanceof ProjectError || error instanceof MessageError ? error.status : /not found/i.test(message) ? 404 : 400;
       json(response, status, { error: { code: `HTTP_${status}`, message } });
     });
   });
@@ -204,6 +204,19 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
           response.writeHead(200, { "content-type": format === "md" ? "text/markdown; charset=utf-8" : "application/json; charset=utf-8", "content-disposition": `attachment; filename="${id}.${format === "md" ? "md" : "json"}"` }).end(exportRun(store, id, format as ExportFormat)); return;
         }
       }
+      const message = /^\/api\/nodes\/([^/]+)\/messages\/([^/]+)(\/deliver)?$/.exec(path);
+      if (message) {
+        const id = message[1]!, seq = sequence(message[2]);
+        if (seq < 1) throw new HttpError(400, "Invalid message sequence");
+        if (method === "POST" && message[3]) {
+          const input = record(await body(request));
+          if (input.mode !== "steer" && input.mode !== "interrupt") throw new HttpError(400, "Invalid delivery mode");
+          const delivered = await kernel.deliverHumanMessage(id, seq, input.mode);
+          const result: SendMessageResponse = { accepted: true, ...delivered };
+          json(response, 202, result); return;
+        }
+        if (method === "DELETE" && !message[3]) { kernel.retractMessage(id, seq); json(response, 200, { accepted: true }); return; }
+      }
       const node = /^\/api\/nodes\/([^/]+)\/(items|messages|cancel)$/.exec(path);
       if (node) {
         const id = node[1]!; store.node(id);
@@ -211,7 +224,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
         if (method === "POST" && node[2] === "messages") {
           const input = record(await body(request));
           if (input.clientId !== undefined && typeof input.clientId !== "string") throw new HttpError(400, "clientId must be a string");
-          const delivered = await kernel.message(id, input.text as string, input.clientId);
+          if (input.mode !== undefined && input.mode !== "queue" && input.mode !== "steer" && input.mode !== "interrupt") throw new HttpError(400, "Invalid send mode");
+          const delivered = await kernel.message(id, input.text as string, input.clientId, input.mode);
           const result: SendMessageResponse = { accepted: true, ...delivered };
           json(response, 202, result); return;
         }
