@@ -92,6 +92,11 @@ export type TimelineItem =
       escalated?: boolean;
       /** Position in the node's queue while delivery is "queued" (ascending = delivered first). */
       queuePosition?: number;
+      /**
+       * Order (1..k) among the human messages delivered together into the same turn (drain); lets
+       * consumers restore the reordered sequence after a reload. Absent when delivered alone.
+       */
+      deliveryOrder?: number;
       /** Echo of SendMessageRequest.clientId, so the console can reconcile its optimistic row. */
       clientId?: string;
     }
