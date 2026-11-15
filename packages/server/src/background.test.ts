@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -23,7 +23,7 @@ async function setup(script: FakeScript = (c) => c.text("Done"), system?: Proces
   const server = await startServer({ home, port: 0, registry, notifier: () => {}, background: { system, idleMs: 60000, activeMs: 60000, afterShellMs: 60000 } }); servers.push(server);
   return server;
 }
-async function create(server: BatonServer) { return server.kernel.createRun({ agent: "root", cwd: server.home, prompt: "background task" }); }
+async function create(server: BatonServer) { return server.kernel.createRun({ projectId: (await server.kernel.projects.create({ path: server.home })).id, agent: "root", prompt: "background task" }); }
 async function until(test: () => boolean | Promise<boolean>): Promise<void> { const end = Date.now() + 5000; while (!await test()) { if (Date.now() > end) throw new Error("Timed out"); await delay(10); } }
 async function api(server: BatonServer, path: string, body?: unknown, method = body === undefined ? "GET" : "POST"): Promise<Response> {
   return fetch(server.url + path, { method, headers: { authorization: `Bearer ${server.token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -33,7 +33,7 @@ function fixtureSystem() {
   let rows: ProcessInfo[] = [], listeners = new Map<number, number[]>(), cwd = new Map<number, string>();
   const signals: Array<[number, NodeJS.Signals]> = [];
   const system: ProcessSystem = {
-    processes: async () => rows, ports: async () => listeners, cwds: async () => cwd, realpath: async (path) => path,
+    processes: async () => rows, ports: async () => listeners, cwds: async () => cwd, realpath,
     signal(pid, kind) { signals.push([pid, kind]); if (kind === "SIGKILL") rows = rows.filter((p) => pid < 0 ? p.pgid !== -pid : p.pid !== pid); },
   };
   return { system, signals, set(value: ProcessInfo[], ports = new Map<number, number[]>(), paths = new Map<number, string>()) { rows = value; listeners = ports; cwd = paths; } };

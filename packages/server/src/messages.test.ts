@@ -30,7 +30,7 @@ async function setup(options: FakeDriverOptions = {}) {
   const driver = new FakeDriver("root", { script: (c) => c.text("Done"), ...options });
   const server = await startServer({ home, port: 0, registry: new FakeDriverRegistry([driver]), notifier: () => {}, deliveryDebounceMs: 10 });
   servers.push(server);
-  const run = await server.kernel.createRun({ agent: "root", cwd: tmpdir(), prompt: "start", policy: { teamApproval: false } });
+  const run = await server.kernel.createRun({ projectId: (await server.kernel.projects.create({ path: tmpdir() })).id, agent: "root", cwd: tmpdir(), prompt: "start", policy: { teamApproval: false } });
   const root = run.run.rootNodeId;
   return { server, driver, run, root, rows: () => server.store.items(root) };
 }

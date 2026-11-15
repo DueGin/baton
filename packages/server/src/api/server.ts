@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile, chmod, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { CreatePermissionRuleRequest, ResolveEscalationRequest, ApproveTeamProposalRequest, AddMemberRequest, ReplaceMemberRequest, ReassignRequest, SaveTeamPresetRequest, TeamPresetInput, CreateRunRequest, PatchRunRequest, PermissionDecision, RunEventEnvelope, SendMessageResponse, UpdateSettingsRequest, TestTitleModelRequest } from "@baton/protocol";
+import type { CreateProjectRequest, PatchProjectRequest, CreatePermissionRuleRequest, ResolveEscalationRequest, ApproveTeamProposalRequest, AddMemberRequest, ReplaceMemberRequest, ReassignRequest, SaveTeamPresetRequest, TeamPresetInput, CreateRunRequest, PatchRunRequest, PermissionDecision, RunEventEnvelope, SendMessageResponse, UpdateSettingsRequest, TestTitleModelRequest } from "@baton/protocol";
 import type { DriverRegistry } from "../driver/types.js";
 import { FakeDriverRegistry } from "../driver/fake.js";
 import { Store } from "../store/index.js";
@@ -15,6 +15,7 @@ import { exportRun, type ExportFormat } from "../telemetry/index.js";
 import { Settings } from "../settings/index.js";
 import { Titles, type TitleGenerator } from "../titles/index.js";
 import { BackgroundRegistry, type BackgroundOptions } from "../background/index.js";
+import { Projects, ProjectError } from "../projects/index.js";
 export interface StartServerOptions {
   home?: string; port?: number; registry?: DriverRegistry; fake?: boolean; webDist?: string;
   maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; notifier?: Notifier; notificationCoalesceMs?: number;
@@ -56,6 +57,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
   let registry = options.registry;
   if (!registry) registry = options.fake ? new FakeDriverRegistry() : (await import("../driver/paseo-adapter.js")).createPaseoDriverRegistry({ home });
   const store = new Store(join(home, "baton.db"));
+  try {
+    const projects = new Projects(store); await projects.migrate();
+    if (options.fake) { const path = join(home, "demo-project"); await mkdir(path, { recursive: true }); await projects.create({ path, name: "Demo project" }); }
+  } catch (error) { store.close(); await registry.shutdown(); throw error; }
   const settings = new Settings(home), titles = new Titles(settings, options.titleGenerator);
   let desktop = process.platform === "darwin";
   try { const config = await settings.config(), notifications = config.notifications; if (notifications && typeof notifications === "object" && "desktop" in notifications && typeof notifications.desktop === "boolean") desktop = notifications.desktop; }
@@ -68,7 +73,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
     void route(request, response).catch((error: unknown) => {
       if (response.headersSent) { response.end(); return; }
       const message = error instanceof Error ? error.message : String(error);
-      const status = error instanceof HttpError ? error.status : /not found/i.test(message) ? 404 : 400;
+      const status = error instanceof HttpError || error instanceof ProjectError ? error.status : /not found/i.test(message) ? 404 : 400;
       json(response, status, { error: { code: `HTTP_${status}`, message } });
     });
   });
@@ -93,6 +98,17 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
     if (path.startsWith("/api/")) {
       const provided = request.headers.authorization?.startsWith("Bearer ") ? request.headers.authorization.slice(7) : (method === "GET" && path.endsWith("/events") ? url.searchParams.get("token") : null);
       if (!provided || Buffer.byteLength(provided) !== Buffer.byteLength(token) || !timingSafeEqual(Buffer.from(provided), Buffer.from(token))) throw new HttpError(401, "Bearer token required");
+      if (path === "/api/projects") {
+        if (method === "GET") { json(response, 200, await kernel.projects.list(url.searchParams.get("archived") === "1")); return; }
+        if (method === "POST") { json(response, 201, await kernel.projects.create(record(await body(request)) as unknown as CreateProjectRequest)); return; }
+      }
+      const projectRoute = /^\/api\/projects\/([^/]+)$/.exec(path);
+      if (projectRoute) {
+        const id = decodeURIComponent(projectRoute[1]!);
+        if (method === "GET") { json(response, 200, await kernel.projects.summary(id)); return; }
+        if (method === "PATCH") { kernel.projects.patch(id, record(await body(request)) as PatchProjectRequest); json(response, 200, await kernel.projects.summary(id)); return; }
+      }
+      if (method === "GET" && path === "/api/fs/dirs") { json(response, 200, await kernel.projects.dirs(url.searchParams.get("path") ?? undefined, url.searchParams.get("hidden") === "1")); return; }
       if (method === "GET" && path === "/api/background") { await background.scan(); json(response, 200, background.list(url.searchParams.get("status") ?? "running")); return; }
       const backgroundRoute = /^\/api\/background\/([^/]+)\/(stop|dismiss)$/.exec(path);
       if (method === "POST" && backgroundRoute) {
@@ -123,7 +139,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
       if (method === "GET" && path === "/api/agents") { json(response, 200, await kernel.agents()); return; }
       if (method === "POST" && path === "/api/agents/refresh") { await body(request); json(response, 200, await kernel.agents(true)); return; }
       if (path === "/api/runs") {
-        if (method === "GET") { json(response, 200, store.list()); return; }
+        if (method === "GET") { json(response, 200, store.list(url.searchParams.get("projectId") ?? undefined)); return; }
         if (method === "POST") { json(response, 201, await kernel.createRun(record(await body(request)) as unknown as CreateRunRequest)); return; }
       }
       if (path === "/api/teams") {

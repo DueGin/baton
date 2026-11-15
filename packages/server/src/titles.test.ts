@@ -28,7 +28,7 @@ async function until(test: () => boolean): Promise<void> {
   const end = Date.now() + 4000; while (!test()) { if (Date.now() > end) throw new Error("Timed out"); await delay(5); }
 }
 async function create(server: BatonServer, prompt = "Build a pixel football game"): Promise<RunSnapshot> {
-  return api(server, "/api/runs", "POST", { agent: "root", cwd: tmpdir(), prompt });
+  return api(server, "/api/runs", "POST", { projectId: (await server.kernel.projects.create({ path: tmpdir() })).id, agent: "root", cwd: tmpdir(), prompt });
 }
 
 describe("run titles over HTTP", () => {
@@ -128,7 +128,7 @@ describe("run titles over HTTP", () => {
   it("honors an explicit createRun title and does not name after shutdown", async () => {
     let calls = 0, finish: (title: string) => void = () => {};
     const server = await setup({ titleGenerator: async () => { calls++; return new Promise((resolve) => { finish = resolve; }); } }, { titleModel: model });
-    const custom = await server.kernel.createRun({ agent: "root", cwd: tmpdir(), prompt: "Prompt", title: "Provided by human" });
+    const custom = await server.kernel.createRun({ projectId: (await server.kernel.projects.create({ path: tmpdir() })).id, agent: "root", cwd: tmpdir(), prompt: "Prompt", title: "Provided by human" });
     await delay(10); expect(calls).toBe(0); expect(custom.run.titleSource).toBe("human");
     const pending = await create(server); await until(() => calls === 1);
     await server.kernel.shutdown(); finish("Must not update"); await delay(10);

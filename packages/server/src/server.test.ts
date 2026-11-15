@@ -17,7 +17,7 @@ async function setup(scripts: Record<string, FakeScript | FakeDriverOptions>, op
   const server = await startServer({ home, port: 0, registry: new FakeDriverRegistry(scripts), deliveryDebounceMs: 20, ...options }); servers.push(server); return server;
 }
 async function until(test: () => boolean, timeout = 4000): Promise<void> { const end = Date.now() + timeout; while (!test()) { if (Date.now() > end) throw new Error("Timed out waiting for condition"); await delay(10); } }
-async function create(server: BatonServer, agent = "root", policy = {}): Promise<RunSnapshot> { return server.kernel.createRun({ agent, cwd: tmpdir(), prompt: "start", policy: { teamApproval: false, ...policy } }); }
+async function create(server: BatonServer, agent = "root", policy = {}): Promise<RunSnapshot> { return server.kernel.createRun({ projectId: (await server.kernel.projects.create({ path: tmpdir() })).id, agent, cwd: tmpdir(), prompt: "start", policy: { teamApproval: false, ...policy } }); }
 function children(server: BatonServer, id: string): DelegationRecord[] { return server.store.snapshot(id).delegations; }
 const idle: FakeScript = (c) => { c.text("Done."); };
 
@@ -189,7 +189,7 @@ describe("lifecycle and demo", () => {
   it("runs the shipped demo with parallel agents, grandchild, permission and failed child", async () => {
     const home = await mkdtemp(join(tmpdir(), "baton-test-")); homes.push(home);
     const server = await startServer({ home, port: 0, fake: true, deliveryDebounceMs: 30 }); servers.push(server);
-    const run = await server.kernel.createRun({ agent: "fake-claude", cwd: tmpdir(), prompt: "legacy demo", policy: { autoApprove: true, teamApproval: false } });
+    const run = await server.kernel.createRun({ projectId: server.store.projects().find((p) => p.name === "Demo project")!.id, agent: "fake-claude", prompt: "legacy demo", policy: { autoApprove: true, teamApproval: false } });
     await until(() => {
       const snapshot = server.store.snapshot(run.run.id);
       return snapshot.nodes.length === 5 && snapshot.delegations.every((d) => ["completed", "failed"].includes(d.status)) && snapshot.run.status === "idle";
@@ -215,7 +215,7 @@ describe("HTTP and exports", () => {
       return result.stdout;
     };
     expect(await cli("agents", "--refresh")).toContain("root");
-    const result = await cli("run", "root", "CLI smoke", "--cwd", tmpdir());
+    const result = await cli("run", "root", "CLI smoke", "--project", tmpdir());
     const id = result.trim().replace(/^Run /, "");
     expect(await cli("runs")).toContain(id);
     expect(await cli("export", id, "--format", "md")).toContain("CLI smoke");

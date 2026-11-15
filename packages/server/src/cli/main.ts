@@ -3,16 +3,16 @@ import { readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import type { AgentEntry, RunSnapshot, RunSummary } from "@baton/protocol";
+import type { AgentEntry, CreateRunRequest, ProjectRecord, ProjectSummary, RunSnapshot, RunSummary } from "@baton/protocol";
 import { startServer } from "../index.js";
 const { values, positionals } = parseArgs({ allowPositionals: true, options: {
-  home: { type: "string" }, port: { type: "string" }, fake: { type: "boolean" }, refresh: { type: "boolean" }, cwd: { type: "string" }, model: { type: "string" }, mode: { type: "string" }, "auto-approve": { type: "boolean" }, follow: { type: "boolean" }, format: { type: "string" }, output: { type: "string", short: "o" }, help: { type: "boolean", short: "h" },
+  home: { type: "string" }, port: { type: "string" }, fake: { type: "boolean" }, refresh: { type: "boolean" }, project: { type: "string" }, cwd: { type: "string" }, model: { type: "string" }, mode: { type: "string" }, "auto-approve": { type: "boolean" }, follow: { type: "boolean" }, format: { type: "string" }, output: { type: "string", short: "o" }, help: { type: "boolean", short: "h" },
 } });
 const home = resolve(values.home ?? process.env.BATON_HOME ?? join(homedir(), ".baton"));
 async function main(): Promise<void> {
   const command = positionals[0];
   if (values.help || !command) {
-    console.log("baton serve [--port 7433] [--home DIR] [--fake]\nbaton agents [--refresh]\nbaton runs\nbaton run <agent> <prompt> [--cwd DIR] [--model ID] [--mode ID] [--auto-approve] [--follow]\nbaton export <runId> --format json|md|otlp [-o FILE]"); return;
+    console.log("baton serve [--port 7433] [--home DIR] [--fake]\nbaton agents [--refresh]\nbaton projects\nbaton projects add <path>\nbaton runs [--project ID|PATH]\nbaton run <agent> <prompt> --project ID|PATH [--cwd DIR] [--model ID] [--mode ID] [--auto-approve] [--follow]\nbaton export <runId> --format json|md|otlp [-o FILE]"); return;
   }
   if (command === "serve") {
     const port = values.port === undefined ? 7433 : Number(values.port);
@@ -30,14 +30,35 @@ async function main(): Promise<void> {
     const response = await fetch(url + path, { method, headers: { authorization: `Bearer ${token}`, ...(input === undefined ? {} : { "content-type": "application/json" }) }, body: input === undefined ? undefined : JSON.stringify(input) });
     if (!response.ok) throw new Error(await response.text()); return await response.json() as T;
   };
+  const projectPath = (path: string): string => path === "~" ? homedir() : path.startsWith("~/") ? join(homedir(), path.slice(2)) : resolve(path);
+  const selectProject = async (value: string): Promise<ProjectRecord> => {
+    const projects = await request<ProjectSummary[]>("/api/projects?archived=1");
+    const registered = projects.find((p) => p.id === value);
+    if (registered) return registered;
+    if (/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value)) throw new Error(`Project not found: ${value}`);
+    return request<ProjectRecord>("/api/projects", "POST", { path: projectPath(value) });
+  };
+  if (command === "projects") {
+    if (positionals[1] === "add") {
+      const path = positionals[2]; if (!path) throw new Error("Usage: baton projects add <path>");
+      const project = await request<ProjectRecord>("/api/projects", "POST", { path: projectPath(path) });
+      console.log(`${project.id}  ${project.name}  ${project.path}`); return;
+    }
+    if (positionals[1]) throw new Error("Usage: baton projects [add <path>]");
+    for (const p of await request<ProjectSummary[]>("/api/projects")) console.log(`${p.id}  ${p.name}  ${p.path}  ${p.runCount} runs${p.gitBranch ? `  ${p.gitBranch}` : ""}${p.exists ? "" : "  (missing)"}`);
+    return;
+  }
   if (command === "agents") {
     const agents = await request<AgentEntry[]>(values.refresh ? "/api/agents/refresh" : "/api/agents", values.refresh ? "POST" : "GET", values.refresh ? {} : undefined);
     for (const a of agents) console.log(`${a.id.padEnd(18)} ${a.status.padEnd(12)} ${a.label}${a.diagnostic ? ` — ${a.diagnostic}` : ""}`); return;
   }
-  if (command === "runs") { for (const r of await request<RunSummary[]>("/api/runs")) console.log(`${r.id}  ${r.status.padEnd(12)} ${r.nodeCount} nodes  ${r.title}`); return; }
+  if (command === "runs") { const selected = values.project ? await selectProject(values.project) : undefined; for (const r of await request<RunSummary[]>(`/api/runs${selected ? `?projectId=${encodeURIComponent(selected.id)}` : ""}`)) console.log(`${r.id}  ${r.status.padEnd(12)} ${r.nodeCount} nodes  ${r.title}`); return; }
   if (command === "run") {
     const agent = positionals[1], prompt = positionals.slice(2).join(" "); if (!agent || !prompt) throw new Error("Usage: baton run <agent> <prompt>");
-    const s = await request<RunSnapshot>("/api/runs", "POST", { agent, prompt, cwd: resolve(values.cwd ?? process.cwd()), model: values.model, modeId: values.mode, policy: { autoApprove: values["auto-approve"] ?? false } });
+    if (!values.project) throw new Error("--project <id|path> is required to start a run");
+    const project = await selectProject(values.project);
+    const input: CreateRunRequest = { agent, prompt, projectId: project.id, ...(values.cwd ? { cwd: projectPath(values.cwd) } : {}), model: values.model, modeId: values.mode, policy: { autoApprove: values["auto-approve"] ?? false } };
+    const s = await request<RunSnapshot>("/api/runs", "POST", input);
     console.log(`Run ${s.run.id}`);
     if (!values.follow) return;
     const render = async (): Promise<void> => {
