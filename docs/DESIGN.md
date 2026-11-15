@@ -322,6 +322,7 @@ agent 常会启动长期运行的进程，比如 `npm run dev`、`nohup … &`�
 | POST | `/api/settings/title-model/test` | `TestTitleModelRequest` → `TestTitleModelResponse` |
 | GET | `/api/nodes/:nodeId/items?after=<itemSeq>` | 节点 transcript |
 | POST | `/api/nodes/:nodeId/messages/:itemSeq/deliver` | `DeliverMessageRequest`：排队消息改为引导，或者立即发送（中断当前回合） |
+| PATCH | `/api/nodes/:nodeId/messages/:itemSeq` | `EditMessageRequest`：修改仍在排队的消息 |
 | DELETE | `/api/nodes/:nodeId/messages/:itemSeq` | 撤回仍在排队的消息 |
 | PUT | `/api/nodes/:nodeId/queue` | `ReorderQueueRequest`：调整排队消息的顺序 |
 | POST | `/api/nodes/:nodeId/messages` | `{ text }`，人给节点发消息 |
@@ -393,7 +394,11 @@ agent 常会启动长期运行的进程，比如 `npm run dev`、`nohup … &`�
        - 送达时，每条消息在合并后的提示里按顺序出现，各自的行都改成 `turn`。
      - **调整顺序**：可以拖动手柄，也可以用每条上的上移/下移图标（键盘可操作）。调整后调用 `PUT /api/nodes/:id/queue {order}`；如果服务端返回 409，说明队列已经变了，重新拉取。
      - **操作按钮全部用图标**，带 tooltip 和 aria-label，放在对应消息上：排队卡片的右侧，或者对话流里消息气泡的右上角。
-       - 排队卡片上的图标：拖动手柄、上移、下移、**引导发送**（插入当前回合）、撤回。
+       - 排队卡片上的图标：拖动手柄、上移、下移、**引导发送**（插入当前回合）、**编辑**。
+         - 点编辑后，卡片内变成输入框：Enter 或保存按钮保存，Esc 取消，调用 `PATCH …/messages/:itemSeq {text}`。
+         - 保存后行上记 `editedAt`，卡片显示"已编辑"。
+         - 编辑状态下有一个"删除这条"图标，用来撤回（`DELETE`，确认后执行），这是撤回的唯一入口。
+         - 编辑期间如果这条消息已经被送达，保存会返回 409，提示"已送达，无法修改"。
        - 引导成功后，消息离开排队区，进入对话流，位置在当前回合的末尾，气泡上带"已插入当前回合"的状态图标。这时气泡上才出现**立即发送**图标（中断当前回合，用这条消息开新的一轮）。
        - 如果 provider 不支持引导，就提示"该 agent 不支持引导"，消息留在排队区，卡片上直接出现立即发送图标。
      - **状态图标**，替代原来的文字徽标：
@@ -401,7 +406,8 @@ agent 常会启动长期运行的进程，比如 `npm run dev`、`nohup … &`�
        - 已引导：转向箭头
        - 已中断并立即发送：闪电
        - 已送达：对勾
-       - 已撤回：撤回箭头，卡片随即从排队区移除
+       - 已撤回：卡片随即从排队区移除
+       - 已编辑：铅笔小标记
      - **对话流里的位置**：从排队送达的消息，显示在它开启的那一轮最前面，也就是带同样 `turnId` 的第一条记录之前，而不是按发送时的 itemSeq 排。
      - 被中断的回合状态记为 `canceled`，原因是"interrupted by human message"。这个回合**不触发**委派结果的采集，节点的子委派也不受影响。
      - API：

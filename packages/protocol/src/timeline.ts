@@ -90,6 +90,8 @@ export type TimelineItem =
       interrupted?: boolean;
       /** True when a queued message was later steered into the running turn ("引导发送"). */
       escalated?: boolean;
+      /** Set when the human edited the text while it was queued. */
+      editedAt?: string;
       /** Position in the node's queue while delivery is "queued" (ascending = delivered first). */
       queuePosition?: number;
       /**

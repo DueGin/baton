@@ -74,6 +74,11 @@ export interface ReorderQueueResponse {
   order: number[];
 }
 
+/** PATCH /api/nodes/:nodeId/messages/:itemSeq — edit the text of a still-queued human message (409 otherwise). */
+export interface EditMessageRequest {
+  text: string;
+}
+
 /** DELETE /api/nodes/:nodeId/messages/:itemSeq — retract a still-queued human message (delivery → "retracted"). */
 
 export interface PermissionDecision {
