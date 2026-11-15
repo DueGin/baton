@@ -13,7 +13,7 @@ export function BackgroundPill({ snapshot, open, controls, onClick }: { snapshot
   const summary = backgroundSummary(snapshot);
   return summary.count ? <button type="button" className={`background-pill${summary.hasPorts ? " has-ports" : ""}`} aria-expanded={open} aria-controls={controls} aria-haspopup="dialog" title={summary.hasPorts ? "本会话有服务正在监听端口" : "查看本会话的后台进程"} onClick={onClick}><Icon name="server" size={13} />后台 {summary.count}</button> : null;
 }
-export function BackgroundList({ snapshot, now, client, compact = false }: { snapshot: RunSnapshot; now: number; client?: BatonClient; compact?: boolean }) {
+export function BackgroundList({ snapshot, now, client, compact = false, projectName }: { snapshot: RunSnapshot; now: number; client?: BatonClient; compact?: boolean; projectName?: string }) {
   const { active, exited } = backgroundSummary(snapshot);
   const [confirm, setConfirm] = useState<BackgroundProcess | null>(null); const [stopping, setStopping] = useState<Set<string>>(new Set()); const [dismissing, setDismissing] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string>(); const [requesting, setRequesting] = useState(false);
@@ -37,17 +37,17 @@ export function BackgroundList({ snapshot, now, client, compact = false }: { sna
       <div className="background-actions">{process.status !== "exited" && <button type="button" className="text-button danger-text" disabled={!client || status === "stopping"} onClick={() => { setError(undefined); setConfirm(process); }}>{status === "stopping" ? "停止中…" : "停止"}</button>}<CopyButton text={process.command} label="复制命令" /><button type="button" className="text-button" disabled={!client || dismissing.has(process.id)} onClick={() => { void dismiss(process.id); }}>{dismissing.has(process.id) ? "隐藏中…" : "不是本会话启动的"}</button></div>
     </article>;
   };
-  return <div className={`background-list${compact ? " is-compact" : ""}`}>{active.map(row)}{!active.length && <p className="muted background-empty">没有运行中的后台进程</p>}
+  return <div className={`background-list${compact ? " is-compact" : ""}`}><div className="background-run-context">{projectName && <strong>{projectName} / </strong>}{snapshot.run.title}</div>{active.map(row)}{!active.length && <p className="muted background-empty">没有运行中的后台进程</p>}
     {exited.length > 0 && <details className="background-exited"><summary>已退出 {exited.length} 个</summary>{exited.map(row)}</details>}
     {error && !confirm && <div className="error-panel" role="alert">{error}</div>}
     {confirm && <Modal title="停止后台进程" close={() => { if (!requesting) setConfirm(null); }}><p>停止这个进程及其折叠的子进程？</p><code className="background-confirm-command">{confirm.command}</code><p className="muted">pid {confirm.pid}{confirm.ports.length > 0 ? ` · 端口 ${confirm.ports.join(", ")}` : ""} · 先尝试正常退出，5 秒后仍在运行则强制停止。</p>{error && <div className="error-panel" role="alert">{error}</div>}<div className="dialog-footer"><button type="button" className="button" disabled={requesting} onClick={() => setConfirm(null)}>返回</button><button type="button" className="button danger" disabled={requesting} onClick={() => { void stop(); }}>{requesting ? "停止中…" : "确认停止"}</button></div></Modal>}
   </div>;
 }
-export function BackgroundPopover({ snapshot, now, client }: { snapshot: RunSnapshot; now: number; client: BatonClient }) {
+export function BackgroundPopover({ snapshot, now, client, projectName }: { snapshot: RunSnapshot; now: number; client: BatonClient; projectName?: string }) {
   const [open, setOpen] = useState(false); const id = useId(); const container = useRef<HTMLDivElement>(null); const panel = useRef<HTMLDivElement>(null);
   const close = () => { setOpen(false); container.current?.querySelector<HTMLButtonElement>(".background-pill")?.focus(); };
   useEffect(() => { if (!open) return; panel.current?.focus(); const outside = (event: PointerEvent) => { if (document.querySelector("dialog[open]")) return; if (event.target instanceof Node && !container.current?.contains(event.target)) setOpen(false); }; document.addEventListener("pointerdown", outside); return () => document.removeEventListener("pointerdown", outside); }, [open]);
-  return <div ref={container} className="background-popover-anchor" onKeyDown={event => { if (event.key === "Escape" && !document.querySelector("dialog[open]")) { event.stopPropagation(); event.preventDefault(); close(); } }}><BackgroundPill snapshot={snapshot} open={open} controls={id} onClick={() => setOpen(value => !value)} />{open && <div ref={panel} id={id} role="dialog" aria-label="本会话的后台进程" tabIndex={-1} className="background-popover"><header><strong>后台进程</strong><small>本 Run 的所有 agent</small><button type="button" className="icon-button" aria-label="关闭后台进程" onClick={close}><Icon name="close" size={14} /></button></header><BackgroundList snapshot={snapshot} now={now} client={client} /></div>}</div>;
+  return <div ref={container} className="background-popover-anchor" onKeyDown={event => { if (event.key === "Escape" && !document.querySelector("dialog[open]")) { event.stopPropagation(); event.preventDefault(); close(); } }}><BackgroundPill snapshot={snapshot} open={open} controls={id} onClick={() => setOpen(value => !value)} />{open && <div ref={panel} id={id} role="dialog" aria-label="本会话的后台进程" tabIndex={-1} className="background-popover"><header><strong>后台进程</strong><small>本 Run 的所有 agent</small><button type="button" className="icon-button" aria-label="关闭后台进程" onClick={close}><Icon name="close" size={14} /></button></header><BackgroundList projectName={projectName} snapshot={snapshot} now={now} client={client} /></div>}</div>;
 }
 export function CancelRunDialog({ snapshot, busy, close, submit, error }: { snapshot: RunSnapshot; busy: boolean; close: () => void; submit: (request: CancelRunRequest) => void; error?: string | null }) {
   const [stopBackground, setStopBackground] = useState(false); const count = backgroundSummary(snapshot).count;

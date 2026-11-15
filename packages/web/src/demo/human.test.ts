@@ -70,12 +70,12 @@ describe("human-in-the-loop browser demo", () => {
   });
   it("supports human questions in solo mode and enforces the team size cap", async () => {
     const client = new DemoClient(() => base);
-    const solo = await client.createRun({ agent: "pi", cwd: "/tmp/demo", prompt: "Inspect", policy: { mode: "solo" } });
+    const solo = await client.createRun({ projectId: "project-atlas", agent: "pi", prompt: "Inspect", policy: { mode: "solo" } });
     const question = client.askHuman(solo.run.rootNodeId, { question: "Which format?", options: ["JSON", "Markdown"], blocking: true });
     await client.answer(question.id, { answer: "JSON" });
     const answered = await client.run(solo.run.id);
     expect(answered.questions[0]!.status).toBe("answered"); expect(answered.run.team).toBeUndefined(); expect(answered.delegations).toHaveLength(0);
-    const team = await client.createRun({ agent: "claude", cwd: "/tmp/demo", prompt: "Build", policy: { maxTeamSize: 1, teamApproval: true } });
+    const team = await client.createRun({ projectId: "project-atlas", agent: "claude", prompt: "Build", policy: { maxTeamSize: 1, teamApproval: true } });
     const proposal = team.run.team!.proposals[0]!;
     expect(proposal.members).toHaveLength(1);
     await expect(client.approveTeam(team.run.id, proposal.id, { members: [{ role: "one", agentId: "pi" }, { role: "two", agentId: "codex" }] })).rejects.toThrow("maxTeamSize");

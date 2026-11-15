@@ -7,7 +7,7 @@ const base = Date.parse("2026-11-10T07:00:00Z");
 describe("title and idle-session demo", () => {
   it("generates a title after 1.5s through run.updated and updates the list", async () => {
     let now = base; const client = new DemoClient(() => now);
-    const initial = await client.createRun({ agent: "claude", cwd: "/tmp/demo", prompt: "全局搜索和独立审查", policy: { mode: "solo" } });
+    const initial = await client.createRun({ projectId: "project-atlas", agent: "claude", prompt: "全局搜索和独立审查", policy: { mode: "solo" } });
     expect(initial.run.titleSource).toBe("prompt");
     const events: RunEventEnvelope[] = []; const controller = new AbortController();
     const streaming = client.events(initial.run.id, initial.lastSeq, event => events.push(event), controller.signal);
@@ -20,13 +20,13 @@ describe("title and idle-session demo", () => {
   });
   it("preserves human names from automatic jobs and allows explicit regeneration", async () => {
     let now = base; const client = new DemoClient(() => now);
-    const initial = await client.createRun({ agent: "codex", cwd: "/tmp/demo", prompt: "改进全局搜索", policy: { mode: "solo" } });
+    const initial = await client.createRun({ projectId: "project-atlas", agent: "codex", prompt: "改进全局搜索", policy: { mode: "solo" } });
     await client.patchRun(initial.run.id, { title: "自定义名字" }); now += 2000;
     expect((await client.run(initial.run.id)).run).toMatchObject({ title: "自定义名字", titleSource: "human" });
     await client.regenerateTitle(initial.run.id); now += 1500;
     expect((await client.run(initial.run.id)).run.titleSource).toBe("generated");
     await client.updateSettings({ titleModel: { enabled: false } });
-    const disabled = await client.createRun({ agent: "pi", cwd: "/tmp/demo", prompt: "不生成标题", policy: { mode: "solo" } }); now += 2000;
+    const disabled = await client.createRun({ projectId: "project-atlas", agent: "pi", prompt: "不生成标题", policy: { mode: "solo" } }); now += 2000;
     expect((await client.run(disabled.run.id)).run.titleSource).toBe("prompt");
     await client.regenerateTitle(disabled.run.id); now += 1500;
     expect((await client.run(disabled.run.id)).run.titleSource).toBe("generated");
