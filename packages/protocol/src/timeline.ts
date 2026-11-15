@@ -85,7 +85,11 @@ export type TimelineItem =
        * was injected into the running turn, "queued" waits for the running turn to end (the same
        * itemSeq is replaced with "turn" when it is delivered). Absent for kernel prompts.
        */
-      delivery?: "turn" | "steered" | "queued";
+      delivery?: "turn" | "steered" | "queued" | "retracted";
+      /** True when this message interrupted the node's running turn ("立即发送"). */
+      interrupted?: boolean;
+      /** True when a queued message was later steered into the running turn ("引导发送"). */
+      escalated?: boolean;
       /** Echo of SendMessageRequest.clientId, so the console can reconcile its optimistic row. */
       clientId?: string;
     }

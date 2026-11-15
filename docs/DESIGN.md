@@ -321,6 +321,8 @@ agent 常会启动长期运行的进程，比如 `npm run dev`、`nohup … &`�
 | GET/PUT | `/api/settings` | `SettingsResponse` / `UpdateSettingsRequest`（标题模型等） |
 | POST | `/api/settings/title-model/test` | `TestTitleModelRequest` → `TestTitleModelResponse` |
 | GET | `/api/nodes/:nodeId/items?after=<itemSeq>` | 节点 transcript |
+| POST | `/api/nodes/:nodeId/messages/:itemSeq/deliver` | `DeliverMessageRequest`：排队消息改为引导，或者立即发送（中断当前回合） |
+| DELETE | `/api/nodes/:nodeId/messages/:itemSeq` | 撤回仍在排队的消息 |
 | POST | `/api/nodes/:nodeId/messages` | `{ text }`，人给节点发消息 |
 | POST | `/api/nodes/:nodeId/cancel` | 级联取消该节点的子树 |
 | POST | `/api/permissions/:requestId` | `PermissionDecision`（可带 `remember` 生成规则） |
@@ -383,6 +385,17 @@ agent 常会启动长期运行的进程，比如 `npm run dev`、`nohup … &`�
      - 已开始新一轮；
      - 已插入当前回合（steer）；
      - 排队中：当前回合结束后送达。排队的消息也会立即落库成 `user_message`，标 `delivery:"queued"`；送达时同一行改成 `"turn"`。
+   - **发送模式**（节点忙、有正在运行的回合时才有区别；节点空闲时一律直接开新的一轮）：
+     - **默认排队**：消息记为 `queued`，当前回合结束后送达（多条排队消息合并成一轮）。
+     - 排队中的消息气泡上有两个按钮："**引导发送**"和"撤回"。
+       - 点"引导发送"，这条消息就插入当前回合（steer），记为 `steered` 和 `escalated:true`。
+       - 如果 provider 不支持插话，就提示"该 agent 不支持引导"，消息继续排队，并直接显示"立即发送"。
+     - 消息已经引导、或者引导不被支持时，气泡上才出现"**立即发送**"：先中断当前回合，再用这条消息开一轮新的，记为 `turn` 和 `interrupted:true`。
+       - 如果是已经引导过的消息，同样的文本会再作为新一轮的输入发一次，因为被中断的回合里 agent 可能还没来得及处理。
+     - 被中断的回合状态记为 `canceled`，原因是"interrupted by human message"。这个回合**不触发**委派结果的采集，不会被当成失败或完成。节点的子委派也不受影响。
+     - 撤回：只有 `queued` 状态的消息能撤回，撤回后记为 `retracted`。气泡显示成删除线加"已撤回"，消息不会被送达。
+     - API：`SendMessageRequest.mode` 可以直接指定 queue、steer 或 interrupt。`POST …/messages/:itemSeq/deliver` 用来升级发送方式，`DELETE …/messages/:itemSeq` 用来撤回。
+     - 输入框下方的提示文字随状态变化："运行中 · 发送后排队，可在消息上改为引导或立即发送"。
    - **实时状态条**：节点有活跃回合时，对话底部常驻一条状态条，带动画和本轮计时，并按最新事件显示当前阶段：
      - 刚开始，还没有任何事件："已发送，等待响应…"
      - 推理文本流入中："思考中"，实时显示最后 1–2 行推理，点击展开全文

@@ -29,19 +29,41 @@ export interface PatchRunRequest {
   policy?: Partial<Pick<RunPolicy, "autoApprove" | "maxDepth" | "maxActiveChildren" | "budget" | "teamApproval" | "maxTeamSize" | "stallMinutes" | "maxRoundsPerDelegation">>;
 }
 
+/**
+ * How a human message reaches a node that is busy (DESIGN §8.3 "发送模式"). An idle node always
+ * starts a new turn, whatever the mode.
+ * - "queue" (default): wait until the running turn ends.
+ * - "steer": inject into the running turn (falls back to "queue" and reports `steerUnsupported`
+ *   when the provider cannot steer).
+ * - "interrupt": interrupt the running turn, then start a new turn with this message.
+ */
+export type SendMode = "queue" | "steer" | "interrupt";
+
 export interface SendMessageRequest {
   text: string;
   /** Client-generated id echoed on the stored user_message item (optimistic UI reconciliation). */
   clientId?: string;
+  /** Default "queue". */
+  mode?: SendMode;
 }
 
-/** 202 response of POST /api/nodes/:nodeId/messages. */
+/** POST /api/nodes/:nodeId/messages/:itemSeq/deliver — escalate a queued (or steered) human message. */
+export interface DeliverMessageRequest {
+  /** "steer": only for a queued message. "interrupt": for a queued or steered message. */
+  mode: "steer" | "interrupt";
+}
+
+/** 202 response of POST /api/nodes/:nodeId/messages and …/deliver. */
 export interface SendMessageResponse {
   accepted: true;
   delivery: "turn" | "steered" | "queued";
+  /** Set when mode "steer" was asked for but the provider cannot steer (the message stays queued). */
+  steerUnsupported?: boolean;
   /** Node-local seq of the user_message item that represents this message. */
   itemSeq: number;
 }
+
+/** DELETE /api/nodes/:nodeId/messages/:itemSeq — retract a still-queued human message (delivery → "retracted"). */
 
 export interface PermissionDecision {
   response: PermissionResponse;
