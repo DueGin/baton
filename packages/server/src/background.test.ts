@@ -139,6 +139,47 @@ describe("background persistence and control", () => {
     release(); await first; await registry.close();
     const windows = new BackgroundRegistry(server.store, () => [], { system, platform: "win32" }); await windows.scan(); expect(calls).toBe(1); expect(windows.list()).toEqual([]); await windows.close();
   });
+  it("shows only the python service across a Claude tool shell exit, with no exited wrapper entry", async () => {
+    const fixture = fixtureSystem(), server = await setup(undefined, fixture.system);
+    const run = await create(server), nodeId = run.run.rootNodeId;
+    const startedAt = new Date(Date.now() - 1000).toISOString();
+    const span: ToolSpanRecord = { id: "claude-bash", runId: run.run.id, nodeId, callId: "bash", name: "Bash", kind: "shell", summary: "nohup python3 -m http.server 8765", status: "running", startedAt };
+    server.store.append(run.run.id, { type: "tool.span", span });
+    server.kernel.processSources = () => [{ runId: run.run.id, nodeId, cwd: server.home, pids: [100], spans: [span] }];
+    const agent = proc(100, 1, 100, "claude"), wrapper = { ...proc(62507, 100, 62507, "/bin/zsh -c source ~/.claude/shell-snapshots/snapshot-zsh-123 && eval 'nohup python3 -m http.server 8765 &'"), startedAt }, python = { ...proc(62508, 62507, 62507, "python3 -m http.server 8765"), startedAt };
+    const ports = new Map([[python.pid, [8765]]]), cwd = new Map([[wrapper.pid, server.home], [python.pid, server.home]]);
+    fixture.set([agent, wrapper, python], ports, cwd); await server.background.scan();
+    expect(server.store.snapshot(run.run.id).backgroundProcesses).toMatchObject([{ pid: python.pid, status: "running", attribution: "tree", ports: [8765] }]);
+    span.status = "completed"; span.endedAt = new Date().toISOString();
+    fixture.set([agent, { ...python, ppid: 1 }], ports, cwd); await server.background.scan();
+    const snapshot = server.store.snapshot(run.run.id);
+    expect(snapshot.backgroundProcesses).toHaveLength(1);
+    expect(snapshot.backgroundProcesses).toMatchObject([{ pid: python.pid, status: "running", attribution: "group", pgid: wrapper.pid, ports: [8765] }]);
+    expect(server.background.list("all")).toHaveLength(1); expect(server.background.list("exited")).toEqual([]);
+    expect(server.store.events(run.run.id).filter((e) => e.type === "background").every((e) => e.type === "background" && e.process.pid === python.pid)).toBe(true);
+  });
+  it.each(["running", "exited"] as const)("filters an old %s wrapper registration once its surviving child is registered, including after restart", async (status) => {
+    const fixture = fixtureSystem(), server = await setup(undefined, fixture.system);
+    const run = await create(server), nodeId = run.run.rootNodeId;
+    const span: ToolSpanRecord = { id: "old-shell", runId: run.run.id, nodeId, callId: "shell", name: "Bash", kind: "shell", summary: "nohup python3 -m http.server 8765", status: "completed", startedAt: ts, endedAt: ts };
+    server.store.append(run.run.id, { type: "tool.span", span });
+    const wrapper = proc(62507, 100, 62507, "/bin/zsh -c source snapshot && eval 'nohup python3 -m http.server 8765 &'"), python = proc(62508, 1, 62507, "python3 -m http.server 8765");
+    const parent: BackgroundProcess = { ...wrapper, id: processId(wrapper), runId: run.run.id, nodeId, ports: [8765], children: [{ pid: python.pid, command: python.command, ports: [8765] }], status, ...(status === "exited" ? { exitedAt: new Date().toISOString() } : {}), attribution: "tree", toolSpanId: span.id, lastSeenAt: ts };
+    server.store.append(run.run.id, { type: "background", process: parent });
+    fixture.set([python], new Map([[python.pid, [8765]]]), new Map([[python.pid, server.home]]));
+    await server.close(); servers.splice(servers.indexOf(server), 1);
+    const restored = await setup(undefined, fixture.system, server.home);
+    await restored.background.scan();
+    const snapshot = restored.store.snapshot(run.run.id);
+    expect(snapshot.backgroundProcesses).toHaveLength(1);
+    expect(snapshot.backgroundProcesses?.[0]).toMatchObject({ pid: python.pid, status: "running", attribution: status === "running" ? "group" : "inferred" });
+    expect(restored.background.list("all")).toHaveLength(1); expect(restored.background.list("exited")).toEqual([]);
+    expect(await (await api(restored, "/api/background?status=all")).json()).toHaveLength(1);
+    expect(restored.store.events(run.run.id).some((e) => e.type === "background" && e.process.id === parent.id)).toBe(true);
+    fixture.set([]); await restored.background.scan();
+    expect(restored.background.list("all")).toHaveLength(1);
+    expect(restored.background.list("exited")).toMatchObject([{ pid: python.pid, status: "exited" }]);
+  });
 });
 
 describe.skipIf(process.platform === "win32")("real process registration and stopping", () => {

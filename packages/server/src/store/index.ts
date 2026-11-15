@@ -25,7 +25,7 @@ export class Store {
     if (!row) throw new Error(`Run not found: ${id}`);
     const read = <T>(table: string): T[] => this.db.prepare(`SELECT data FROM ${table} WHERE run_id=? ORDER BY rowid`).all(id).map((r) => JSON.parse(String(r.data)) as T);
     const last = this.db.prepare("SELECT json_extract(data, '$.ts') AS ts FROM events WHERE run_id=? AND seq=?").get(id, Number(row.seq));
-    const backgroundProcesses = read<BackgroundProcess>("background_processes").filter((p) => p.status !== "exited" || Date.parse(p.exitedAt ?? p.lastSeenAt) >= Date.now() - 86400000);
+    const backgroundProcesses = visibleBackground(read<BackgroundProcess>("background_processes"));
     return { run: JSON.parse(String(row.data)) as RunSnapshot["run"], lastSeq: Number(row.seq), ...(last?.ts ? { lastEventAt: String(last.ts) } : {}), ...(backgroundProcesses.length ? { backgroundProcesses } : {}), nodes: read("nodes"), delegations: read("delegations"), turns: read("turns"), toolSpans: read("tool_spans"), permissions: read("permissions"), questions: read("questions"), escalations: read("escalations") };
   }
   append(runId: string, payload: RunEvent): RunEventEnvelope {
@@ -121,8 +121,20 @@ export class Store {
   }
   savePreset(preset: TeamPreset): void { this.db.prepare("INSERT INTO team_presets VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data=excluded.data").run(preset.id, JSON.stringify(preset)); }
   deletePreset(id: string): void { this.preset(id); this.db.prepare("DELETE FROM team_presets WHERE id=?").run(id); }
-  background(): BackgroundProcess[] { return this.db.prepare("SELECT data FROM background_processes ORDER BY rowid").all().map((r) => JSON.parse(String(r.data)) as BackgroundProcess).filter((p) => p.status !== "exited" || Date.parse(p.exitedAt ?? p.lastSeenAt) >= Date.now() - 86400000); }
+  background(): BackgroundProcess[] { return visibleBackground(this.db.prepare("SELECT data FROM background_processes ORDER BY rowid").all().map((r) => JSON.parse(String(r.data)) as BackgroundProcess)); }
   backgroundProcess(id: string): BackgroundProcess { const p = this.background().find((p) => p.id === id); if (!p) throw new Error("Background process not found"); return p; }
   close(): void { this.listeners.clear(); this.db.close(); }
 }
 export function backgroundCount(processes: BackgroundProcess[] = []): number { return processes.filter((p) => p.status !== "exited" && !p.dismissed).length; }
+/** A folded parent is historical noise once its surviving child has its own registration.
+ * Keep both in events/storage; use the recorded command and lifetime to reject reused PIDs. */
+function visibleBackground(processes: BackgroundProcess[]): BackgroundProcess[] {
+  return processes.filter((parent) => {
+    if (parent.status !== "exited") return true;
+    if (processes.some((child) => child.id !== parent.id && child.runId === parent.runId && child.nodeId === parent.nodeId
+      && parent.children.some((folded) => folded.pid === child.pid && folded.command === child.command)
+      && Date.parse(child.startedAt) >= Date.parse(parent.startedAt)
+      && Date.parse(child.startedAt) <= Date.parse(parent.lastSeenAt))) return false;
+    return Date.parse(parent.exitedAt ?? parent.lastSeenAt) >= Date.now() - 86400000;
+  });
+}

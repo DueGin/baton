@@ -26,7 +26,7 @@ describe("process attribution and folding", () => {
     const found = classifier.attribute(rows, sources, new Map([[110, "/project"]]), new Map([[112, [3000]]]), start + 1000);
     expect(found).toHaveLength(3); expect(found.every((p) => p.owner.attribution === "tree")).toBe(true);
     const folded = foldProcesses(found, start + 1000);
-    expect(folded).toHaveLength(1); expect(folded[0]).toMatchObject({ pid: 110, ports: [3000], children: [{ pid: 111 }, { pid: 112, ports: [3000] }], attribution: "tree", toolSpanId: "shell" });
+    expect(folded).toHaveLength(1); expect(folded[0]).toMatchObject({ pid: 111, ports: [3000], children: [{ pid: 112, ports: [3000] }], attribution: "tree", toolSpanId: "shell" });
   });
   it("remembers a shell pgid after reparenting and classifies orphan workers", () => {
     const classifier = new Attribution(), sources = [source()];
@@ -62,5 +62,15 @@ describe("process attribution and folding", () => {
     classifier.attribute([p(100, 1), p(110, 100, 110)], sources, new Map(), new Map([[110, [3000]]]), start + 3000);
     const found = classifier.attribute([p(100, 1), p(110, 100, 110), p(111, 110, 110, "node worker", 30)], sources, new Map(), new Map([[110, [3000]], [111, [3001]]]), start + 31000);
     expect(found.map((p) => p.pid)).toEqual([110, 111]); expect(foldProcesses(found, start + 31000)[0]?.ports).toEqual([3000, 3001]);
+  });
+  it("uses the listening service beneath a Claude tool shell and keeps its group after reparenting", () => {
+    const classifier = new Attribution(), sources = [source([span("bash", 0, "nohup python3 -m http.server 8765", 2)])];
+    const agent = p(100, 1, 100, "claude"), wrapper = p(62507, 100, 62507, "/bin/zsh -c source ~/.claude/shell-snapshots/snapshot-zsh-123 && eval 'nohup python3 -m http.server 8765 &'"), python = p(62508, 62507, 62507, "python3 -m http.server 8765");
+    const ports = new Map([[python.pid, [8765]]]);
+    const initial = classifier.attribute([agent, wrapper, python], sources, new Map(), ports, start + 1000);
+    expect(foldProcesses(initial, start + 1000)).toMatchObject([{ pid: python.pid, attribution: "tree", ports: [8765], children: [] }]);
+    expect(foldProcesses(initial.filter((p) => p.pid !== python.pid), start + 10000)).toEqual([]);
+    const reparented = classifier.attribute([agent, { ...python, ppid: 1 }], sources, new Map(), ports, start + 10000);
+    expect(foldProcesses(reparented, start + 10000)).toMatchObject([{ pid: python.pid, status: "running", attribution: "group", ports: [8765] }]);
   });
 });

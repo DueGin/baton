@@ -4,9 +4,10 @@ import { processId, type ProcessInfo } from "./system.js";
 
 export interface ProcessSource { runId: string; nodeId: string; cwd: string; pids: number[]; spans: ToolSpanRecord[] }
 interface Owner { source: ProcessSource; attribution: BackgroundProcess["attribution"]; span?: ToolSpanRecord }
-export interface AttributedProcess extends ProcessInfo { owner: Owner; ports: number[]; cwd?: string }
+export interface AttributedProcess extends ProcessInfo { owner: Owner; ports: number[]; cwd?: string; toolShell?: boolean }
 const contains = (cwd: string, child: string): boolean => { const path = relative(cwd, child); return path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !path.startsWith(sep)); };
 function executable(command: string): string { return basename(command.trim().split(/\s+/, 1)[0] ?? "").replace(/^-/, ""); }
+function isShell(command: string): boolean { return /^(?:sh|bash|zsh|dash|ksh|fish|csh|tcsh)$/.test(executable(command)); }
 function windowMatches(p: ProcessInfo, span: ToolSpanRecord, timestamp: number): boolean {
   const start = Date.parse(p.startedAt);
   return start >= Date.parse(span.startedAt) - 1000 && start <= (span.endedAt ? Date.parse(span.endedAt) + 3000 : timestamp);
@@ -19,6 +20,7 @@ function choose(p: ProcessInfo, candidates: Array<{ source: ProcessSource; span:
 export class Attribution {
   private owners = new Map<string, { nodeId: string; spanId?: string; attribution: BackgroundProcess["attribution"] }>();
   private infrastructure = new Set<string>();
+  private toolShells = new Set<string>();
   private groups = new Map<number, { nodeId: string; spanId?: string; shellId: string }>();
   seed(records: BackgroundProcess[]): void {
     for (const record of records) if (record.nodeId && record.status !== "exited") {
@@ -65,6 +67,8 @@ export class Attribution {
     const depth = (p: ProcessInfo): number => { let n = p, d = 0; const seen = new Set<number>(); while (byPid.has(n.ppid) && !seen.has(n.ppid)) { seen.add(n.ppid); n = byPid.get(n.ppid)!; d++; } return d; };
     for (const p of [...processes].sort((a, b) => depth(a) - depth(b))) {
       const owner = visit(p); if (!owner) continue;
+      // Tool-launch shells still supply ownership/group memory, but must never be service roots.
+      if (roots.has(p.ppid) && isShell(p.command)) this.toolShells.add(processId(p));
       const memory = { nodeId: owner.source.nodeId, spanId: owner.span?.id, attribution: owner.attribution };
       this.owners.set(processId(p), memory);
       if (owner.attribution === "tree") {
@@ -72,23 +76,24 @@ export class Attribution {
         this.groups.set(p.pid, { ...memory, shellId: processId(p) });
         if (!protectedGroups.has(p.pgid)) this.groups.set(p.pgid, { ...memory, shellId: groupLeader ? processId(groupLeader) : `${p.pgid}:0` });
       }
-      result.push({ ...p, owner, cwd: cwds.get(p.pid), ports: ports.get(p.pid) ?? [] });
+      result.push({ ...p, owner, cwd: cwds.get(p.pid), ports: ports.get(p.pid) ?? [], ...(this.toolShells.has(processId(p)) ? { toolShell: true } : {}) });
     }
     const living = new Set(processes.map(processId));
     for (const key of this.owners.keys()) if (!living.has(key)) this.owners.delete(key);
     for (const key of this.infrastructure) if (!living.has(key)) this.infrastructure.delete(key);
+    for (const key of this.toolShells) if (!living.has(key)) this.toolShells.delete(key);
     return result;
   }
 }
 export function foldProcesses(attributed: AttributedProcess[], timestamp: number): BackgroundProcess[] {
   const byPid = new Map(attributed.map((p) => [p.pid, p]));
-  const background = attributed.filter((p) => p.ports.length || p.owner.attribution !== "tree" || p.owner.span?.endedAt && timestamp >= Date.parse(p.owner.span.endedAt) + 5000);
+  const background = attributed.filter((p) => !p.toolShell && (p.ports.length || p.owner.attribution !== "tree" || p.owner.span?.endedAt && timestamp >= Date.parse(p.owner.span.endedAt) + 5000));
   const families = new Map<number, AttributedProcess[]>();
   for (const p of background) {
     let top = p; const seen = new Set([p.pid]);
     while (true) {
       const parent = byPid.get(top.ppid);
-      if (!parent || parent.owner.source.nodeId !== p.owner.source.nodeId || seen.has(parent.pid)) break;
+      if (!parent || parent.toolShell || parent.owner.source.nodeId !== p.owner.source.nodeId || seen.has(parent.pid)) break;
       seen.add(parent.pid); top = parent;
     }
     families.set(top.pid, []);
