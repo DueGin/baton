@@ -531,7 +531,7 @@ export interface RunSummary {
   pendingPermissions: number;
   /** Pending permissions + proposals + questions + escalations. */
   pendingTotal: number;
-  /** Running, non-dismissed background processes. */
+  /** Background processes that are not exited (running or stopping) and not dismissed. */
   backgroundCount?: number;
   usage: UsageTotals;
   createdAt: IsoTime;
