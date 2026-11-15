@@ -1,6 +1,6 @@
 import { applyEvent, type ItemRecord, type RunEventEnvelope, type RunSnapshot } from "@baton/protocol";
-import { reconcileOutgoing, type OutgoingMessage } from "./lib/conversation.js";
-import type { BatonClient } from "./api.js";
+import { messageActionKey, reconcileOutgoing, type MessageAction, type MessageActionState, type OutgoingMessage } from "./lib/conversation.js";
+import { HttpError, type BatonClient } from "./api.js";
 
 export type ConnectionState = "loading" | "live" | "reconnecting" | "offline";
 export interface ConsoleState {
@@ -8,11 +8,12 @@ export interface ConsoleState {
   items: Record<string, ItemRecord[]>;
   itemStatus: Record<string, "loading" | "ready" | "error">;
   outgoing: OutgoingMessage[];
+  messageActions: Record<string, MessageActionState>;
   lastEventAt: Record<string, number>;
   connection: ConnectionState;
   error: string | null;
 }
-const initial = (): ConsoleState => ({ snapshot: null, items: {}, itemStatus: {}, outgoing: [], lastEventAt: {}, connection: "loading", error: null });
+const initial = (): ConsoleState => ({ snapshot: null, items: {}, itemStatus: {}, outgoing: [], messageActions: {}, lastEventAt: {}, connection: "loading", error: null });
 
 export function mergeItems(existing: ItemRecord[], incoming: ItemRecord[]): ItemRecord[] {
   const bySeq = new Map(existing.map(item => [item.seq, item]));
@@ -58,7 +59,11 @@ export class RunStore {
       : event.type === "question" ? event.question.nodeId
       : event.type === "escalation" ? event.escalation.nodeId : undefined;
     if (nodeId) patch.lastEventAt = { ...this.state.lastEventAt, [nodeId]: Date.parse(event.ts) };
-    if (event.type === "item") patch.outgoing = reconcileOutgoing(this.state.outgoing, { seq: event.itemSeq, nodeId: event.nodeId, ts: event.ts, item: event.item });
+    if (event.type === "item") {
+      patch.outgoing = reconcileOutgoing(this.state.outgoing, { seq: event.itemSeq, nodeId: event.nodeId, ts: event.ts, item: event.item });
+      const key = messageActionKey(event.nodeId, event.itemSeq);
+      if (event.item.type === "user_message" && this.state.messageActions[key]) patch.messageActions = { ...this.state.messageActions, [key]: { ...this.state.messageActions[key], error: undefined, ...(event.item.delivery !== "queued" ? { steerUnsupported: false } : {}) } };
+    }
     if (event.type === "item" && this.state.itemStatus[event.nodeId]) {
       const row: ItemRecord = { seq: event.itemSeq, nodeId: event.nodeId, turnId: event.turnId, ts: event.ts, item: event.item };
       patch.items = { ...this.state.items, [event.nodeId]: mergeItems(this.state.items[event.nodeId] ?? [], [row]) };
@@ -69,12 +74,14 @@ export class RunStore {
   async loadItems(nodeId: string, force = false): Promise<void> {
     if (!force && this.state.itemStatus[nodeId]) return;
     const generation = this.generation;
+    const before = new Map((this.state.items[nodeId] ?? []).map(row => [row.seq, row]));
     this.update({ itemStatus: { ...this.state.itemStatus, [nodeId]: "loading" } });
     try {
       const result = await this.client.items(nodeId);
       if (generation !== this.generation) return;
       // Live events received during fetch win over rows in the response.
-      const rows = mergeItems(result.items, this.state.items[nodeId] ?? []);
+      const streamed = (this.state.items[nodeId] ?? []).filter(row => before.get(row.seq) !== row);
+      const rows = mergeItems(mergeItems(this.state.items[nodeId] ?? [], result.items), streamed);
       this.update({ outgoing: rows.reduce(reconcileOutgoing, this.state.outgoing), items: { ...this.state.items, [nodeId]: rows }, itemStatus: { ...this.state.itemStatus, [nodeId]: "ready" } });
     } catch (error) {
       if (generation === this.generation) this.update({ itemStatus: { ...this.state.itemStatus, [nodeId]: "error" }, error: errorText(error) });
@@ -88,13 +95,51 @@ export class RunStore {
     const message: OutgoingMessage = { ...existing, clientId, nodeId, text, ts: existing?.ts ?? new Date().toISOString(), state: "sending", error: undefined };
     this.update({ outgoing: [...this.state.outgoing.filter(row => row.clientId !== clientId), message] });
     try {
-      const response = await this.client.send(nodeId, text, clientId);
+      const response = await this.client.send(nodeId, text, clientId, "queue");
       if (generation !== this.generation) return;
-      this.update({ outgoing: this.state.outgoing.map(row => row.clientId === clientId ? { ...row, state: "accepted", itemSeq: response.itemSeq, delivery: row.delivery === "turn" ? "turn" : response.delivery, wasQueued: row.wasQueued || response.delivery === "queued" } : row) });
+      this.update({ outgoing: this.state.outgoing.map(row => row.clientId === clientId ? { ...row, state: "accepted", itemSeq: response.itemSeq, delivery: row.delivery && row.delivery !== "queued" ? row.delivery : response.delivery } : row) });
     } catch (error) {
       if (generation !== this.generation) return;
       // An SSE acknowledgement is authoritative even if the HTTP response was lost.
       this.update({ outgoing: this.state.outgoing.map(row => row.clientId === clientId && row.state !== "accepted" ? { ...row, state: "failed", error: errorText(error) } : row) });
+    }
+  }
+
+  async actOnMessage(nodeId: string, itemSeq: number, action: MessageAction): Promise<void> {
+    const key = messageActionKey(nodeId, itemSeq);
+    if (this.state.messageActions[key]?.pending || itemSeq <= 0) return;
+    const generation = this.generation;
+    const previous = this.state.messageActions[key];
+    const before = this.state.items[nodeId]?.find(row => row.seq === itemSeq);
+    const outgoingBefore = this.state.outgoing.find(row => row.nodeId === nodeId && row.itemSeq === itemSeq);
+    const interruptsTurn = action === "interrupt" && this.state.snapshot?.turns.some(turn => turn.nodeId === nodeId && turn.status === "running") === true;
+    const setAction = (patch: MessageActionState) => this.update({ messageActions: { ...this.state.messageActions, [key]: patch } });
+    setAction({ ...previous, pending: action, error: undefined });
+    try {
+      const response = action === "retract" ? await this.client.retract(nodeId, itemSeq).then(() => undefined) : await this.client.deliver(nodeId, itemSeq, { mode: action });
+      if (generation !== this.generation) return;
+      const delivery = response ? response.delivery : "retracted";
+      const current = this.state.items[nodeId]?.find(row => row.seq === itemSeq);
+      // SSE replacements are authoritative; provide an immediate fallback when HTTP arrives first.
+      if (current && current === before && current.item.type === "user_message") {
+        const row: ItemRecord = { ...current, item: { ...current.item, delivery, ...(interruptsTurn && delivery === "turn" ? { interrupted: true } : {}), ...(action === "steer" && delivery === "steered" ? { escalated: true } : {}) } };
+        this.update({ items: { ...this.state.items, [nodeId]: mergeItems(this.state.items[nodeId] ?? [], [row]) }, outgoing: reconcileOutgoing(this.state.outgoing, row) });
+      } else if (!current && outgoingBefore) {
+        this.update({ outgoing: this.state.outgoing.map(row => row === outgoingBefore ? { ...row, delivery, interrupted: interruptsTurn && delivery === "turn" } : row) });
+      }
+      const latestDelivery = this.state.items[nodeId]?.find(row => row.seq === itemSeq)?.item;
+      setAction({ steerUnsupported: response?.steerUnsupported === true && (!latestDelivery || latestDelivery.type === "user_message" && latestDelivery.delivery === "queued") });
+    } catch (error) {
+      if (generation !== this.generation) return;
+      const latest = this.state.items[nodeId]?.find(row => row.seq === itemSeq)?.item;
+      const delivery = latest?.type === "user_message" ? latest.delivery : this.state.outgoing.find(row => row.nodeId === nodeId && row.itemSeq === itemSeq)?.delivery;
+      if (action === "retract" && delivery === "retracted" || action === "steer" && delivery === "steered" || action === "interrupt" && delivery === "turn") {
+        setAction({}); return; // SSE acknowledgement wins even if the HTTP response was lost.
+      }
+      const conflict = error instanceof HttpError && error.status === 409;
+      if (conflict) await this.loadItems(nodeId, true);
+      if (generation !== this.generation) return;
+      setAction({ ...previous, error: conflict ? this.state.itemStatus[nodeId] === "error" ? "消息状态已变化，刷新失败，请重试加载会话。" : "消息状态已变化，已刷新。" : errorText(error) });
     }
   }
 

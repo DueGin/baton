@@ -4,6 +4,8 @@ import { DemoClient } from "./demo/client.js";
 import { createScenario, replay } from "./demo/scenario.js";
 import { deliveryLabel } from "./lib/conversation.js";
 import { mergeItems, RunStore } from "./store.js";
+import { HttpError } from "./api.js";
+import { messageActionKey } from "./lib/conversation.js";
 
 const base = Date.parse("2026-11-10T07:00:00Z");
 afterEach(() => vi.useRealTimers());
@@ -102,6 +104,7 @@ describe("optimistic sending", () => {
     const before = store.getSnapshot().snapshot!; const nodeId = before.run.rootNodeId;
     const sending = store.sendMessage(nodeId, "hello"); const local = store.getSnapshot().outgoing[0]!;
     expect(local.state).toBe("sending");
+    expect(client.send).toHaveBeenCalledWith(nodeId, "hello", local.clientId, "queue");
     const ts = new Date(base).toISOString();
     store.apply({ type: "item", runId: before.run.id, seq: before.lastSeq + 1, nodeId, itemSeq: 8, ts, item: { type: "user_message", text: "hello", clientId: local.clientId, delivery: "queued" } });
     expect(store.getSnapshot().outgoing[0]!.state).toBe("accepted");
@@ -133,7 +136,86 @@ describe("optimistic sending", () => {
     store.apply({ ...event, seq: event.seq + 1, item: { type: "user_message", text: "start a new turn", delivery: "turn", clientId } });
     accept({ accepted: true, delivery: "turn", itemSeq: 10 }); await sending;
     const message = store.getSnapshot().outgoing[0]!;
-    expect(deliveryLabel(message.delivery, message.wasQueued)).toBe("已开始新一轮"); store.close();
+    expect(deliveryLabel(message.delivery, message.interrupted)).toBe("已送达"); store.close();
   });
 
+});
+
+describe("message actions", () => {
+  async function setup(agent = "claude") {
+    const client = new DemoClient(() => base); const store = new RunStore(client);
+    await store.open("run-conversation");
+    const nodeId = store.getSnapshot().snapshot!.nodes.find(node => node.agentId === agent)!.id;
+    await store.loadItems(nodeId); await store.sendMessage(nodeId, "新的要求");
+    const itemSeq = store.getSnapshot().outgoing.at(-1)!.itemSeq!;
+    return { client, store, nodeId, itemSeq, key: messageActionKey(nodeId, itemSeq) };
+  }
+  it("shows pending actions, guards duplicate clicks and reconciles SSE replacements", async () => {
+    const { client, store, nodeId, itemSeq, key } = await setup();
+    const deliver = client.deliver.bind(client); let finish: (() => void) | undefined;
+    const mocked = vi.spyOn(client, "deliver").mockImplementation(() => new Promise(resolve => { finish = () => { void deliver(nodeId, itemSeq, { mode: "steer" }).then(resolve); }; }));
+    const action = store.actOnMessage(nodeId, itemSeq, "steer");
+    expect(store.getSnapshot().messageActions[key]).toEqual({ pending: "steer", error: undefined });
+    await store.actOnMessage(nodeId, itemSeq, "steer"); expect(mocked).toHaveBeenCalledTimes(1);
+    finish!(); await action;
+    expect(store.getSnapshot().messageActions[key]?.pending).toBeUndefined();
+    expect(store.getSnapshot().outgoing.at(-1)).toMatchObject({ delivery: "steered" });
+    expect(store.getSnapshot().items[nodeId]!.find(row => row.seq === itemSeq)!.item).toMatchObject({ delivery: "steered", escalated: true });
+    mocked.mockRestore();
+    await store.actOnMessage(nodeId, itemSeq, "interrupt");
+    expect(store.getSnapshot().outgoing.at(-1)).toMatchObject({ delivery: "turn", interrupted: true }); store.close();
+  });
+  it("records unsupported steering and retracts the same row", async () => {
+    const { store, nodeId, itemSeq, key } = await setup("pi");
+    await store.actOnMessage(nodeId, itemSeq, "steer");
+    expect(store.getSnapshot().messageActions[key]).toEqual({ steerUnsupported: true });
+    expect(store.getSnapshot().outgoing.at(-1)?.delivery).toBe("queued");
+    await store.actOnMessage(nodeId, itemSeq, "retract");
+    expect(store.getSnapshot().outgoing.at(-1)?.delivery).toBe("retracted");
+    expect(store.getSnapshot().items[nodeId]!.find(row => row.seq === itemSeq)!.item).toMatchObject({ delivery: "retracted" }); store.close();
+  });
+  it("keeps network failures retryable and force-refreshes changed rows on 409", async () => {
+    const { client, store, nodeId, itemSeq, key } = await setup();
+    vi.spyOn(client, "deliver").mockRejectedValueOnce(new Error("offline"));
+    await store.actOnMessage(nodeId, itemSeq, "steer");
+    expect(store.getSnapshot().messageActions[key]).toEqual({ error: "offline" });
+    const old = store.getSnapshot().items[nodeId]!.find(row => row.seq === itemSeq)!;
+    const fresh = { ...old, item: { type: "user_message" as const, text: "新的要求", delivery: "turn" as const } };
+    vi.spyOn(client, "items").mockResolvedValue({ items: [fresh], lastSeq: itemSeq });
+    vi.spyOn(client, "deliver").mockRejectedValueOnce(new HttpError(409, "消息已送达"));
+    await store.actOnMessage(nodeId, itemSeq, "steer");
+    expect(store.getSnapshot().messageActions[key]).toMatchObject({ error: "消息状态已变化，已刷新。" });
+    expect(store.getSnapshot().items[nodeId]!.find(row => row.seq === itemSeq)).toEqual(fresh);
+    expect(store.getSnapshot().outgoing.at(-1)?.delivery).toBe("turn");
+    store.close();
+  });
+  it("handles HTTP before SSE without creating a second message", async () => {
+    const { client, store, nodeId, itemSeq } = await setup();
+    vi.spyOn(client, "deliver").mockResolvedValue({ accepted: true, delivery: "turn", itemSeq });
+    await store.actOnMessage(nodeId, itemSeq, "interrupt");
+    const rows = store.getSnapshot().items[nodeId]!.filter(row => row.seq === itemSeq);
+    expect(rows).toHaveLength(1); expect(rows[0]!.item).toMatchObject({ delivery: "turn", interrupted: true });
+    expect(store.getSnapshot().outgoing.at(-1)).toMatchObject({ delivery: "turn", interrupted: true }); store.close();
+  });
+  it("does not let a late HTTP steering acknowledgement overwrite a delivered SSE row", async () => {
+    const { client, store, nodeId, itemSeq } = await setup();
+    let finish: ((response: { accepted: true; delivery: "steered"; itemSeq: number }) => void) | undefined;
+    vi.spyOn(client, "deliver").mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const action = store.actOnMessage(nodeId, itemSeq, "steer");
+    const snapshot = store.getSnapshot().snapshot!;
+    store.apply({ type: "item", nodeId, itemSeq, seq: snapshot.lastSeq + 1, runId: snapshot.run.id, ts: new Date(base).toISOString(), item: { type: "user_message", text: "新的要求", delivery: "turn", interrupted: true } });
+    finish!({ accepted: true, delivery: "steered", itemSeq }); await action;
+    expect(store.getSnapshot().items[nodeId]!.find(row => row.seq === itemSeq)!.item).toMatchObject({ delivery: "turn", interrupted: true }); store.close();
+  });
+  it("accepts an action acknowledged by SSE even when its HTTP response is lost", async () => {
+    const { client, store, nodeId, itemSeq, key } = await setup();
+    let reject: ((error: Error) => void) | undefined;
+    vi.spyOn(client, "retract").mockImplementation(() => new Promise((_resolve, failure) => { reject = failure; }));
+    const action = store.actOnMessage(nodeId, itemSeq, "retract");
+    const snapshot = store.getSnapshot().snapshot!;
+    store.apply({ type: "item", nodeId, itemSeq, seq: snapshot.lastSeq + 1, runId: snapshot.run.id, ts: new Date(base).toISOString(), item: { type: "user_message", text: "新的要求", delivery: "retracted" } });
+    reject!(new Error("response lost")); await action;
+    expect(store.getSnapshot().messageActions[key]).toEqual({});
+    expect(store.getSnapshot().outgoing.at(-1)?.delivery).toBe("retracted"); store.close();
+  });
 });

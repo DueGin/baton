@@ -5,7 +5,7 @@ import type {
   SettingsResponse, UpdateSettingsRequest, TestTitleModelRequest, TestTitleModelResponse,
   ListBackgroundResponse, StopBackgroundRequest, DismissBackgroundRequest, CancelRunRequest,
   ProjectRecord, ProjectSummary, CreateProjectRequest, PatchProjectRequest, ListDirsResponse,
-  SendMessageResponse, InboxItem, AnswerQuestionRequest, ResolveEscalationRequest, PermissionRule, CreatePermissionRuleRequest,
+  SendMessageResponse, SendMode, DeliverMessageRequest, InboxItem, AnswerQuestionRequest, ResolveEscalationRequest, PermissionRule, CreatePermissionRuleRequest,
 } from "@baton/protocol";
 
 /** The server may attach availability warnings to successful preset mutations. */
@@ -32,7 +32,9 @@ export interface BatonClient {
   stopBackground(id: string, request?: StopBackgroundRequest): Promise<void>;
   dismissBackground(id: string, request: DismissBackgroundRequest): Promise<void>;
   items(nodeId: string, after?: number): Promise<GetItemsResponse>;
-  send(nodeId: string, text: string, clientId?: string): Promise<SendMessageResponse>;
+  send(nodeId: string, text: string, clientId?: string, mode?: SendMode): Promise<SendMessageResponse>;
+  deliver(nodeId: string, itemSeq: number, request: DeliverMessageRequest): Promise<SendMessageResponse>;
+  retract(nodeId: string, itemSeq: number): Promise<void>;
   cancelNode(nodeId: string): Promise<void>;
   decide(requestId: string, decision: PermissionDecision): Promise<void>;
   delegation(id: string): Promise<DelegationRecord>;
@@ -82,7 +84,7 @@ export class ApiClient implements BatonClient {
       const message = await response.text();
       let detail = message;
       try { const parsed: unknown = JSON.parse(message); if (typeof parsed === "object" && parsed && "error" in parsed) detail = JSON.stringify(parsed.error); } catch { /* plain-text server error */ }
-      throw new Error(`${response.status} · ${detail || response.statusText}`);
+      throw new HttpError(response.status, detail || response.statusText);
     }
     return response.status === 204 ? undefined as T : await response.json() as T;
   }
@@ -106,7 +108,9 @@ export class ApiClient implements BatonClient {
   stopBackground = (id: string, body: StopBackgroundRequest = {}) => this.request<void>(`/background/${encodeURIComponent(id)}/stop`, "POST", body);
   dismissBackground = (id: string, body: DismissBackgroundRequest) => this.request<void>(`/background/${encodeURIComponent(id)}/dismiss`, "POST", body);
   items = (nodeId: string, after = 0) => this.request<GetItemsResponse>(`/nodes/${encodeURIComponent(nodeId)}/items?after=${after}`);
-  send = (nodeId: string, text: string, clientId?: string) => this.request<SendMessageResponse>(`/nodes/${encodeURIComponent(nodeId)}/messages`, "POST", { text, ...(clientId ? { clientId } : {}) });
+  send = (nodeId: string, text: string, clientId?: string, mode: SendMode = "queue") => this.request<SendMessageResponse>(`/nodes/${encodeURIComponent(nodeId)}/messages`, "POST", { text, ...(clientId ? { clientId } : {}), mode });
+  deliver = (nodeId: string, itemSeq: number, body: DeliverMessageRequest) => this.request<SendMessageResponse>(`/nodes/${encodeURIComponent(nodeId)}/messages/${itemSeq}/deliver`, "POST", body);
+  retract = (nodeId: string, itemSeq: number) => this.request<void>(`/nodes/${encodeURIComponent(nodeId)}/messages/${itemSeq}`, "DELETE");
   cancelNode = (id: string) => this.request<void>(`/nodes/${encodeURIComponent(id)}/cancel`, "POST", {});
   decide = (id: string, body: PermissionDecision) => this.request<void>(`/permissions/${encodeURIComponent(id)}`, "POST", body);
   delegation = (id: string) => this.request<DelegationRecord>(`/delegations/${encodeURIComponent(id)}`);
@@ -149,6 +153,10 @@ export class ApiClient implements BatonClient {
       parser.push(decoder.decode());
     } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
   }
+}
+
+export class HttpError extends Error {
+  constructor(readonly status: number, detail: string) { super(`${status} · ${detail}`); this.name = "HttpError"; }
 }
 
 /** SSE frames may span UTF-8 chunks and contain multiple data lines. */

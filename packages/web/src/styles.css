@@ -1083,3 +1083,12 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .background-run-context { font-size: 10px; color: var(--text-dim); padding: 9px 14px; border-bottom: 1px solid var(--border); }
 .background-list.is-compact .background-run-context { padding: 7px 0; }
 @media (max-width: 900px) { .run-bar > .project-link { max-width: 85px; } .run-bar > .project-link > code { display: none; } }
+
+/* A message can advance from queue to steer, then to an interrupt. */
+.message-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; margin-top: 8px; font-size: 11px; }
+.message-actions .text-button { font-size: 11px; display: inline-flex; align-items: center; gap: 5px; }
+.message-action-interrupt { color: var(--warning, #b26b16); }
+.message-action-spinner { display: inline-block; animation: spin 1s linear infinite; }
+.message-retracted > .markdown { opacity: .55; text-decoration: line-through; }
+.delivery-retracted { color: var(--text-muted); background: var(--surface-hover); }
+.message-actions [disabled] { opacity: .55; cursor: wait; }

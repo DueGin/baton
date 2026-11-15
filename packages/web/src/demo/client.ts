@@ -7,6 +7,8 @@ import type { ProjectRecord, ProjectSummary, CreateProjectRequest, PatchProjectR
 import { demoDirs, demoPath, initialDemoProjects } from "./projects.js";
 import { liveProjectSummaries, pathBasename } from "../lib/projects.js";
 import { richConversation } from "./conversation.js";
+import type { SendMode, DeliverMessageRequest } from "@baton/protocol";
+import { HttpError } from "../api.js";
 import type { BatonClient, TeamPresetResult } from "../api.js";
 import { summarize, terminal } from "../lib/derive.js";
 import { createScenario, demoAgents } from "./scenario.js";
@@ -370,21 +372,58 @@ export class DemoClient implements BatonClient {
     const items = [...rows.values()].filter(row => row.seq > after).sort((a, b) => a.seq - b.seq);
     return structuredClone({ items, lastSeq: items.at(-1)?.seq ?? after });
   }
-  async send(nodeId: string, text: string, clientId?: string): Promise<SendMessageResponse> {
+  async send(nodeId: string, text: string, clientId?: string, mode: SendMode = "queue"): Promise<SendMessageResponse> {
     this.advance();
     const data = this.forNode(nodeId); const node = data.snapshot.nodes.find(entry => entry.id === nodeId)!;
     if (node.status === "canceled" || node.status === "replaced") throw new Error("节点已取消或替换，请选择活跃节点");
     const previous = clientId ? data.log.findLast(event => event.type === "item" && event.nodeId === nodeId && event.item.type === "user_message" && event.item.clientId === clientId) : undefined;
-    if (previous?.type === "item" && previous.item.type === "user_message") return { accepted: true, delivery: previous.item.delivery ?? "turn", itemSeq: previous.itemSeq };
-    const active = data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running");
-    const delivery = active ? demoAgents.find(agent => agent.id === node.agentId)?.capabilities.steer && node.status !== "waiting_permission" ? "steered" : "queued" : "turn";
-    const itemSeq = this.append(data, nodeId, { type: "user_message", text, clientId, delivery });
-    if (delivery === "turn") {
-      this.startReply(data, nodeId, text);
-      const turnId = data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running")?.id;
-      this.emit(data, { type: "item", nodeId, itemSeq, turnId, ts: new Date(this.now()).toISOString(), item: { type: "user_message", text, clientId, delivery } });
+    if (previous?.type === "item" && previous.item.type === "user_message") {
+      if (previous.item.delivery === "retracted") throw new HttpError(409, "消息已撤回");
+      return { accepted: true, delivery: previous.item.delivery ?? "turn", itemSeq: previous.itemSeq };
     }
+    const itemSeq = this.append(data, nodeId, { type: "user_message", text, clientId, delivery: "queued" });
+    return this.deliverMessage(data, nodeId, itemSeq, mode);
+  }
+  async deliver(nodeId: string, itemSeq: number, request: DeliverMessageRequest): Promise<SendMessageResponse> {
+    this.advance(); return this.deliverMessage(this.forNode(nodeId), nodeId, itemSeq, request.mode);
+  }
+  private deliverMessage(data: DemoRun, nodeId: string, itemSeq: number, mode: SendMode): SendMessageResponse {
+    const node = data.snapshot.nodes.find(entry => entry.id === nodeId)!;
+    const row = data.log.findLast(event => event.type === "item" && event.nodeId === nodeId && event.itemSeq === itemSeq);
+    if (row?.type !== "item" || row.item.type !== "user_message") throw new HttpError(404, "消息不存在");
+    if (!["queued", ...(mode === "interrupt" ? ["steered"] : [])].includes(row.item.delivery ?? "")) throw new HttpError(409, "消息已送达或撤回");
+    if (["canceled", "replaced"].includes(node.status)) throw new HttpError(409, "节点已结束");
+    const active = data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running");
+    const supported = demoAgents.find(agent => agent.id === node.agentId)?.capabilities.steer === true;
+    if (active && (mode === "queue" || mode === "steer" && !supported)) return { accepted: true, delivery: "queued", itemSeq, ...(mode === "steer" ? { steerUnsupported: true } : {}) };
+    const interrupted = Boolean(active && mode === "interrupt");
+    if (interrupted) this.interruptTurn(data, nodeId);
+    const delivery = active && mode === "steer" ? "steered" : "turn";
+    if (delivery === "turn") this.startReply(data, nodeId, row.item.text);
+    const turnId = data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running")?.id;
+    this.emit(data, { type: "item", nodeId, itemSeq, turnId, ts: new Date(this.now()).toISOString(), item: { ...row.item, delivery, ...(interrupted ? { interrupted: true } : {}), ...(mode === "steer" ? { escalated: true } : {}) } });
     return { accepted: true, delivery, itemSeq };
+  }
+  async retract(nodeId: string, itemSeq: number): Promise<void> {
+    this.advance(); const data = this.forNode(nodeId);
+    const row = data.log.findLast(event => event.type === "item" && event.nodeId === nodeId && event.itemSeq === itemSeq);
+    if (row?.type !== "item" || row.item.type !== "user_message") throw new HttpError(404, "消息不存在");
+    if (row.item.delivery !== "queued") throw new HttpError(409, "只有排队消息可以撤回");
+    this.emit(data, { type: "item", nodeId, itemSeq, ts: new Date(this.now()).toISOString(), item: { ...row.item, delivery: "retracted" } });
+  }
+  private interruptTurn(data: DemoRun, nodeId: string): void {
+    const ts = new Date(this.now()).toISOString();
+    const turnIds = new Set(data.snapshot.turns.filter(turn => turn.nodeId === nodeId && turn.status === "running").map(turn => turn.id));
+    data.remaining = data.remaining.filter(event => {
+      if ("nodeId" in event && event.nodeId === nodeId) return false;
+      if (event.type === "tool.span" && event.span.nodeId === nodeId) return false;
+      if (event.type === "turn.updated" && turnIds.has(event.turnId)) return false;
+      if (event.type === "turn.started" && event.turn.nodeId === nodeId) return false;
+      if (event.type === "delegation.updated" && data.snapshot.delegations.some(edge => edge.id === event.delegationId && edge.toNodeId === nodeId)) return false;
+      return true;
+    });
+    for (const id of turnIds) this.emit(data, { type: "turn.updated", turnId: id, patch: { status: "canceled", error: "interrupted by human message", endedAt: ts } });
+    for (const span of data.snapshot.toolSpans) if (span.nodeId === nodeId && span.status === "running") this.emit(data, { type: "tool.span", span: { ...span, status: "canceled", endedAt: ts } });
   }
   private startReply(data: DemoRun, nodeId: string, text: string): void {
     const node = data.snapshot.nodes.find(entry => entry.id === nodeId)!;
@@ -417,11 +456,11 @@ export class DemoClient implements BatonClient {
   }
   private deliverQueued(data: DemoRun, nodeId: string): void {
     if (data.snapshot.nodes.some(node => node.id === nodeId && ["canceled", "replaced", "failed", "completed"].includes(node.status))) return;
-    const queued = this.queuedMessages(data, nodeId)[0];
-    if (queued?.item.type === "user_message") {
-      this.startReply(data, nodeId, queued.item.text);
+    const queued = this.queuedMessages(data, nodeId);
+    if (queued.length) {
+      this.startReply(data, nodeId, queued.map(row => row.item.type === "user_message" ? row.item.text : "").join("\n\n"));
       const turnId = data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running")?.id;
-      this.emit(data, { type: "item", nodeId, itemSeq: queued.itemSeq, turnId, ts: new Date(this.now()).toISOString(), item: { ...queued.item, delivery: "turn" } });
+      for (const row of queued) if (row.item.type === "user_message") this.emit(data, { type: "item", nodeId, itemSeq: row.itemSeq, turnId, ts: new Date(this.now()).toISOString(), item: { ...row.item, delivery: "turn" } });
     }
   }
   background = async (status: "running" | "all" = "running"): Promise<ListBackgroundResponse> => {
@@ -612,7 +651,7 @@ export class DemoClient implements BatonClient {
     for (const node of snapshot.nodes) {
       const turnId = `${node.id}:quiet`;
       history(100, { type: "turn.started", turn: { id: turnId, nodeId: node.id, runId: snapshot.run.id, trigger: "user", status: "running", startedAt: at(-100_000) } });
-      history(65, { type: "item", nodeId: node.id, itemSeq: node.id === root ? 3 : 1, turnId, ts: at(-65_000), item: { type: "reasoning", text: "正在梳理复杂边界。此 demo 故意保持较长静默，仍会显示本轮计时与无新输出时长。\nClaude 支持插入当前回合；切换到 pi 发送可以体验排队。" } });
+      history(65, { type: "item", nodeId: node.id, itemSeq: node.id === root ? 3 : 1, turnId, ts: at(-65_000), item: { type: "reasoning", text: "正在梳理复杂边界。此 demo 故意保持较长静默，仍会显示本轮计时与无新输出时长。\n默认发送会排队；Claude 可将消息改为引导，pi 不支持引导。尝试引导后可立即发送，中断本轮。" } });
       data.remaining.push({ type: "node.updated", nodeId: node.id, patch: { status: "idle", activity: "本轮完成" }, runId: snapshot.run.id, seq: 0, ts: at(45_000) });
       data.remaining.push({ type: "turn.updated", turnId, patch: { status: "completed", endedAt: at(45_000) }, runId: snapshot.run.id, seq: 0, ts: at(45_000) });
     }

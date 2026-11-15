@@ -19,7 +19,7 @@ describe("conversation demo", () => {
     const events: RunEventEnvelope[] = []; const controller = new AbortController();
     const streaming = client.events(initial.run.id, initial.lastSeq, event => events.push(event), controller.signal);
     const root = initial.run.rootNodeId; const pi = initial.nodes.find(node => node.agentId === "pi")!.id;
-    expect((await client.send(root, "立即插入", "steer-1")).delivery).toBe("steered");
+    expect((await client.send(root, "立即插入", "steer-1", "steer")).delivery).toBe("steered");
     const queued = await client.send(pi, "排队补充", "queue-1");
     expect(queued.delivery).toBe("queued");
     expect(await client.send(pi, "排队补充", "queue-1")).toEqual(queued);
@@ -48,6 +48,55 @@ describe("conversation demo", () => {
     expect(rows.find(row => row.seq === queued.itemSeq)!.item).toMatchObject({ delivery: "queued" });
     expect(rows.some(row => row.item.type === "notice" && row.item.message === "未送达：节点已结束")).toBe(true);
     expect((await client.run(snapshot.run.id)).nodes.find(node => node.id === pi)!.status).toBe("canceled");
+  });
+
+  it("defaults to queue, escalates supported steering in place, and interrupts only that node", async () => {
+    let now = base; const client = new DemoClient(() => now); const initial = await client.run("run-conversation");
+    const root = initial.run.rootNodeId; const pi = initial.nodes.find(node => node.agentId === "pi")!.id;
+    const queued = await client.send(root, "先验证", "ladder"); expect(queued.delivery).toBe("queued");
+    const steered = await client.deliver(root, queued.itemSeq, { mode: "steer" }); expect(steered).toMatchObject({ delivery: "steered", itemSeq: queued.itemSeq });
+    expect((await client.items(root)).items.find(row => row.seq === queued.itemSeq)!.item).toMatchObject({ delivery: "steered", escalated: true });
+    expect(await client.deliver(root, queued.itemSeq, { mode: "interrupt" })).toMatchObject({ delivery: "turn", itemSeq: queued.itemSeq });
+    const after = await client.run(initial.run.id);
+    expect(after.turns.find(turn => turn.id === `${root}:quiet`)).toMatchObject({ status: "canceled", error: "interrupted by human message" });
+    expect(after.turns.filter(turn => turn.nodeId === root && turn.status === "running")).toHaveLength(1);
+    expect(after.turns.find(turn => turn.nodeId === pi)!.status).toBe("running");
+    expect(after.delegations).toEqual(initial.delegations);
+    expect((await client.items(root)).items.find(row => row.seq === queued.itemSeq)!.item).toMatchObject({ delivery: "turn", interrupted: true });
+    await expect(client.deliver(root, queued.itemSeq, { mode: "interrupt" })).rejects.toThrow("409");
+    now += 46_000;
+    const done = await client.run(initial.run.id);
+    expect(done.turns.find(turn => turn.id === `${root}:quiet`)!.status).toBe("canceled");
+    expect(done.turns.filter(turn => turn.nodeId === root && turn.status === "running")).toHaveLength(0);
+  });
+
+  it("keeps unsupported steering queued, allows interrupt, and never delivers retracted messages", async () => {
+    let now = base; const client = new DemoClient(() => now); const snapshot = await client.run("run-conversation");
+    const pi = snapshot.nodes.find(node => node.agentId === "pi")!.id;
+    const queued = await client.send(pi, "改用快速验证", "unsupported");
+    expect(await client.deliver(pi, queued.itemSeq, { mode: "steer" })).toEqual({ accepted: true, delivery: "queued", itemSeq: queued.itemSeq, steerUnsupported: true });
+    expect((await client.items(pi)).items.find(row => row.seq === queued.itemSeq)!.item).toMatchObject({ delivery: "queued" });
+    expect((await client.deliver(pi, queued.itemSeq, { mode: "interrupt" })).delivery).toBe("turn");
+    const removed = await client.send(pi, "撤回这条", "removed"); await client.retract(pi, removed.itemSeq);
+    await expect(client.retract(pi, removed.itemSeq)).rejects.toThrow("409");
+    await expect(client.deliver(pi, removed.itemSeq, { mode: "interrupt" })).rejects.toThrow("409");
+    now += 60_000;
+    expect((await client.items(pi)).items.find(row => row.seq === removed.itemSeq)!.item).toMatchObject({ delivery: "retracted" });
+    expect((await client.run(snapshot.run.id)).turns.filter(turn => turn.nodeId === pi)).toHaveLength(2);
+  });
+
+  it("delivers multiple queued rows as one turn and starts idle nodes immediately for every mode", async () => {
+    let now = base; const client = new DemoClient(() => now); const snapshot = await client.run("run-conversation"); const root = snapshot.run.rootNodeId;
+    const one = await client.send(root, "第一条"); const two = await client.send(root, "第二条");
+    now += 46_000;
+    const rows = (await client.items(root)).items.filter(row => row.seq === one.itemSeq || row.seq === two.itemSeq);
+    expect(rows.every(row => row.item.type === "user_message" && row.item.delivery === "turn")).toBe(true);
+    expect(new Set(rows.map(row => row.turnId)).size).toBe(1);
+    for (const mode of ["queue", "steer", "interrupt"] as const) {
+      now += 16_000; const sent = await client.send(root, `idle ${mode}`, undefined, mode);
+      expect(sent.delivery).toBe("turn");
+      expect((await client.items(root)).items.find(row => row.seq === sent.itemSeq)!.item).not.toHaveProperty("interrupted");
+    }
   });
 
 });
