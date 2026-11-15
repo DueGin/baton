@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { BATON_TOOLS, LEAD_ONLY_TOOLS, emptyUsage, type AgentEntry, type AskHumanInput, type PermissionDecision, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionRequest, type PermissionResponse, type ReportResultInput, type FormTeamInput, type ReplaceMemberInput, type ReassignInput, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type SendMessageResponse, type SendMode, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
+import { BATON_TOOLS, LEAD_ONLY_TOOLS, emptyUsage, type AgentEntry, type AskHumanInput, type PermissionDecision, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionRequest, type PermissionResponse, type ReportResultInput, type FormTeamInput, type ReplaceMemberInput, type ReassignInput, type ReorderQueueResponse, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type SendMessageResponse, type SendMode, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
 import type { DriverEvent, DriverRegistry, DriverSession, OpenSessionSpec } from "../driver/types.js";
 import { Store } from "../store/index.js";
 import { briefPrompt, correctionPrompt, resultsPrompt, systemPrompt } from "./prompts.js";
@@ -25,6 +25,7 @@ const active = (status: string): boolean => ["starting", "running", "waiting_per
 const done = (d: DelegationRecord): boolean => ["completed", "failed", "canceled", "replaced"].includes(d.status);
 const addUsage = (a: UsageTotals, b: UsageTotals): UsageTotals => ({ inputTokens: a.inputTokens + b.inputTokens, cachedInputTokens: a.cachedInputTokens + b.cachedInputTokens, outputTokens: a.outputTokens + b.outputTokens, costUsd: a.costUsd + b.costUsd });
 interface QueuedPrompt { text: string; trigger: TurnTrigger; humanItem?: ItemRecord }
+type HumanMessage = ItemRecord & { item: Extract<TimelineItem, { type: "user_message" }> };
 type MessageDelivery = Omit<SendMessageResponse, "accepted">;
 export class MessageError extends Error { readonly status = 409; }
 const HUMAN_INTERRUPT = "interrupted by human message";
@@ -255,6 +256,16 @@ export class Kernel {
     const current = this.store.node(id);
     if (["canceled", "replaced"].includes(current.status) || this.canceling.has(id) || this.stopped) throw new Error("Node has been canceled or daemon stopped");
     if (!active(current.status)) this.checkGlobalLimit();
+    // Read positions after session startup: a reorder may have arrived while this drain
+    // was awaiting it. Reorder human slots only; kernel prompts retain their positions.
+    const queued = new Map(this.queuedHumanMessages(id).map((row) => [row.seq, row]));
+    const humans = prompts.filter((p) => p.humanItem).sort((a, b) => {
+      const first = queued.get(a.humanItem!.seq) ?? a.humanItem!, second = queued.get(b.humanItem!.seq) ?? b.humanItem!;
+      const position = (row: ItemRecord): number => row.item.type === "user_message" ? row.item.queuePosition ?? row.seq : row.seq;
+      return position(first) - position(second) || first.seq - second.seq;
+    });
+    let humanIndex = 0;
+    prompts = prompts.map((p) => p.humanItem ? humans[humanIndex++]! : p);
     clearTimeout(rt.idleTimer);
     const trigger = prompts[0]!.trigger, text = prompts.map((p) => p.text).join("\n\n");
     const turnId = randomUUID(); rt.turnId = turnId; rt.driverTurnId = undefined; rt.report = undefined; rt.finalText = ""; rt.usage = emptyUsage(); rt.lastItem = undefined;
@@ -283,7 +294,8 @@ export class Kernel {
     const n = this.store.node(id), rt = this.runtime(id);
     if (this.stopped) throw new Error("Daemon is shutting down");
     if (["canceled", "replaced"].includes(n.status) || this.canceling.has(id)) throw new Error("Node is canceled");
-    const row = this.addItem(id, { type: "user_message", text, delivery: "queued", ...(clientId !== undefined ? { clientId } : {}) });
+    const queuePosition = Math.max(0, ...this.queuedHumanMessages(id).map((r) => r.item.queuePosition ?? r.seq)) + 1;
+    const row = this.addItem(id, { type: "user_message", text, delivery: "queued", queuePosition, ...(clientId !== undefined ? { clientId } : {}) });
     rt.pendingMessages.set(row.seq, row);
     const key = `${id}:${row.seq}`; this.messageActions.add(key);
     try {
@@ -294,7 +306,21 @@ export class Kernel {
       this.abandonMessage(id, row.seq); throw error;
     } finally { this.messageActions.delete(key); }
   }
-  private humanMessage(id: string, seq: number): ItemRecord & { item: Extract<TimelineItem, { type: "user_message" }> } {
+  private queuedHumanMessages(id: string): HumanMessage[] {
+    return this.store.items(id).flatMap((row) => row.item.type === "user_message" && row.item.delivery === "queued" ? [{ ...row, item: row.item }] : []);
+  }
+  reorderQueue(id: string, order: number[]): ReorderQueueResponse {
+    const node = this.store.node(id);
+    if (this.stopped || this.canceling.has(id) || ["canceled", "replaced"].includes(node.status)) throw new MessageError("Node is canceled or closed");
+    const queued = this.queuedHumanMessages(id), bySeq = new Map(queued.map((row) => [row.seq, row]));
+    if (!Array.isArray(order) || order.length !== queued.length || new Set(order).size !== queued.length || order.some((seq) => !bySeq.has(seq))) throw new MessageError("Queue changed; order must contain every queued human message exactly once");
+    for (const [index, seq] of order.entries()) {
+      const row = bySeq.get(seq)!, queuePosition = index + 1;
+      if (row.item.queuePosition !== queuePosition) this.replaceMessage(id, { ...row, item: { ...row.item, queuePosition } });
+    }
+    return { order: [...order] };
+  }
+  private humanMessage(id: string, seq: number): HumanMessage {
     this.store.node(id);
     const row = this.store.items(id).find((r) => r.seq === seq);
     if (!row || row.item.type !== "user_message" || row.item.delivery === undefined) throw new MessageError("Item is not a human message of this node");
@@ -323,7 +349,8 @@ export class Kernel {
     if (row.item.delivery !== "queued") throw new MessageError("Only queued messages can be retracted");
     rt.queued = rt.queued.filter((p) => p.humanItem?.seq !== seq);
     rt.pendingMessages.delete(seq);
-    this.replaceMessage(id, { ...row, item: { ...row.item, delivery: "retracted" } });
+    const { queuePosition: _position, ...item } = row.item;
+    this.replaceMessage(id, { ...row, item: { ...item, delivery: "retracted" } });
   }
   private async sendHumanMessage(id: string, row: ItemRecord, mode: SendMode, escalated: boolean): Promise<MessageDelivery> {
     if (row.item.type !== "user_message") throw new Error("Expected human message");
@@ -368,13 +395,15 @@ export class Kernel {
   }
   private replaceMessage(id: string, row: ItemRecord): void {
     const rt = this.runtime(id);
+    if (rt.pendingMessages.has(row.seq)) rt.pendingMessages.set(row.seq, row);
     this.store.appendItem(this.store.node(id).runId, row);
     if (rt.lastItem?.seq === row.seq) rt.lastItem = row;
   }
   private deliverMessage(id: string, row: ItemRecord, delivery: "turn" | "steered", turnId: string): void {
     const rt = this.runtime(id);
     if (row.item.type !== "user_message" || !rt.pendingMessages.delete(row.seq)) return;
-    const next = { ...row, turnId, item: { ...row.item, delivery } };
+    const { queuePosition: _position, ...item } = row.item;
+    const next = { ...row, turnId, item: { ...item, delivery } };
     this.replaceMessage(id, next);
   }
   private abandonMessages(id: string): void {
