@@ -25,6 +25,10 @@ export function exportRun(store: Store, id: string, format: ExportFormat): strin
     lines.push("", "## Escalations", "");
     for (const e of s.escalations) lines.push(`- ${e.createdAt} · ${e.kind} · ${e.status}: ${e.detail}${e.resolution ? `\n  Resolution: ${e.resolution}${e.note ? ` · ${e.note}` : ""}` : ""}${e.pendingMessage ? `\n  Pending message: ${e.pendingMessage}` : ""}`);
   }
+  if (s.backgroundProcesses?.length) {
+    lines.push("", "## Background processes", "", "| PID | Node | Status | Attribution | Ports | Command |", "| --- | --- | --- | --- | --- | --- |");
+    for (const p of s.backgroundProcesses) lines.push(`| ${p.pid} | ${p.nodeId ?? ""} | ${p.status}${p.dismissed ? " (dismissed)" : ""} | ${p.attribution} | ${p.ports.join(", ")} | ${p.command.replaceAll("|", "\\|").replaceAll("\n", " ")} |`);
+  }
   for (const d of s.delegations) {
     lines.push("", `## ${d.brief.title}`, "", d.brief.task);
     if (d.brief.context) lines.push("", `Context: ${d.brief.context}`);

@@ -61,12 +61,13 @@ async function connect(options: ClientOptions, config: AgentSessionConfig): Prom
     return client;
 }
 class CodexSession extends ProviderSession {
+    processIds(): number[] { return this.client?.processIds() ?? []; }
     private client!: CodexAppServerClient;
     private nativeTurn: string | null = null;
     private usage?: AgentUsage;
     private seenText = new Set<string>();
     private canceling = false;
-    private processIds = new Set<string>();
+    private terminalIds = new Set<string>();
     private previousUsage: AgentUsage = {};
     private totalUsage: AgentUsage = {};
     private constructor(config: AgentSessionConfig) { super("codex", config); }
@@ -107,7 +108,7 @@ class CodexSession extends ProviderSession {
         this.nativeTurn = null;
         this.usage = undefined;
         this.previousUsage = { ...this.totalUsage };
-        this.processIds.clear();
+        this.terminalIds.clear();
         this.seenText.clear();
         const turnId = this.activeTurn;
         const result = record(await this.client.request("turn/start", { threadId: this.sessionId, input: [{ type: "text", text: prompt }], ...(this.config.model ? { model: this.config.model } : {}), ...(this.config.thinking ? { effort: this.config.thinking } : {}), cwd: this.config.cwd }, 90000));
@@ -166,9 +167,9 @@ class CodexSession extends ProviderSession {
             const item = record(params.item);
             if (item.type === "commandExecution" && typeof item.processId === "string") {
                 if (method === "item/started")
-                    this.processIds.add(item.processId);
+                    this.terminalIds.add(item.processId);
                 if (method === "item/completed" && item.status === "completed")
-                    this.processIds.delete(item.processId);
+                    this.terminalIds.delete(item.processId);
             }
             if (item.type === "agentMessage" && method === "item/completed" && !this.seenText.has(`assistant_message:${text(item.id)}`))
                 this.timeline({ type: "assistant_message", text: text(item.text), messageId: text(item.id) });
@@ -227,8 +228,8 @@ class CodexSession extends ProviderSession {
             await this.client.request("turn/interrupt", { threadId: this.sessionId, turnId: this.nativeTurn }, 2500);
             await this.waitForTurn();
             // Codex turn/interrupt leaves terminal children alive; terminate only this turn's ids.
-            await Promise.all([...this.processIds].map(processId => this.client.request("thread/backgroundTerminals/terminate", { threadId: this.sessionId, processId }, 2000)));
-            this.processIds.clear();
+            await Promise.all([...this.terminalIds].map(processId => this.client.request("thread/backgroundTerminals/terminate", { threadId: this.sessionId, processId }, 2000)));
+            this.terminalIds.clear();
         }
         catch {
             await this.close();

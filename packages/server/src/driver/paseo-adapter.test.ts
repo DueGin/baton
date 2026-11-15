@@ -26,6 +26,7 @@ describe("Paseo driver registry", () => {
         const driver = registry.get("fake-codex")!;
         const session = await driver.open({ cwd: home, mcpServers: { baton: { type: "http", url: "http://127.0.0.1:7433/test" } } });
         const events = collect(session);
+        expect(session.processIds?.()).toEqual([expect.any(Number)]);
         session.subscribe(() => { throw new Error("bad listener"); });
         expect(await session.steer("idle")).toBe("no_active_turn");
         const { turnId } = await session.startTurn("permission");
@@ -39,6 +40,7 @@ describe("Paseo driver registry", () => {
         expect(await session.runtimeInfo()).toEqual({ model: "fake-model", modeId: "default" });
         const persistence = session.persistence()!;
         await session.close();
+        expect(session.processIds?.()).toEqual([]);
         const resumed = await driver.resume(persistence, { cwd: home, mcpServers: {} });
         expect(resumed.persistence()).toEqual(persistence);
         await expect(driver.resume({ provider: "pi", sessionId: "invalid" }, { cwd: home, mcpServers: {} })).rejects.toThrow("Invalid provider persistence");

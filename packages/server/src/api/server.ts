@@ -14,13 +14,15 @@ import { Notifications, desktopNotifier, type Notifier } from "../notifications/
 import { exportRun, type ExportFormat } from "../telemetry/index.js";
 import { Settings } from "../settings/index.js";
 import { Titles, type TitleGenerator } from "../titles/index.js";
+import { BackgroundRegistry, type BackgroundOptions } from "../background/index.js";
 export interface StartServerOptions {
   home?: string; port?: number; registry?: DriverRegistry; fake?: boolean; webDist?: string;
   maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; notifier?: Notifier; notificationCoalesceMs?: number;
   titleGenerator?: TitleGenerator;
+  background?: BackgroundOptions;
 }
 export interface BatonServer {
-  home: string; port: number; token: string; url: string; server: Server; store: Store; kernel: Kernel;
+  home: string; port: number; token: string; url: string; server: Server; store: Store; kernel: Kernel; background: BackgroundRegistry;
   close(): Promise<void>;
 }
 class HttpError extends Error { constructor(readonly status: number, message: string) { super(message); } }
@@ -59,7 +61,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
   try { const config = await settings.config(), notifications = config.notifications; if (notifications && typeof notifications === "object" && "desktop" in notifications && typeof notifications.desktop === "boolean") desktop = notifications.desktop; }
   catch (error) { store.close(); throw error; }
   const notifications = new Notifications(store, options.notifier ?? (desktop ? desktopNotifier : () => {}), options.notificationCoalesceMs);
-  let kernel: Kernel, port = 0;
+  let kernel: Kernel, background: BackgroundRegistry, port = 0;
   const streams = new Set<ServerResponse>();
   const webDist = resolve(options.webDist ?? fileURLToPath(new URL("../../../web/dist", import.meta.url)));
   const server = createServer((request, response) => {
@@ -91,6 +93,12 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
     if (path.startsWith("/api/")) {
       const provided = request.headers.authorization?.startsWith("Bearer ") ? request.headers.authorization.slice(7) : (method === "GET" && path.endsWith("/events") ? url.searchParams.get("token") : null);
       if (!provided || Buffer.byteLength(provided) !== Buffer.byteLength(token) || !timingSafeEqual(Buffer.from(provided), Buffer.from(token))) throw new HttpError(401, "Bearer token required");
+      if (method === "GET" && path === "/api/background") { await background.scan(); json(response, 200, background.list(url.searchParams.get("status") ?? "running")); return; }
+      const backgroundRoute = /^\/api\/background\/([^/]+)\/(stop|dismiss)$/.exec(path);
+      if (method === "POST" && backgroundRoute) {
+        const input = record(await body(request)), id = decodeURIComponent(backgroundRoute[1]!);
+        json(response, 200, backgroundRoute[2] === "stop" ? await background.stop(id, input.graceMs as number | undefined) : background.dismiss(id, input.dismissed as boolean)); return;
+      }
       if (path === "/api/settings") {
         if (method === "GET") { json(response, 200, await settings.get()); return; }
         if (method === "PUT") { json(response, 200, await settings.update(record(await body(request)) as UpdateSettingsRequest)); return; }
@@ -156,7 +164,12 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
         const id = run[1]!, action = run[2]; store.snapshot(id);
         if (method === "GET" && !action) { json(response, 200, store.snapshot(id)); return; }
         if (method === "PATCH" && !action) { json(response, 200, kernel.patchRun(id, record(await body(request)) as PatchRunRequest)); return; }
-        if (method === "POST" && action === "cancel") { await body(request); await kernel.cancelRun(id); json(response, 200, store.snapshot(id)); return; }
+        if (method === "POST" && action === "cancel") {
+          const input = request.headers["content-length"] === "0" || !request.headers["content-length"] && !request.headers["transfer-encoding"] ? {} : record(await body(request));
+          if (input.stopBackground !== undefined && typeof input.stopBackground !== "boolean") throw new HttpError(400, "stopBackground must be a boolean");
+          if (input.stopBackground) { await background.scan(); await background.stopRun(id); }
+          await kernel.cancelRun(id); json(response, 200, store.snapshot(id)); return;
+        }
         if (method === "GET" && action === "events") {
           const after = sequence(url.searchParams.get("after") ?? (typeof request.headers["last-event-id"] === "string" ? request.headers["last-event-id"] : undefined));
           if (!request.headers.accept?.includes("text/event-stream")) { json(response, 200, store.events(id, after)); return; }
@@ -211,9 +224,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
   const address = server.address(); if (!address || typeof address === "string") throw new Error("Invalid server address"); port = address.port;
   const url = `http://127.0.0.1:${port}`;
   kernel = new Kernel(store, registry, { ...options, baseUrl: url, titles }); kernel.recover();
+  background = new BackgroundRegistry(store, () => kernel.processSources(), options.background);
   await writeFile(join(home, "daemon.json"), JSON.stringify({ url, port, pid: process.pid }), { mode: 0o600 });
   let closing: Promise<void> | undefined;
-  return { home, token, port, url, server, store, kernel, close() {
-    closing ??= (async () => { notifications.close(); await kernel.shutdown(); for (const stream of streams) stream.end(); const closed = new Promise<void>((resolveClosed, reject) => server.close((error) => error ? reject(error) : resolveClosed())); server.closeAllConnections(); await closed; store.close(); })(); return closing;
+  return { home, token, port, url, server, store, kernel, background, close() {
+    closing ??= (async () => { notifications.close(); await background.close(); await kernel.shutdown(); for (const stream of streams) stream.end(); const closed = new Promise<void>((resolveClosed, reject) => server.close((error) => error ? reject(error) : resolveClosed())); server.closeAllConnections(); await closed; store.close(); })(); return closing;
   } };
 }

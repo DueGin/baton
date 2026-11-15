@@ -37,6 +37,7 @@ export class PiRpcAgentClient implements AgentClient {
     }
 }
 class PiSession extends ProviderSession {
+    processIds(): number[] { return this.process?.processIds() ?? []; }
     private process!: JsonlRpcProcess;
     private sessionFile?: string;
     private dir!: string;

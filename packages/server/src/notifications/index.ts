@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import type { RunEventEnvelope } from "@baton/protocol";
 import type { Store } from "../store/index.js";
+import { backgroundCount } from "../store/index.js";
 export interface DesktopNotification { runId: string; title: string; body: string }
 export type Notifier = (notification: DesktopNotification) => void | Promise<void>;
 function appleString(value: string): string { return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("\r", " ").replaceAll("\n", " ")}"`; }
@@ -47,7 +48,8 @@ export class Notifications {
     const pending = new Set(this.store.inbox().filter((i) => i.runId === runId).map((i) => i.kind === "permission" ? i.permission.id : i.kind === "proposal" ? i.proposal.id : i.kind === "question" ? i.question.id : i.escalation.id));
     const count = [...p.attention].filter((id) => pending.has(id)).length;
     if (!count && !p.completed) return;
-    const body = [count ? `${count} item(s) need your attention.` : "", p.completed ? "Run completed its work." : ""].filter(Boolean).join(" ");
+    const background = backgroundCount(this.store.snapshot(runId).backgroundProcesses);
+    const body = [count ? `${count} item(s) need your attention.` : "", p.completed ? "Run completed its work." : "", p.completed && background ? `仍有 ${background} 个后台进程在运行` : ""].filter(Boolean).join(" ");
     void Promise.resolve().then(() => this.notify({ runId, title: `baton · ${run.title}`, body })).catch(() => {});
   }
   close(): void { this.unsubscribe(); for (const p of this.pending.values()) clearTimeout(p.timer); this.pending.clear(); }

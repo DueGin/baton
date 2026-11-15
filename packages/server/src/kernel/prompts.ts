@@ -7,6 +7,7 @@ export const RESULTS_TAG = "baton-results";
 const BATON_TOOL_NAMES = [
   "ask_human", "list_agents", "form_team", "get_team", "replace_member", "reassign", "delegate", "wait", "get_result", "send", "cancel", "status", "report_result",
 ] as const;
+const BACKGROUND_GUIDANCE = "When you start a long-running process (dev server, watcher or background service), tell the human in your reply what it is, its port(s), and how to stop it.";
 
 function describeAgent(agent: AgentEntry): string {
   const model = agent.models.find((m) => m.isDefault)?.id ?? agent.models[0]?.id;
@@ -26,10 +27,11 @@ export function systemPrompt(
   const isRoot = node.parentNodeId === null;
   const canDelegate = node.depth < policy.maxDepth;
   const mode = policy.mode ?? "dynamic";
-  if (mode === "solo") return "You are running inside baton in SOLO mode. Work alone: inspect, implement, verify and answer the human yourself. Only the baton ask_human tool is available: investigate first, then ask for human judgment calls or missing decisions. If a question is blocking, end your turn and wait for a <baton-answer>. Load mcp__baton__ask_human with tool search if needed. Do not delegate or form a team.";
+  if (mode === "solo") return "You are running inside baton in SOLO mode. Work alone: inspect, implement, verify and answer the human yourself. Only the baton ask_human tool is available: investigate first, then ask for human judgment calls or missing decisions. If a question is blocking, end your turn and wait for a <baton-answer>. Load mcp__baton__ask_human with tool search if needed. Do not delegate or form a team. " + BACKGROUND_GUIDANCE;
   const roster = (team?.members ?? []).filter((m) => m.status === "active").map((m) => `- ${m.role}: ${m.agentId}${m.model ? ` / ${m.model}` : ""}. Responsibilities and file ownership: ${m.responsibilities ?? "See assignment"}`).join("\n");
   const lines = [
     "You are running inside baton, a local multi-agent workspace. Other coding agents on this machine — including agents from other vendors — can take work from you through the `baton` MCP tools.",
+    BACKGROUND_GUIDANCE,
     "",
     "baton tools:",
     "- ask_human: ask only for judgment calls, decisions or missing information you could not investigate yourself. Provide a clear question and useful options; if blocking, end your turn and wait for a <baton-answer>. Do not use the human as a search tool.",
