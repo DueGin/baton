@@ -508,7 +508,10 @@ export interface RunSnapshot {
   permissions: PermissionRecord[];
   questions: QuestionRecord[];
   escalations: EscalationRecord[];
-  /** Background processes started by the run's agents (running and recently exited). */
+  /**
+   * Background processes started by the run's agents. Snapshots omit entries that exited more than
+   * 24 h ago (there is no deletion event — consumers replaying events should apply the same filter).
+   */
   backgroundProcesses?: BackgroundProcess[];
   /** Last event seq included in this snapshot; subscribe with after=lastSeq. */
   lastSeq: number;
