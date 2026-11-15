@@ -90,6 +90,8 @@ export type TimelineItem =
       interrupted?: boolean;
       /** True when a queued message was later steered into the running turn ("引导发送"). */
       escalated?: boolean;
+      /** Position in the node's queue while delivery is "queued" (ascending = delivered first). */
+      queuePosition?: number;
       /** Echo of SendMessageRequest.clientId, so the console can reconcile its optimistic row. */
       clientId?: string;
     }

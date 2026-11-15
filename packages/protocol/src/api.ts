@@ -63,6 +63,17 @@ export interface SendMessageResponse {
   itemSeq: number;
 }
 
+/**
+ * PUT /api/nodes/:nodeId/queue — reorder the node's queued human messages. `order` must be a
+ * permutation of the itemSeqs currently queued (409 when the queue changed meanwhile).
+ */
+export interface ReorderQueueRequest {
+  order: number[];
+}
+export interface ReorderQueueResponse {
+  order: number[];
+}
+
 /** DELETE /api/nodes/:nodeId/messages/:itemSeq — retract a still-queued human message (delivery → "retracted"). */
 
 export interface PermissionDecision {
