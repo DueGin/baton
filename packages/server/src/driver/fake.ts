@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -11,6 +12,8 @@ export interface FakeContext {
   call<T = unknown>(tool: BatonToolName, input: Record<string, unknown>): Promise<T>;
   permission(request: PermissionRequest): Promise<PermissionResponse>;
   steered: string[];
+  /** Real subprocess, parented by this fake session's agent supervisor; caller owns cleanup. */
+  spawn(command: string, args?: string[], options?: { detached?: boolean }): Promise<number>;
 }
 export type FakeScript = (context: FakeContext) => Promise<void> | void;
 export interface FakeDriverOptions { script?: FakeScript; scripts?: FakeScript[]; steer?: boolean; label?: string }
@@ -38,7 +41,28 @@ export class FakeSession implements DriverSession {
   private active?: { id: string; controller: AbortController; promise: Promise<void> };
   private permissions = new Map<string, { request: PermissionRequest; resolve: (response: PermissionResponse) => void }>();
   private client?: Client; private connecting?: Promise<Client>;
+  private supervisor?: ChildProcess;
   constructor(readonly driver: FakeDriver, readonly spec: OpenSessionSpec) {}
+  processIds(): number[] { return this.supervisor?.pid && this.supervisor.exitCode === null && this.supervisor.signalCode === null ? [this.supervisor.pid] : []; }
+  private async spawnChild(command: string, args: string[], detached: boolean): Promise<number> {
+    if (!this.supervisor) {
+      this.supervisor = spawn(process.execPath, ["-e", `const {spawn}=require('node:child_process');process.on('message',m=>{const c=spawn(m.command,m.args,{cwd:m.cwd,detached:m.detached,stdio:'ignore'});c.once('error',e=>process.send({id:m.id,error:e.message}));c.once('spawn',()=>{c.unref();process.send({id:m.id,pid:c.pid})})});`], { cwd: this.spec.cwd, stdio: ["ignore", "ignore", "ignore", "ipc"] });
+    }
+    const supervisor = this.supervisor, id = randomUUID();
+    return new Promise<number>((resolve, reject) => {
+      const cleanup = (): void => { supervisor.off("message", message); supervisor.off("error", error); supervisor.off("exit", exit); };
+      const error = (e: Error): void => { cleanup(); reject(e); };
+      const exit = (): void => error(new Error("Fake process supervisor exited"));
+      const message = (value: unknown): void => {
+        if (!value || typeof value !== "object" || !("id" in value) || value.id !== id) return;
+        cleanup();
+        if ("pid" in value && typeof value.pid === "number") resolve(value.pid);
+        else reject(new Error("error" in value ? String(value.error) : "Spawn failed"));
+      };
+      supervisor.on("message", message); supervisor.once("error", error); supervisor.once("exit", exit);
+      supervisor.send({ id, command, args, cwd: this.spec.cwd, detached }, (e) => { if (e) error(e); });
+    });
+  }
   persistence(): JsonValue { return { sessionId: this.sessionId, turns: this.turns }; }
   subscribe(listener: (event: DriverEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   private emit(event: DriverEvent): void { for (const listener of this.listeners) { try { listener(event); } catch { /* driver contract: never throw from listeners */ } } }
@@ -54,6 +78,12 @@ export class FakeSession implements DriverSession {
       usage: (usage) => this.emit({ type: "usage", turnId: id, usage }),
       sleep: async (ms) => { await delay(ms, undefined, { signal: controller.signal }); },
       steered: this.steered,
+      spawn: async (command, args = [], options = {}) => {
+        const callId = randomUUID(), detail = { type: "shell" as const, command: [command, ...args].join(" "), cwd: this.spec.cwd };
+        item({ type: "tool_call", callId, name: "shell", status: "running", detail });
+        const pid = await this.spawnChild(command, args, options.detached ?? false);
+        item({ type: "tool_call", callId, name: "shell", status: "completed", detail }); return pid;
+      },
       call: async <T>(tool: BatonToolName, input: Record<string, unknown>): Promise<T> => {
         const callId = randomUUID(); item({ type: "tool_call", callId, name: `mcp__baton__${tool}`, status: "running", detail: { type: "unknown", input, output: undefined } });
         try {
@@ -112,7 +142,7 @@ export class FakeSession implements DriverSession {
     this.permissions.delete(requestId); pending.resolve(response); this.emit({ type: "permission_resolved", requestId, response, turnId: this.active?.id });
   }
   pendingPermissions(): PermissionRequest[] { return [...this.permissions.values()].map((p) => p.request); }
-  async close(): Promise<void> { if (this.closed) return; this.closed = true; await this.interrupt(); await this.client?.close(); this.listeners.clear(); }
+  async close(): Promise<void> { if (this.closed) return; this.closed = true; await this.interrupt(); await this.client?.close(); this.supervisor?.kill(); this.listeners.clear(); }
 }
 export class FakeDriverRegistry implements DriverRegistry {
   readonly drivers: Map<string, FakeDriver>;

@@ -190,6 +190,7 @@ function readProviderTurnId(params: unknown): string | undefined {
     return isRecord(turn) && typeof turn.id === "string" ? turn.id : undefined;
 }
 export class CodexAppServerClient {
+    processIds(): number[] { return this.child.pid && this.child.exitCode === null && this.child.signalCode === null ? [this.child.pid] : []; }
     private readonly stdoutLineReader: {
         close(): void;
     };

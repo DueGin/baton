@@ -56,6 +56,7 @@ export class ClaudeAgentClient implements AgentClient {
     }
 }
 class ClaudeSession extends ProviderSession {
+    processIds(): number[] { return this.child?.pid && this.child.exitCode === null && this.child.signalCode === null ? [this.child.pid] : []; }
     private query: Query;
     private child?: ChildProcessWithoutNullStreams;
     private closing?: Promise<void>;

@@ -53,3 +53,9 @@ it("keeps member routing and repository boundaries explicit", () => {
   expect(text).toContain("ask_human");
   expect(systemPrompt(root, policy)).toContain("Team size limit: 5");
 });
+
+it("asks every agent to disclose long-running processes, ports and stopping instructions", () => {
+  for (const node of [root, child]) for (const mode of ["dynamic", "preset", "solo"] as const) {
+    expect(systemPrompt(node, { ...policy, mode })).toContain("tell the human in your reply what it is, its port(s), and how to stop it");
+  }
+});

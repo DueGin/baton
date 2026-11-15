@@ -9,6 +9,7 @@ import { HumanInteraction } from "./human.js";
 import { PermissionRules, HUMAN_DENIAL } from "./permission-rules.js";
 import { validateSchema } from "./schema.js";
 import type { TitleNaming } from "../titles/index.js";
+import type { ProcessSource } from "../background/attribution.js";
 
 /** True when a permission request is for one of baton's own MCP tools (Claude names them
  * mcp__baton__*, Codex asks via an MCP elicitation carrying serverName "baton"). */
@@ -96,6 +97,12 @@ export class Kernel {
     return rt;
   }
   identify(token: string): string | undefined { return this.identities.get(token); }
+  processSources(): ProcessSource[] {
+    return this.store.list().flatMap((r) => {
+      const snapshot = this.store.snapshot(r.id);
+      return snapshot.nodes.map((n) => ({ runId: r.id, nodeId: n.id, cwd: n.cwd, pids: this.runtimes.get(n.id)?.session?.processIds?.() ?? [], spans: snapshot.toolSpans.filter((s) => s.nodeId === n.id && s.kind === "shell") }));
+    });
+  }
   async agents(force = false): Promise<Array<AgentEntry & { load: number }>> {
     const entries = await this.registry.detect({ force });
     const nodes = this.store.list().flatMap((r) => this.store.snapshot(r.id).nodes);

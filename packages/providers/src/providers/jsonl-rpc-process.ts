@@ -61,6 +61,7 @@ function spawnJsonlRpcProcess(launch: JsonlRpcLaunch): ChildProcessWithoutNullSt
     return child;
 }
 export class JsonlRpcProcess {
+    processIds(): number[] { return this.child.pid && this.child.exitCode === null && this.child.signalCode === null ? [this.child.pid] : []; }
     private readonly child: ChildProcessWithoutNullStreams;
     private readonly diagnosticName: string;
     private readonly pending = new Map<string, PendingRequest>();

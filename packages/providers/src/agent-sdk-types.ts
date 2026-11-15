@@ -283,6 +283,8 @@ export type AgentStreamEvent = {
     error?: string;
 };
 export interface AgentSession {
+    /** Agent runtime processes, for baton background-process attribution. */
+    processIds?(): number[];
     readonly sessionId: string | null;
     getPersistence(): AgentPersistenceHandle | null;
     startTurn(prompt: string): Promise<{

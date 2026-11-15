@@ -35,6 +35,7 @@ export class ACPAgentClient implements AgentClient {
 export class GenericACPAgentClient extends ACPAgentClient {
 }
 class ACPSession extends ProviderSession implements Client {
+    processIds(): number[] { return this.child.pid && this.child.exitCode === null && this.child.signalCode === null ? [this.child.pid] : []; }
     private child: ChildProcessWithoutNullStreams;
     private connection: ClientSideConnection;
     private stderr = "";

@@ -87,6 +87,7 @@ export class PaseoDriverSession implements DriverSession {
         });
     }
     get sessionId(): string | null { return this.session.sessionId; }
+    processIds(): number[] { return this.session.processIds?.() ?? []; }
     persistence(): JsonValue | null { const handle = this.session.getPersistence(); return handle ? { ...handle } : null; }
     async startTurn(prompt: string): Promise<{
         turnId: string;
