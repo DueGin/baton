@@ -39,6 +39,11 @@ describe("API transport", () => {
     expect(JSON.parse((fetchMock.mock.calls[1]![1] as RequestInit).body as string)).toEqual({ mode: "steer" });
     expect(JSON.parse((fetchMock.mock.calls[2]![1] as RequestInit).body as string)).toEqual({ mode: "interrupt" });
   });
+  it("submits the complete ordered queue with an encoded node ID", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({ order: [9, 4, 7] })); vi.stubGlobal("fetch", fetchMock);
+    expect(await new ApiClient("token").reorderQueue("node/1", { order: [9, 4, 7] })).toEqual({ order: [9, 4, 7] });
+    expect(fetchMock).toHaveBeenCalledWith("/api/nodes/node%2F1/queue", { method: "PUT", headers: { Authorization: "Bearer token", "Content-Type": "application/json" }, body: JSON.stringify({ order: [9, 4, 7] }) });
+  });
   it("exposes server error bodies and response status", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: "UNAUTHORIZED", message: "invalid token" } }), { status: 401 })));
     await expect(new ApiClient("bad").runs()).rejects.toThrow("401");

@@ -12,21 +12,78 @@ export function messageActions(delivery: Delivery | undefined, state?: MessageAc
 export interface OutgoingMessage {
   clientId: string; nodeId: string; text: string; ts: string;
   state: "sending" | "accepted" | "failed"; delivery?: Delivery; itemSeq?: number; interrupted?: boolean; error?: string;
+  turnId?: string; queuePosition?: number; deliveryOrder?: number;
 }
 export function reconcileOutgoing(messages: OutgoingMessage[], row: ItemRecord): OutgoingMessage[] {
   const item = row.item;
   if (item.type !== "user_message") return messages;
   return messages.map(message => message.nodeId === row.nodeId && (item.clientId === message.clientId || row.seq === message.itemSeq)
-    ? { ...message, state: "accepted", itemSeq: row.seq, delivery: item.delivery ?? message.delivery, interrupted: item.interrupted, error: undefined } : message);
+    ? { ...message, state: "accepted", itemSeq: row.seq, delivery: item.delivery ?? message.delivery, interrupted: item.interrupted, turnId: row.turnId ?? message.turnId, queuePosition: item.queuePosition, deliveryOrder: item.deliveryOrder, error: undefined } : message);
 }
 export function deliveryLabel(delivery?: Delivery, interrupted = false): string {
   return delivery === "queued" ? "排队中" : delivery === "steered" ? "已插入当前回合" : delivery === "retracted" ? "已撤回" : delivery === "turn" ? interrupted ? "已中断并立即发送" : "已送达" : "";
 }
-export function conversationRows(rows: ItemRecord[], outgoing: OutgoingMessage[], nodeId: string): { row: ItemRecord; outgoing?: OutgoingMessage }[] {
+export interface ConversationEntry { row: ItemRecord; outgoing?: OutgoingMessage }
+export function messageRows(rows: ItemRecord[], outgoing: OutgoingMessage[], nodeId: string): ConversationEntry[] {
   const messages = outgoing.filter(message => message.nodeId === nodeId);
-  const result = rows.map(row => ({ row, outgoing: messages.find(message => row.item.type === "user_message" && (row.item.clientId === message.clientId || row.seq === message.itemSeq)) }));
-  for (const [index, message] of messages.entries()) if (!result.some(entry => entry.outgoing?.clientId === message.clientId)) result.push({ row: { seq: message.itemSeq ?? -(index + 1), nodeId, ts: message.ts, item: { type: "user_message", text: message.text, clientId: message.clientId, delivery: message.delivery, interrupted: message.interrupted } }, outgoing: message });
+  const result = rows.filter(row => row.nodeId === nodeId).map(row => ({ row, outgoing: messages.find(message => row.item.type === "user_message" && (row.item.clientId === message.clientId || row.seq === message.itemSeq)) }));
+  for (const [index, message] of messages.entries()) if (!result.some(entry => entry.outgoing?.clientId === message.clientId)) result.push({ row: { seq: message.itemSeq ?? -(index + 1), nodeId, turnId: message.turnId, ts: message.ts, item: { type: "user_message", text: message.text, clientId: message.clientId, delivery: message.delivery, interrupted: message.interrupted, queuePosition: message.queuePosition, deliveryOrder: message.deliveryOrder } }, outgoing: message });
   return result;
+}
+
+export function conversationRows(rows: ItemRecord[], outgoing: OutgoingMessage[], nodeId: string): ConversationEntry[] {
+  const visible = messageRows(rows, outgoing, nodeId).filter(({ row }) => row.item.type !== "user_message" || !["queued", "retracted"].includes(row.item.delivery ?? ""));
+  const startsTurn = ({ row }: ConversationEntry) => row.item.type === "user_message" && row.item.delivery === "turn" && row.turnId !== undefined;
+  const isSteered = ({ row }: ConversationEntry) => row.item.type === "user_message" && row.item.delivery === "steered" && row.turnId !== undefined;
+  const starting = new Map<string, ConversationEntry[]>();
+  const steered = new Map<string, ConversationEntry[]>();
+  for (const entry of visible) if (startsTurn(entry)) {
+    const group = starting.get(entry.row.turnId!) ?? []; group.push(entry); starting.set(entry.row.turnId!, group);
+  } else if (isSteered(entry)) {
+    const group = steered.get(entry.row.turnId!) ?? []; group.push(entry); steered.set(entry.row.turnId!, group);
+  }
+  const deliveryOrder = (row: ItemRecord) => row.item.type === "user_message" ? row.item.deliveryOrder ?? row.seq : row.seq;
+  for (const group of starting.values()) group.sort((a, b) => deliveryOrder(a.row) - deliveryOrder(b.row) || a.row.seq - b.row.seq);
+  // A replaced message keeps its original itemSeq, which may precede the old turn's final output.
+  const result: ConversationEntry[] = []; const emitted = new Set<string>();
+  const rest = visible.filter(entry => !startsTurn(entry) && !isSteered(entry));
+  const first = new Set<string>(); const last = new Map<string, number>();
+  rest.forEach((entry, index) => { if (entry.row.turnId) last.set(entry.row.turnId, index); });
+  for (const [index, entry] of rest.entries()) {
+    if (entry.row.turnId && !first.has(entry.row.turnId)) {
+      const group = starting.get(entry.row.turnId);
+      if (group) { result.push(...group); emitted.add(entry.row.turnId); }
+      first.add(entry.row.turnId);
+    }
+    result.push(entry);
+    if (entry.row.turnId && last.get(entry.row.turnId) === index) { result.push(...steered.get(entry.row.turnId) ?? []); steered.delete(entry.row.turnId); }
+    // A newly started turn may not have any output yet. Place it after older persisted rows.
+    if (index === rest.length - 1) for (const [id, group] of starting) if (!emitted.has(id) && !last.has(id)) { result.push(...group); emitted.add(id); }
+  }
+  for (const [id, group] of starting) if (!emitted.has(id)) result.push(...group);
+  for (const group of steered.values()) result.push(...group);
+  return result;
+}
+
+function queuePosition(row: ItemRecord): number { return row.item.type === "user_message" ? row.item.queuePosition ?? Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER; }
+export function queuedRows(rows: ItemRecord[], outgoing: OutgoingMessage[], nodeId: string, order?: number[]): ConversationEntry[] {
+  const rank = new Map(order?.map((seq, index) => [seq, index]));
+  return messageRows(rows, outgoing, nodeId).filter(({ row }) => row.item.type === "user_message" && row.item.delivery === "queued")
+    .sort((a, b) => (rank.get(a.row.seq) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.row.seq) ?? Number.MAX_SAFE_INTEGER) || queuePosition(a.row) - queuePosition(b.row) || Date.parse(a.row.ts) - Date.parse(b.row.ts) || a.row.seq - b.row.seq);
+}
+
+/** Move to a slot in the original list (0 = before first, length = after last). */
+export function queueDropOrder(order: number[], itemSeq: number, slot: number): number[] {
+  const from = order.indexOf(itemSeq); if (from < 0) return order;
+  const target = Math.max(0, Math.min(order.length, slot));
+  const next = order.filter(seq => seq !== itemSeq); next.splice(target > from ? target - 1 : target, 0, itemSeq); return next;
+}
+export function queueMoveOrder(order: number[], itemSeq: number, offset: -1 | 1): number[] {
+  const from = order.indexOf(itemSeq); if (from < 0 || from + offset < 0 || from + offset >= order.length) return order;
+  return queueDropOrder(order, itemSeq, offset === 1 ? from + 2 : from - 1);
+}
+export function queueDropSlot(y: number, bounds: { top: number; height: number }[]): number {
+  const index = bounds.findIndex(rect => y < rect.top + rect.height / 2); return index < 0 ? bounds.length : index;
 }
 export function activeTurn(snapshot: RunSnapshot, nodeId: string) { return snapshot.turns.filter(turn => turn.nodeId === nodeId && turn.status === "running").at(-1); }
 export function nodeIsLive(snapshot: RunSnapshot, node: NodeRecord): boolean {
@@ -44,7 +101,7 @@ export function conversationPhase(snapshot: RunSnapshot, node: NodeRecord, rows:
   if (!nodeIsLive(snapshot, node) && !children.length && !sendingAt && !snapshot.questions.some(question => question.nodeId === node.id && question.status === "pending" && question.blocking)) return null;
   const since = turn?.startedAt ?? sendingAt ?? node.updatedAt;
   const lastOutputAt = lastEventAt ?? rows.reduce((latest, row) => Math.max(latest, Date.parse(row.ts)), Date.parse(since));
-  const turnRows = rows.filter(row => turn ? row.turnId === turn.id || (!row.turnId && Date.parse(row.ts) >= Date.parse(turn.startedAt)) : Date.parse(row.ts) >= Date.parse(since));
+  const turnRows = rows.filter(row => (row.item.type !== "user_message" || !["queued", "retracted"].includes(row.item.delivery ?? "")) && (turn ? row.turnId === turn.id || (!row.turnId && Date.parse(row.ts) >= Date.parse(turn.startedAt)) : Date.parse(row.ts) >= Date.parse(since)));
   const latest = turnRows.at(-1);
   const phase: ConversationPhase = { kind: "waiting", label: "已发送，等待响应…", since, related: [], quiet: quietSeconds(now, lastOutputAt), tokens: node.usage.inputTokens + node.usage.outputTokens };
   const interrupted = snapshot.turns.findLast(entry => entry.nodeId === node.id && entry.status === "canceled" && entry.error === "interrupted by human message");

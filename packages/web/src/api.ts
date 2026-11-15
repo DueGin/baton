@@ -5,7 +5,7 @@ import type {
   SettingsResponse, UpdateSettingsRequest, TestTitleModelRequest, TestTitleModelResponse,
   ListBackgroundResponse, StopBackgroundRequest, DismissBackgroundRequest, CancelRunRequest,
   ProjectRecord, ProjectSummary, CreateProjectRequest, PatchProjectRequest, ListDirsResponse,
-  SendMessageResponse, SendMode, DeliverMessageRequest, InboxItem, AnswerQuestionRequest, ResolveEscalationRequest, PermissionRule, CreatePermissionRuleRequest,
+  SendMessageResponse, SendMode, DeliverMessageRequest, ReorderQueueRequest, ReorderQueueResponse, InboxItem, AnswerQuestionRequest, ResolveEscalationRequest, PermissionRule, CreatePermissionRuleRequest,
 } from "@baton/protocol";
 
 /** The server may attach availability warnings to successful preset mutations. */
@@ -35,6 +35,7 @@ export interface BatonClient {
   send(nodeId: string, text: string, clientId?: string, mode?: SendMode): Promise<SendMessageResponse>;
   deliver(nodeId: string, itemSeq: number, request: DeliverMessageRequest): Promise<SendMessageResponse>;
   retract(nodeId: string, itemSeq: number): Promise<void>;
+  reorderQueue(nodeId: string, request: ReorderQueueRequest): Promise<ReorderQueueResponse>;
   cancelNode(nodeId: string): Promise<void>;
   decide(requestId: string, decision: PermissionDecision): Promise<void>;
   delegation(id: string): Promise<DelegationRecord>;
@@ -111,6 +112,7 @@ export class ApiClient implements BatonClient {
   send = (nodeId: string, text: string, clientId?: string, mode: SendMode = "queue") => this.request<SendMessageResponse>(`/nodes/${encodeURIComponent(nodeId)}/messages`, "POST", { text, ...(clientId ? { clientId } : {}), mode });
   deliver = (nodeId: string, itemSeq: number, body: DeliverMessageRequest) => this.request<SendMessageResponse>(`/nodes/${encodeURIComponent(nodeId)}/messages/${itemSeq}/deliver`, "POST", body);
   retract = (nodeId: string, itemSeq: number) => this.request<void>(`/nodes/${encodeURIComponent(nodeId)}/messages/${itemSeq}`, "DELETE");
+  reorderQueue = (nodeId: string, body: ReorderQueueRequest) => this.request<ReorderQueueResponse>(`/nodes/${encodeURIComponent(nodeId)}/queue`, "PUT", body);
   cancelNode = (id: string) => this.request<void>(`/nodes/${encodeURIComponent(id)}/cancel`, "POST", {});
   decide = (id: string, body: PermissionDecision) => this.request<void>(`/permissions/${encodeURIComponent(id)}`, "POST", body);
   delegation = (id: string) => this.request<DelegationRecord>(`/delegations/${encodeURIComponent(id)}`);

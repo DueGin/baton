@@ -8,19 +8,14 @@ import type { TimelineItem } from "@baton/protocol";
 import type { MessageActionState } from "../lib/conversation.js";
 
 describe("safe agent content rendering", () => {
-  it("shows the delivery ladder, action progress and muted retractions", () => {
+  it("keeps queued/retracted rows out of the transcript and places icon actions on steered messages", () => {
     const snapshot = replay(createScenario(0), 86000); const node = snapshot.nodes[0]!;
     const render = (delivery: Extract<TimelineItem, { type: "user_message" }>["delivery"], actionState?: MessageActionState, interrupted = false) => renderToStaticMarkup(<TranscriptRow row={{ seq: 12, nodeId: node.id, ts: snapshot.run.createdAt, item: { type: "user_message", text: "请先验证", delivery, interrupted } }} node={node} actionState={actionState} act={() => undefined} />);
-    const queued = render("queued");
-    expect(queued).toContain("排队中"); expect(queued).toContain("引导发送"); expect(queued).toContain("撤回"); expect(queued).not.toContain("立即发送");
-    const unsupported = render("queued", { steerUnsupported: true });
-    expect(unsupported).toContain("该 agent 不支持引导"); expect(unsupported).toContain("立即发送"); expect(unsupported).not.toContain("引导发送");
-    const steering = render("queued", { pending: "steer" });
-    expect(steering).toContain('aria-busy="true"'); expect(steering.match(/disabled=""/g)).toHaveLength(2); expect(steering).toContain("message-action-spinner");
-    const steered = render("steered"); expect(steered).toContain("已插入当前回合"); expect(steered).toContain("立即发送"); expect(steered).not.toContain(">撤回<");
-    const instant = render("turn", undefined, true); expect(instant).toContain("已中断并立即发送"); expect(instant).not.toContain("message-actions");
-    const retracted = render("retracted"); expect(retracted).toContain("message-retracted"); expect(retracted).toContain("已撤回"); expect(retracted).not.toContain("message-actions");
-    expect(render("queued", { error: "网络错误，请重试" })).toContain('role="alert"');
+    expect(render("queued")).toBe(""); expect(render("retracted")).toBe("");
+    const steered = render("steered"); expect(steered).toContain('aria-label="已插入当前回合"'); expect(steered).toContain('aria-label="立即发送"'); expect(steered).not.toContain(">立即发送<"); expect(steered).not.toContain("message-actions");
+    const busy = render("steered", { pending: "interrupt" }); expect(busy).toContain('aria-busy="true"'); expect(busy).toContain('disabled=""');
+    const instant = render("turn", undefined, true); expect(instant).toContain('aria-label="已中断并立即发送"'); expect(instant).not.toContain("message-action-interrupt");
+    expect(render("steered", { error: "网络错误，请重试" })).toContain('role="alert"');
   });
   it("escapes HTML while supporting code, lists and emphasis", () => {
     const html = renderToStaticMarkup(<Markdown text={'<img src=x onerror=alert(1)>\n\n- **bold** and `inline`\n\n```html\n<script>alert(1)</script>\n```'} />);

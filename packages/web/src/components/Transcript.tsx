@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ItemRecord, NodeRecord, RunSnapshot, ToolCallDetail } from "@baton/protocol";
-import { activeTurn, conversationPhase, conversationRows, deliveryLabel, messageActionKey, messageActions, nodeIsLive, phaseTimerLabel, type ConversationPhase, type OutgoingMessage, type MessageActionState, type MessageAction } from "../lib/conversation.js";
+import { activeTurn, conversationPhase, conversationRows, messageActionKey, queuedRows, nodeIsLive, phaseTimerLabel, type ConversationPhase, type OutgoingMessage, type MessageActionState, type MessageAction } from "../lib/conversation.js";
 import { composerHeight } from "../lib/run-layout.js";
 import { clock, duration, tokens, treeOrder } from "../lib/derive.js";
 import { AgentMark, Empty, Icon, Status } from "./common.js";
@@ -10,6 +10,8 @@ import { parseBatonMessage, type BatonMessagePart } from "../lib/baton-messages.
 import { Markdown } from "./Markdown.js";
 import { reasoningBlockId, reasoningOpen, reasoningPreferences } from "../lib/reasoning.js";
 import { BackgroundPopover } from "./BackgroundProcesses.js";
+import { QueueDock } from "./QueueDock.js";
+import { DeliveryIcon, MessageActionIcons } from "./MessageActions.js";
 import { ReasoningControls } from "./ReasoningControls.js";
 export { Markdown } from "./Markdown.js";
 
@@ -64,6 +66,7 @@ function ReasoningRow({ id, text, streaming }: { id: string; text: string; strea
 }
 export function TranscriptRow({ row, node, snapshot, inspect, streaming = false, outgoing, retry, actionState, act }: { row: ItemRecord; node: NodeRecord; snapshot?: RunSnapshot; inspect?: (id: string) => void; streaming?: boolean; outgoing?: OutgoingMessage; retry?: () => void; actionState?: MessageActionState; act?: (action: MessageAction) => void }) {
   const item = row.item;
+  if (item.type === "user_message" && ["queued", "retracted"].includes(item.delivery ?? "")) return null;
   if (item.type === "user_message") {
     const parts = parseBatonMessage(item.text);
     if (parts && !item.delivery && !outgoing) return <BatonMessage parts={parts} snapshot={snapshot} inspect={inspect} />;
@@ -73,14 +76,13 @@ export function TranscriptRow({ row, node, snapshot, inspect, streaming = false,
   if (item.type === "notice" || item.type === "error") return <div className={`notice-row ${item.type === "error" ? "error" : item.level}`}>{item.type === "error" ? "✗ " : "↳ "}<Markdown text={item.message} /></div>;
   if (item.type === "todo") return <div className="todo-row">{item.items.map((todo, index) => <div key={index}><span>{todo.status === "completed" ? "✓" : todo.status === "in_progress" ? "◉" : "○"}</span><Markdown text={todo.text} /></div>)}</div>;
   const delivery = item.type === "user_message" ? item.delivery ?? outgoing?.delivery : undefined;
-  const retracted = delivery === "retracted";
-  const badge = item.type === "user_message" ? outgoing?.state === "sending" ? "发送中…" : outgoing?.state === "failed" ? "发送失败" : deliveryLabel(delivery, item.interrupted ?? outgoing?.interrupted) : "";
-  const actions = act && row.seq > 0 && (!outgoing || outgoing.state === "accepted") ? messageActions(delivery, actionState) : [];
-  const labels = { steer: "引导发送", interrupt: "立即发送", retract: "撤回" };
-  return <article className={`message message-${item.type}${retracted ? " message-retracted" : ""}${outgoing?.state === "failed" ? " message-send-failed" : ""}`}>
-    <div className="message-meta">{item.type === "user_message" ? <span className="user-avatar">U</span> : <AgentMark agent={node.agentId} small />}<strong>{item.type === "user_message" ? "你" : node.agentId}</strong><time>{clock(row.ts)}</time>{badge && <span className={`delivery-badge delivery-${retracted ? "retracted" : outgoing?.state ?? "accepted"}`} title={delivery === "queued" ? "当前回合结束后送达" : undefined}>{badge}</span>}{outgoing?.state === "failed" && <button className="text-button" title={outgoing.error} onClick={retry}>重试</button>}</div>
+  const canAct = act && row.seq > 0 && (!outgoing || outgoing.state === "accepted");
+  return <article className={`message message-${item.type}${outgoing?.state === "failed" ? " message-send-failed" : ""}`}>
+    <div className="message-meta">{item.type === "user_message" ? <span className="user-avatar">U</span> : <AgentMark agent={node.agentId} small />}<strong>{item.type === "user_message" ? "你" : node.agentId}</strong><time dateTime={row.ts}>{clock(row.ts)}</time>{item.type === "user_message" && <DeliveryIcon delivery={delivery} interrupted={item.interrupted ?? outgoing?.interrupted} state={outgoing?.state} />}
+      <div className="message-top-actions">{canAct && <MessageActionIcons delivery={delivery} state={actionState} act={act} />}{outgoing?.state === "failed" && <button type="button" className="icon-button" aria-label="重试发送" title="重试发送" onClick={retry}><Icon name="refresh" size={15} /></button>}</div>
+    </div>
     <Markdown text={item.text} streaming={streaming && item.type === "assistant_message"} />
-    {(actions.length > 0 || actionState?.error) && <div className="message-actions" aria-busy={Boolean(actionState?.pending)}>{actions.map(action => <button type="button" className={`text-button message-action-${action}`} key={action} disabled={Boolean(actionState?.pending)} onClick={() => act?.(action)} title={action === "interrupt" ? "中断当前回合，立即以这条消息开始新一轮" : action === "steer" ? "将这条消息插入当前回合" : "撤回这条排队消息"}>{actionState?.pending === action && <span className="message-action-spinner" aria-hidden="true">◌</span>}{labels[action]}</button>)}{actionState?.steerUnsupported && delivery === "queued" && <span className="muted" role="status">该 agent 不支持引导</span>}{actionState?.error && <span className="error-text" role="alert">{actionState.error}</span>}</div>}
+    {actionState?.error && <div className="error-text send-error" role="alert">{actionState.error}</div>}
     {outgoing?.state === "failed" && <div className="error-text send-error">{outgoing.error}</div>}
   </article>;
 }
@@ -112,6 +114,8 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
   useEffect(() => { if (node) { void store.loadItems(node.id); setDraft(""); setFollow(true); } }, [node?.id, store]);
   const rows = items[node?.id ?? nodeId] ?? [];
   const messages = conversationRows(rows, state.outgoing, node?.id ?? nodeId);
+  const queueState = state.queues[node?.id ?? nodeId];
+  const queue = queuedRows(rows, state.outgoing, node?.id ?? nodeId, queueState?.order);
   const pending = state.outgoing.findLast(message => message.nodeId === node?.id && (message.state === "sending" || (message.state === "accepted" && message.delivery === "turn" && !rows.some(row => row.seq === message.itemSeq))));
   const phase = node ? conversationPhase(snapshot, node, rows, now, state.lastEventAt[node.id], pending?.ts) : null;
   const live = node ? nodeIsLive(snapshot, node) : false;
@@ -147,6 +151,7 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
     <div className="transcript-scroll" ref={scroll} onScroll={() => { const el = scroll.current; if (el) setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 100); }}><div className="transcript-content">{itemStatus[node.id] === "loading" && <div className="loading-line">正在加载会话…</div>}{itemStatus[node.id] === "error" && <button className="button" onClick={() => { void store.loadItems(node.id, true); }}>重试加载会话</button>}{messages.map(({ row, outgoing }) => <TranscriptRow key={outgoing?.clientId ?? row.seq} row={row} node={node} snapshot={snapshot} inspect={inspect} outgoing={outgoing} actionState={state.messageActions[messageActionKey(node.id, row.seq)]} act={action => { void store.actOnMessage(node.id, row.seq, action); }} retry={outgoing ? () => { void store.sendMessage(node.id, outgoing.text, outgoing.clientId); } : undefined} streaming={live && inTurn(row) && (row.item.type === "reasoning" || (row.seq === latestText?.seq && phase?.kind === "reply"))} />)}{!messages.length && itemStatus[node.id] === "ready" && <Empty>这个节点还没有消息。</Empty>}<div ref={bottom} /></div></div>
     {phase && <ConversationStatus key={node.id} phase={phase} snapshot={snapshot} now={now} inspect={inspect} />}
     <div className="composer-tools"><BackgroundPopover projectName={projectName} key={snapshot.run.id} snapshot={snapshot} now={now} client={store.client} /></div>
+    <QueueDock key={node.id} entries={queue} actions={state.messageActions} pending={queueState?.pending} error={queueState?.error} reorder={order => { void store.reorderQueue(node.id, order); }} act={(seq, action) => { void store.actOnMessage(node.id, seq, action); }} />
     <form className="composer" onSubmit={event => { event.preventDefault(); submit(); }}><textarea ref={input} aria-label="消息" placeholder={`向 ${node.agentId} 发送消息…${live ? "（运行中也可发送）" : ""}`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); submit(); } }} disabled={["canceled", "replaced"].includes(node.status)} rows={2} /><div className="composer-footer"><span title="送达方式会显示在消息旁">{live ? "运行中 · 发送后排队，可在消息上改为引导或立即发送" : "发送到当前节点"} · ⌘ / Ctrl + Enter</span><button className="button primary" disabled={!draft.trim() || ["canceled", "replaced"].includes(node.status)}><Icon name="arrow" size={15} />发送</button></div></form>
   </div>;
 }

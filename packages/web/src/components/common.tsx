@@ -8,7 +8,7 @@ export function AgentMark({ agent, small = false }: { agent: string; small?: boo
 export function Status({ status, dot = true }: { status: string; dot?: boolean }) {
   return <span className={`status status-${status}`}>{dot && <i className="status-dot" />}{statusLabels[status] ?? status}</span>;
 }
-export function Icon({ name, size = 18 }: { name: "folder" | "server" | "edit" | "panel" | "inbox" | "graph" | "timeline" | "chat" | "agents" | "settings" | "plus" | "close" | "sun" | "moon" | "arrow" | "stop" | "chevron" | "refresh" | "check"; size?: number }) {
+export function Icon({ name, size = 18 }: { name: "clock" | "steer" | "lightning" | "undo" | "grip" | "up" | "down" | "warning" | "folder" | "server" | "edit" | "panel" | "inbox" | "graph" | "timeline" | "chat" | "agents" | "settings" | "plus" | "close" | "sun" | "moon" | "arrow" | "stop" | "chevron" | "refresh" | "check"; size?: number }) {
   const paths: Record<typeof name, ReactNode> = {
     folder: <path d="M3 6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v10H3V6Z" />,
     server: <><rect x="3" y="3" width="18" height="7" rx="2" /><rect x="3" y="14" width="18" height="7" rx="2" /><path d="M7 6.5h.01M7 17.5h.01M16 6.5h2M16 17.5h2" /></>,
@@ -29,6 +29,14 @@ export function Icon({ name, size = 18 }: { name: "folder" | "server" | "edit" |
     chevron: <path d="m9 5 7 7-7 7" />,
     refresh: <><path d="M20 7a9 9 0 1 0 1 9M20 2v6h-6" /></>,
     check: <path d="m5 12 4 4L19 6" />,
+    clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
+    steer: <><path d="M5 19v-7a5 5 0 0 1 5-5h10M15 2l5 5-5 5" /></>,
+    lightning: <path d="m13 2-9 12h7l-1 8 10-13h-7l1-7Z" />,
+    undo: <><path d="m8 4-5 5 5 5M3 9h11a6 6 0 0 1 0 12h-3" /></>,
+    grip: <path d="M9 5h.01M15 5h.01M9 12h.01M15 12h.01M9 19h.01M15 19h.01" />,
+    up: <path d="m6 14 6-6 6 6" />,
+    down: <path d="m6 10 6 6 6-6" />,
+    warning: <><path d="m12 3 10 18H2L12 3Z" /><path d="M12 9v5m0 3h.01" /></>,
   };
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
