@@ -350,6 +350,60 @@ URL 识别规则：
 
 **系统提示**：所有节点都会被告知："如果你创建了 PR，请让命令打印出 PR 的 URL（`gh pr create` 默认就会打印），并在 `report_result.artifacts` 里加上 `{kind:"url", value:<PR URL>}`。"
 
+### 4.12 桌面端（macOS 与 Windows）
+
+`packages/desktop` 是 Electron（45.x，内置 Node 24，`node:sqlite` 可用）外壳，控制台仍然是 `packages/web`。
+
+**进程模型**
+- 主进程启动时先看有没有已经在运行的 daemon：读 `$BATON_HOME/daemon.json`，再请求 `/api/info`。如果有就直接连接。
+- 如果没有，就用 `process.execPath` 加 `ELECTRON_RUN_AS_NODE=1` 起一个**子进程** daemon，运行打包进来的 `server/dist/cli/main.js serve --notifications client`。默认端口 7433；被占用时让 daemon 自动换一个可用端口，并把实际端口写进 daemon.json。
+- 退出应用时：
+  - 只关闭了窗口：daemon 留在后台，Run 继续跑。macOS 的 Dock 和 Windows 的托盘图标保留。
+  - 选了"退出"：如果还有活跃的 Run，先弹框确认，然后优雅停止 daemon（SIGTERM，或在 Windows 上关闭 stdin），daemon 会结束所有 agent 进程组。
+  - 连接的是外部启动的 daemon：不负责停它。
+- 单实例锁：再次打开应用时，聚焦已有的窗口。
+
+**环境变量**：macOS 从 Finder 或 Dock 启动的应用拿不到 shell 的 PATH，于是找不到 nvm 安装的 claude、codex。主进程启动时执行一次 `$SHELL -ilc 'env -0'`（超时 5 秒），取得 PATH 等变量，传给 daemon 子进程。Windows 直接继承系统和用户的 PATH。
+
+**窗口**：
+- BrowserWindow 加载 `http://127.0.0.1:<port>/#token=<token>`，token 从 `$BATON_HOME/token` 读取。
+- 安全设置：`contextIsolation`、`sandbox`、禁用 `nodeIntegration`。只允许在 daemon 这个 origin 内导航。外部 http、https 链接（PR、localhost 端口等）用 `shell.openExternal` 在系统浏览器打开。
+- 记住窗口的大小和位置。
+- 提供标准菜单：编辑（复制、粘贴、全选）、视图（重新加载、开发者工具、缩放）、窗口、帮助。macOS 上 Dock 图标的角标显示待处理数，Windows 上用任务栏的 overlay 图标显示。
+
+**preload 桥**：通过 `window.batonDesktop` 暴露，只提供以下方法：
+```ts
+interface BatonDesktopBridge {
+  platform: "darwin" | "win32" | "linux";
+  version: string;
+  pickDirectory(options?: { defaultPath?: string; title?: string }): Promise<string | null>; // 原生选择文件夹
+  openExternal(url: string): Promise<void>;          // 只接受 http(s) / mailto
+  showItemInFolder(path: string): Promise<void>;      // 在 Finder / 资源管理器中显示
+  setBadgeCount(count: number): void;
+}
+```
+- web 端检测到这个桥时：
+  - "添加项目"和新建 Run 里的"添加项目…"直接调用 `pickDirectory()`，弹出系统的选择文件夹对话框，选中后调用 `POST /api/projects`。手动输入和目录浏览器收进"其他方式"。
+  - 外部链接改用 `openExternal`。
+  - 项目菜单里增加"在 Finder 中显示"（Windows 上是"在资源管理器中显示"）。
+  - 页面内的浏览器通知关闭，改由主进程弹原生通知。
+- 没有桥的普通浏览器行为不变。
+
+**通知**：daemon 提供 `GET /api/notifications/events`（SSE，`NotificationEvent`）。主进程订阅这个流，用 Electron `Notification` 在两个平台上弹原生通知，点击后聚焦窗口并跳到 `route`。
+
+**Windows 适配**（server 和 providers）：
+- 可执行文件解析要考虑 PATHEXT。npm 安装的 `.cmd` 和 `.bat` 启动器要通过 `cmd.exe /d /s /c` 正确转义参数后调用，参考 Paseo 的 Windows 启动逻辑。
+- 路径用 `path` 模块处理，大小写不敏感比较。
+- 目录浏览器的根列出各个盘符。
+- 后台进程登记在 Windows 上返回空列表，界面上注明"Windows 暂不支持"。
+- 通知只走客户端，不用 osascript。
+
+**打包**：electron-builder。
+- macOS：生成 `dmg` 和 `zip`，arm64 与 x64，未签名或 ad-hoc 签名。
+- Windows：生成 `nsis` 安装包和 `zip`，x64。
+- 打包内容：server、protocol、providers、web 的 dist，以及生产依赖。
+- macOS 在本机构建。Windows 包需要在 Windows 上构建，或者走 CI（附 GitHub Actions 矩阵工作流）；本机能交叉打的就打，打不了在文档里说明。
+
 ## 5. Driver 接口（server 和 providers 之间的边界）
 
 契约文件是 `packages/server/src/driver/types.ts`。内核只依赖这个接口：
@@ -407,6 +461,7 @@ URL 识别规则：
 | GET/PATCH | `/api/projects/:id` | 项目汇总 / `PatchProjectRequest`（改名、归档） |
 | GET | `/api/runs?projectId=…` | 只看某个项目的 Run |
 | GET | `/api/fs/dirs?path=…` | `ListDirsResponse`，目录浏览 |
+| GET | `/api/notifications/events` | 通知流（SSE，`NotificationEvent`），供桌面端弹原生通知 |
 | GET | `/api/prs?projectId=&state=open｜all` | 跨 Run 的 PR（默认 open + draft） |
 | POST | `/api/runs/:runId/prs` | `LinkPullRequestRequest`，手动关联 |
 | POST | `/api/prs/:id/refresh` | 立即重新拉取状态 |

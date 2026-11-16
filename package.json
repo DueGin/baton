@@ -5,8 +5,16 @@
   "description": "Local agent client with native delegation and observability: drives the agent CLIs you already have (Claude Code, Codex, pi, any ACP agent).",
   "license": "Apache-2.0",
   "type": "module",
-  "engines": { "node": ">=22.13" },
-  "workspaces": ["packages/protocol", "packages/providers", "packages/server", "packages/web"],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "workspaces": [
+    "packages/protocol",
+    "packages/providers",
+    "packages/server",
+    "packages/web",
+    "packages/desktop"
+  ],
   "scripts": {
     "build": "tsc -b packages/protocol packages/providers packages/server && npm run build -w @baton/web --if-present",
     "typecheck": "tsc -b packages/protocol packages/providers packages/server && npm run typecheck -w @baton/web --if-present",

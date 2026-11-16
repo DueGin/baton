@@ -316,3 +316,22 @@ export interface GithubSettings {
   /** Track PR URLs that agents merely mention (source "mentioned"). Default true. */
   trackMentioned?: boolean;
 }
+
+// ───────────────────────────── desktop / notifications ─────────────────────────────
+
+/**
+ * GET /api/notifications/events — SSE stream of the notifications the daemon would show
+ * (event name "notification"). The desktop app subscribes and shows native notifications; when the
+ * daemon runs with `--notifications client` (or config notifications.mode = "client") it does not
+ * show OS notifications itself.
+ */
+export interface NotificationEvent {
+  id: string;
+  kind: "pending" | "run_completed" | "pr" | "other";
+  title: string;
+  body: string;
+  runId?: string;
+  /** Console route to open on click, e.g. "/runs/<id>" or "/inbox". */
+  route?: string;
+  ts: string;
+}

@@ -1,0 +1,13 @@
+{
+  "name": "@baton/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "description": "baton desktop app (Electron) for macOS and Windows",
+  "main": "dist/main.js",
+  "scripts": {},
+  "devDependencies": {
+    "electron": "^45.3.2",
+    "electron-builder": "^26.18.0"
+  }
+}
