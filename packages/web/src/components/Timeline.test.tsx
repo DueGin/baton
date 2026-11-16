@@ -11,4 +11,11 @@ describe("session timeline rendering", () => {
     expect(html.match(/class="timeline-gap"/g)).toHaveLength(2);
     expect(html).not.toContain("NOW"); expect(html).not.toContain("跟随现在");
   });
+  it("keeps a hatched pause band visible across the compressed axis and includes resume in the legend", () => {
+    const base = Date.parse("2026-11-10T07:00:00Z"); const snapshot = idleScenario(base);
+    snapshot.run.pauses = [{ at: new Date(base + 60000).toISOString(), resumedAt: new Date(base + 7380000).toISOString(), by: "human" }];
+    const html = renderToStaticMarkup(<Timeline snapshot={snapshot} inspect={() => undefined} />);
+    expect(html.match(/data-pause-band="normal"/g)).toHaveLength(2); expect(html.match(/data-pause-band="compressed"/g)).toHaveLength(1);
+    expect(html).toContain("已暂停"); expect(html).toContain("resume"); expect(html).toContain('patternTransform="rotate(40)"');
+  });
 });

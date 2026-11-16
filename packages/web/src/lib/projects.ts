@@ -36,5 +36,5 @@ export function groupProjects(projects: ProjectSummary[], runs: RunSummary[]): A
   }).sort((a, b) => b.activity.localeCompare(a.activity) || a.project.name.localeCompare(b.project.name));
 }
 export function liveProjectSummaries(projects: ProjectSummary[], runs: RunSummary[]): ProjectSummary[] {
-  return projects.map(project => { const entries = runs.filter(run => run.projectId === project.id); return { ...project, runCount: entries.length, activeRunCount: entries.filter(run => run.status === "active" || run.activeNodeCount > 0).length, pendingTotal: entries.reduce((sum, run) => sum + run.pendingTotal, 0), backgroundCount: entries.reduce((sum, run) => sum + (run.backgroundCount ?? 0), 0), lastRunAt: entries.map(run => run.updatedAt).sort().at(-1) ?? project.lastRunAt }; });
+  return projects.map(project => { const entries = runs.filter(run => run.projectId === project.id); return { ...project, runCount: entries.length, activeRunCount: entries.filter(run => run.status !== "paused" && (run.status === "active" || run.activeNodeCount > 0)).length, pendingTotal: entries.reduce((sum, run) => sum + run.pendingTotal, 0), backgroundCount: entries.reduce((sum, run) => sum + (run.backgroundCount ?? 0), 0), lastRunAt: entries.map(run => run.updatedAt).sort().at(-1) ?? project.lastRunAt }; });
 }

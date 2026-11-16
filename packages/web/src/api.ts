@@ -1,6 +1,6 @@
 import type {
   AgentEntry, CreateRunRequest, DelegationRecord, GetItemsResponse, PatchRunRequest,
-  PermissionDecision, RunEventEnvelope, RunSnapshot, RunSummary, AddMemberRequest, ReplaceMemberRequest,
+  PermissionDecision, RunEventEnvelope, RunRecord, RunSnapshot, RunSummary, AddMemberRequest, ReplaceMemberRequest,
   ReassignRequest, TeamPreset, TeamPresetInput, SaveTeamPresetRequest, ApproveTeamProposalRequest, RejectTeamProposalRequest,
   SettingsResponse, UpdateSettingsRequest, TestTitleModelRequest, TestTitleModelResponse,
   ListBackgroundResponse, StopBackgroundRequest, DismissBackgroundRequest, CancelRunRequest,
@@ -28,6 +28,8 @@ export interface BatonClient {
   updateSettings(request: UpdateSettingsRequest): Promise<SettingsResponse>;
   testTitleModel(request: TestTitleModelRequest): Promise<TestTitleModelResponse>;
   cancelRun(id: string, request?: CancelRunRequest): Promise<void>;
+  pauseRun(id: string): Promise<RunRecord>;
+  resumeRun(id: string): Promise<RunRecord>;
   background(status?: "running" | "all"): Promise<ListBackgroundResponse>;
   stopBackground(id: string, request?: StopBackgroundRequest): Promise<void>;
   dismissBackground(id: string, request: DismissBackgroundRequest): Promise<void>;
@@ -106,6 +108,8 @@ export class ApiClient implements BatonClient {
   updateSettings = (body: UpdateSettingsRequest) => this.request<SettingsResponse>("/settings", "PUT", body);
   testTitleModel = (body: TestTitleModelRequest) => this.request<TestTitleModelResponse>("/settings/title-model/test", "POST", body);
   cancelRun = (id: string, body: CancelRunRequest = {}) => this.request<void>(`/runs/${encodeURIComponent(id)}/cancel`, "POST", body);
+  pauseRun = (id: string) => this.request<RunRecord>(`/runs/${encodeURIComponent(id)}/pause`, "POST");
+  resumeRun = (id: string) => this.request<RunRecord>(`/runs/${encodeURIComponent(id)}/resume`, "POST");
   background = (status: "running" | "all" = "running") => this.request<ListBackgroundResponse>(`/background?status=${status}`);
   stopBackground = (id: string, body: StopBackgroundRequest = {}) => this.request<void>(`/background/${encodeURIComponent(id)}/stop`, "POST", body);
   dismissBackground = (id: string, body: DismissBackgroundRequest) => this.request<void>(`/background/${encodeURIComponent(id)}/dismiss`, "POST", body);

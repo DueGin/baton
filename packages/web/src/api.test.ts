@@ -53,6 +53,14 @@ describe("API transport", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: "UNAUTHORIZED", message: "invalid token" } }), { status: 401 })));
     await expect(new ApiClient("bad").runs()).rejects.toThrow("401");
   });
+  it("pauses/resumes runs without a body and posts structured multi-prompt answers", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => Response.json({ status: "paused" })); vi.stubGlobal("fetch", fetchMock); const client = new ApiClient("token");
+    await client.pauseRun("run/1"); await client.resumeRun("run/1");
+    const payload = { answers: { scope: ["当前项目"], checks: ["中文", "权限"] }, answer: "范围：当前项目\n验证：中文、权限" }; await client.answer("q/2", payload);
+    expect(fetchMock.mock.calls.map(call => [call[0], (call[1] as RequestInit).method])).toEqual([["/api/runs/run%2F1/pause", "POST"], ["/api/runs/run%2F1/resume", "POST"], ["/api/questions/q%2F2/answer", "POST"]]);
+    expect((fetchMock.mock.calls[0]![1] as RequestInit).body).toBeUndefined(); expect((fetchMock.mock.calls[1]![1] as RequestInit).body).toBeUndefined();
+    expect(JSON.parse((fetchMock.mock.calls[2]![1] as RequestInit).body as string)).toEqual(payload);
+  });
   it("edits and regenerates titles and reads, writes and tests the title model", async () => {
     const fetchMock = vi.fn().mockImplementation(async () => Response.json({})); vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("token");

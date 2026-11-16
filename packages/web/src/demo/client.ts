@@ -16,6 +16,8 @@ import { demoBriefPrompt, demoResultsPrompt } from "./prompts.js";
 import { snapshotInbox, sortInbox, permissionPattern } from "../lib/inbox.js";
 import { matchPermissionRule } from "../lib/permission-rules.js";
 import { activeMembers, cleanMember, defaultAgentSpec, pendingProposals, validateMembers, validatePreset } from "../lib/teams.js";
+import { questionPrompts } from "../lib/questions.js";
+import type { RunRecord, TurnTrigger } from "@baton/protocol";
 
 interface DemoRun { snapshot: RunSnapshot; remaining: RunEventEnvelope[]; log: RunEventEnvelope[] }
 export class DemoClient implements BatonClient {
@@ -34,6 +36,8 @@ export class DemoClient implements BatonClient {
   private serial = 0;
   private presets = new Map<string, TeamPreset>();
   private projectRecords = new Map<string, ProjectRecord>();
+  private pausedNodes = new Map<string, string[]>();
+  private heldMessages = new Map<string, string[]>();
   constructor(private readonly now: () => number = Date.now) {
     initialDemoProjects(new Date(now() - 86_400_000).toISOString()).forEach(project => this.projectRecords.set(project.id, project));
     const scenario = createScenario(now() - 86000);
@@ -60,6 +64,7 @@ export class DemoClient implements BatonClient {
     void this.createRun({ projectId: "project-atlas", agent: "claude", cwd: "/workspace/atlas", title: "待确认团队 · 实现登录流程", prompt: "实现登录流程，并独立审查会话安全。", policy: { mode: "dynamic", teamApproval: true } });
     this.setupHumanDemo();
     this.setupConversationDemo();
+    this.setupQuestionDemo();
     const background = createScenario(now() - 600000, "run-background");
     const backgroundLog = background.events.filter(event => Date.parse(event.ts) <= now());
     const backgroundRun = { snapshot: backgroundLog.reduce(applyEvent, background.initial), log: backgroundLog, remaining: [] };
@@ -110,7 +115,7 @@ export class DemoClient implements BatonClient {
         this.abandonedMessages.add(`${event.nodeId}:${row.itemSeq}`);
         this.append(data, event.nodeId, { type: "notice", level: "warning", message: "未送达：节点已结束" });
       }
-      for (const question of data.snapshot.questions.filter(row => row.nodeId === event.nodeId && row.status === "pending")) this.emit(data, { type: "question", question: { ...question, status: "canceled", answeredAt: envelope.ts } });
+      for (const question of data.snapshot.questions.filter(row => row.nodeId === event.nodeId && row.status === "pending")) this.emit(data, { type: "question", question: question.source === "native" ? { ...question, status: "canceled", cancelReason: "节点已结束", answeredAt: envelope.ts } : { ...question, delivery: "async" } });
     }
   }
   private append(data: DemoRun, nodeId: string, item: TimelineItem): number {
@@ -147,6 +152,10 @@ export class DemoClient implements BatonClient {
       if (job.force || data.snapshot.run.titleSource !== "human") this.emit(data, { type: "run.updated", patch: { title: `实现${(this.prompts.get(id) ?? "搜索与协作").slice(0, 12)}`, titleSource: "generated", updatedAt: new Date(this.now()).toISOString() } });
     }
     for (const data of this.data.values()) {
+      if (data.snapshot.run.status === "paused") {
+        const ready = data.remaining.filter(event => event.type === "background" && Date.parse(event.ts) <= this.now());
+        data.remaining = data.remaining.filter(event => !ready.includes(event)); ready.forEach(event => this.emit(data, event)); continue;
+      }
       const ready = data.remaining.filter(event => Date.parse(event.ts) <= this.now());
       data.remaining = data.remaining.filter(event => Date.parse(event.ts) > this.now());
       for (const event of ready) {
@@ -315,6 +324,7 @@ export class DemoClient implements BatonClient {
     const edge = { ...reserved, role: member.role, memberId: member.id }; const turnId = `${edge.toNodeId}:t1`;
     const parent = data.snapshot.nodes.find(node => node.id === edge.fromNodeId)!;
     if (!data.snapshot.nodes.some(node => node.id === edge.toNodeId)) this.emit(data, { type: "node.created", node: { id: edge.toNodeId, runId: edge.runId, parentNodeId: parent.id, delegationId: edge.id, depth: parent.depth + 1, ...cleanMember(member), memberId: member.id, title: edge.brief.title, cwd: parent.cwd, status: "starting", activity: "准备执行", createdAt: ts, updatedAt: ts, usage: emptyUsage(), turns: 0 } });
+    if (data.snapshot.run.status === "paused") { this.emit(data, { type: "delegation.created", delegation: edge }); this.emit(data, { type: "node.updated", nodeId: edge.toNodeId, patch: { status: "idle", activity: "等待会话继续" } }); return; }
     this.emit(data, { type: "run.updated", patch: { status: "active", updatedAt: ts } });
     this.emit(data, { type: "delegation.created", delegation: { ...edge, status: "running", startedAt: ts } });
     this.emit(data, { type: "node.updated", nodeId: edge.toNodeId, patch: { ...cleanMember(member), memberId: member.id, status: "running", activity: "执行已批准的任务", turns: 1, updatedAt: ts } });
@@ -331,7 +341,11 @@ export class DemoClient implements BatonClient {
     const { blockedByProposal: _blocked, ...edge } = old;
     this.emit(data, { type: "delegation.created", delegation: { ...edge, status: "canceled", endedAt: new Date(this.now()).toISOString() } });
   }
-  private notice(data: DemoRun, nodeId: string, text: string): void { this.append(data, nodeId, { type: "user_message", text: `<baton-notice>\n${text}\n</baton-notice>` }); }
+  private notice(data: DemoRun, nodeId: string, text: string): void {
+    const message = `<baton-notice>\n${text}\n</baton-notice>`;
+    if (data.snapshot.run.status === "paused") this.heldMessages.set(nodeId, [...this.heldMessages.get(nodeId) ?? [], message]);
+    else this.append(data, nodeId, { type: "user_message", text: message });
+  }
   async approveTeam(id: string, proposalId: string, request: ApproveTeamProposalRequest): Promise<void> {
     const data = this.get(id); const team = this.teamFor(data); const proposal = team.proposals.find(entry => entry.id === proposalId && entry.status === "pending"); if (!proposal) throw new Error("提案已处理或不存在");
     if (data.snapshot.run.status === "canceled") throw new Error("Run 已取消");
@@ -401,6 +415,7 @@ export class DemoClient implements BatonClient {
     if (["canceled", "replaced"].includes(node.status)) throw new HttpError(409, "节点已结束");
     const active = data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running");
     const supported = demoAgents.find(agent => agent.id === node.agentId)?.capabilities.steer === true;
+    if (data.snapshot.run.status === "paused") return { accepted: true, delivery: "queued", itemSeq };
     if (active && (mode === "queue" || mode === "steer" && !supported)) return { accepted: true, delivery: "queued", itemSeq, ...(mode === "steer" ? { steerUnsupported: true } : {}) };
     const interrupted = Boolean(active && mode === "interrupt");
     if (interrupted) this.interruptTurn(data, nodeId);
@@ -450,11 +465,12 @@ export class DemoClient implements BatonClient {
     });
     for (const id of turnIds) this.emit(data, { type: "turn.updated", turnId: id, patch: { status: "canceled", error: "interrupted by human message", endedAt: ts } });
     for (const span of data.snapshot.toolSpans) if (span.nodeId === nodeId && span.status === "running") this.emit(data, { type: "tool.span", span: { ...span, status: "canceled", endedAt: ts } });
+    for (const question of data.snapshot.questions.filter(question => question.nodeId === nodeId && question.status === "pending" && question.delivery === "inline")) this.emit(data, { type: "question", question: question.source === "native" ? { ...question, status: "canceled", cancelReason: data.snapshot.run.status === "paused" ? "会话已暂停" : "回合已中断", answeredAt: ts } : { ...question, delivery: "async" } });
   }
-  private startReply(data: DemoRun, nodeId: string, text: string): void {
+  private startReply(data: DemoRun, nodeId: string, text: string, trigger: TurnTrigger = "user"): void {
     const node = data.snapshot.nodes.find(entry => entry.id === nodeId)!;
     const ts = new Date(this.now()).toISOString(); const turnId = `${nodeId}:user-${++this.serial}`;
-    this.emit(data, { type: "turn.started", turn: { id: turnId, runId: data.snapshot.run.id, nodeId, trigger: "user", status: "running", startedAt: ts } });
+    this.emit(data, { type: "turn.started", turn: { id: turnId, runId: data.snapshot.run.id, nodeId, trigger, status: "running", startedAt: ts } });
     this.emit(data, { type: "node.updated", nodeId, patch: { status: "running", endedAt: undefined, turns: node.turns + 1, activity: "已发送，等待响应…", updatedAt: ts } });
     if (node.delegationId) this.emit(data, { type: "delegation.updated", delegationId: node.delegationId, patch: { round: (data.snapshot.delegations.find(edge => edge.id === node.delegationId)?.round ?? 1) + 1 } });
     this.emit(data, { type: "run.updated", patch: { status: "active", endedAt: undefined, updatedAt: ts } });
@@ -481,6 +497,7 @@ export class DemoClient implements BatonClient {
     return [...rows.values()].filter(row => row.item.type === "user_message" && row.item.delivery === "queued" && !this.abandonedMessages.has(`${nodeId}:${row.itemSeq}`)).sort((a, b) => (a.item.type === "user_message" ? a.item.queuePosition ?? a.itemSeq : a.itemSeq) - (b.item.type === "user_message" ? b.item.queuePosition ?? b.itemSeq : b.itemSeq));
   }
   private deliverQueued(data: DemoRun, nodeId: string): void {
+    if (data.snapshot.run.status === "paused") return;
     if (data.snapshot.nodes.some(node => node.id === nodeId && ["canceled", "replaced", "failed", "completed"].includes(node.status))) return;
     const queued = this.queuedMessages(data, nodeId);
     if (queued.length) {
@@ -515,6 +532,41 @@ export class DemoClient implements BatonClient {
     const data = this.get(id); if (request.stopBackground) for (const process of data.snapshot.backgroundProcesses ?? []) if (backgroundActive(process)) await this.stopBackground(process.id);
     await this.cancelNode(data.snapshot.run.rootNodeId);
   };
+  async pauseRun(id: string): Promise<RunRecord> {
+    this.advance(); const data = this.get(id); if (data.snapshot.run.status === "paused") return structuredClone(data.snapshot.run);
+    if (terminal(data.snapshot.run.status)) throw new HttpError(409, "会话已结束");
+    const ts = new Date(this.now()).toISOString(); const nodes = [...new Set(data.snapshot.turns.filter(turn => turn.status === "running").map(turn => turn.nodeId))];
+    this.pausedNodes.set(id, nodes);
+    this.emit(data, { type: "run.updated", patch: { status: "paused", updatedAt: ts, pauses: [...data.snapshot.run.pauses ?? [], { at: ts, by: "human" }] } });
+    for (const nodeId of nodes) { this.interruptTurn(data, nodeId); this.emit(data, { type: "node.updated", nodeId, patch: { status: "idle", activity: "会话已暂停", updatedAt: ts } }); }
+    for (const turn of data.snapshot.turns.filter(turn => turn.error === "interrupted by human message" && turn.endedAt === ts && nodes.includes(turn.nodeId))) this.emit(data, { type: "turn.updated", turnId: turn.id, patch: { error: "paused by human" } });
+    for (const permission of data.snapshot.permissions.filter(permission => permission.status === "pending")) this.emit(data, { type: "permission", permission: { ...permission, status: "expired", resolvedAt: ts } });
+    for (const question of data.snapshot.questions.filter(question => question.status === "pending" && question.delivery === "inline")) this.emit(data, { type: "question", question: question.source === "native" ? { ...question, status: "canceled", cancelReason: "会话已暂停", answeredAt: ts } : { ...question, delivery: "async" } });
+    return structuredClone(data.snapshot.run);
+  }
+  async resumeRun(id: string): Promise<RunRecord> {
+    const data = this.get(id); if (data.snapshot.run.status !== "paused") throw new HttpError(409, "会话未暂停");
+    const ts = new Date(this.now()).toISOString(); const pauses = (data.snapshot.run.pauses ?? []).map(pause => pause.resumedAt ? pause : { ...pause, resumedAt: ts });
+    this.emit(data, { type: "run.updated", patch: { status: "active", pauses, updatedAt: ts } });
+    const nodes = this.pausedNodes.get(id) ?? []; this.pausedNodes.delete(id);
+    for (const node of data.snapshot.nodes) {
+      if (terminal(node.status)) continue;
+      const queued = this.queuedMessages(data, node.id); const held = this.heldMessages.get(node.id) ?? []; this.heldMessages.delete(node.id);
+      if (nodes.includes(node.id)) {
+        const notice = "<baton-notice>The human paused this run and has now resumed it. Continue where you left off.</baton-notice>";
+        this.append(data, node.id, { type: "user_message", text: [notice, ...held].join("\n\n") });
+        this.startReply(data, node.id, [notice, ...held, ...queued.map(row => row.item.type === "user_message" ? row.item.text : "")].join("\n\n"), "resume");
+        const turnId = data.snapshot.turns.findLast(turn => turn.nodeId === node.id && turn.status === "running")!.id;
+        for (const [index, row] of queued.entries()) if (row.item.type === "user_message") { const { queuePosition: _position, ...item } = row.item; this.emit(data, { type: "item", nodeId: node.id, itemSeq: row.itemSeq, itemTs: row.itemTs, turnId, item: { ...item, delivery: "turn", ...(queued.length > 1 ? { deliveryOrder: index + 1 } : {}) } }); }
+      } else {
+        held.forEach(text => this.append(data, node.id, { type: "user_message", text }));
+        if (queued.length) this.deliverQueued(data, node.id);
+        else if (held.length) this.startReply(data, node.id, held.join("\n\n"), "result");
+      }
+    }
+    for (const edge of data.snapshot.delegations.filter(edge => edge.status === "queued" && !edge.blockedByProposal)) this.startTask(data, edge, edge.memberId);
+    return structuredClone(data.snapshot.run);
+  }
   async cancelNode(nodeId: string): Promise<void> {
     const data = this.forNode(nodeId); const ids = new Set([nodeId]); const ts = new Date(this.now()).toISOString();
     let size = 0; while (size !== ids.size) { size = ids.size; data.snapshot.nodes.forEach(node => { if (node.parentNodeId && ids.has(node.parentNodeId)) ids.add(node.id); }); data.snapshot.delegations.forEach(edge => { if (ids.has(edge.fromNodeId)) ids.add(edge.toNodeId); }); }
@@ -540,6 +592,7 @@ export class DemoClient implements BatonClient {
       const team = data.snapshot.run.team;
       if (team && pendingProposals(team).length) this.teamUpdate(data, { ...team, proposals: team.proposals.map(proposal => proposal.status === "pending" ? { ...proposal, status: "rejected", decidedAt: ts, feedback: "Run 已取消" } : proposal) }, { kind: "rejected", by: "human", at: ts, reason: "Run 已取消" });
       this.emit(data, { type: "run.updated", patch: { status: "canceled", endedAt: ts, updatedAt: ts } });
+      for (const question of data.snapshot.questions.filter(question => question.status === "pending")) this.emit(data, { type: "question", question: { ...question, status: "canceled", cancelReason: "会话已取消", answeredAt: ts } });
     }
   }
   decide = async (requestId: string, decision: PermissionDecision): Promise<void> => {
@@ -601,11 +654,21 @@ export class DemoClient implements BatonClient {
     await new Promise<void>(resolve => { const cleanup = (): void => { clearInterval(timer); this.inboxListeners.delete(changed); resolve(); }; if (signal.aborted) cleanup(); else signal.addEventListener("abort", cleanup, { once: true }); });
   }
   async answer(id: string, request: AnswerQuestionRequest): Promise<void> {
-    if (!request.answer.trim()) throw new Error("请填写回答");
+    if (!request.answer?.trim() && !Object.values(request.answers ?? {}).some(values => values.some(value => value.trim()))) throw new Error("请填写回答");
     for (const data of this.data.values()) {
       const question = data.snapshot.questions.find(row => row.id === id && row.status === "pending"); if (!question) continue;
-      this.emit(data, { type: "question", question: { ...question, status: "answered", answer: request.answer.trim(), answeredAt: new Date(this.now()).toISOString() } });
-      await this.send(question.nodeId, `<baton-answer question="${id}">\n${request.answer.trim()}\n</baton-answer>`); return;
+      const prompts = questionPrompts(question); const answers = request.answers ?? { [prompts[0]!.id]: [request.answer!.trim()] };
+      if (prompts.some(prompt => !answers[prompt.id]?.some(value => value.trim()) || !prompt.multiSelect && answers[prompt.id]!.length > 1 || !prompt.allowFreeText && answers[prompt.id]!.some(value => !prompt.options.some(option => option.label === value)))) throw new Error("请回答全部问题");
+      const summary = request.answer?.trim() ?? prompts.map(prompt => `${prompts.length > 1 ? `${prompt.header ?? prompt.question}：` : ""}${answers[prompt.id]!.join("、")}`).join("\n");
+      this.emit(data, { type: "question", question: { ...question, status: "answered", answer: summary, answers, answeredAt: new Date(this.now()).toISOString() } });
+      if (question.delivery === "inline") {
+        const tool = data.log.findLast(event => event.type === "item" && event.nodeId === question.nodeId && event.item.type === "tool_call" && event.item.callId === question.anchor?.callId);
+        if (tool?.type === "item" && tool.item.type === "tool_call") this.emit(data, { type: "item", nodeId: question.nodeId, itemSeq: tool.itemSeq, itemTs: tool.itemTs, turnId: tool.turnId, item: { ...tool.item, status: "completed" } });
+        const seq = this.append(data, question.nodeId, { type: "assistant_message", text: "已收到回答，继续执行…" }); const turnId = question.anchor?.turnId;
+        data.remaining.push({ type: "item", nodeId: question.nodeId, itemSeq: seq, itemTs: new Date(this.now()).toISOString(), turnId, item: { type: "assistant_message", text: `已收到回答，继续执行。\n\n${summary}\n\n- [x] 根据回答调整计划\n- [x] 完成验证` }, seq: 0, runId: question.runId, ts: new Date(this.now() + 2000).toISOString() });
+        if (turnId) data.remaining.push({ type: "turn.updated", turnId, patch: { status: "completed", endedAt: new Date(this.now() + 3000).toISOString() }, seq: 0, runId: question.runId, ts: new Date(this.now() + 3000).toISOString() }, { type: "node.updated", nodeId: question.nodeId, patch: { status: "idle", activity: "等待下一条消息" }, seq: 0, runId: question.runId, ts: new Date(this.now() + 3000).toISOString() });
+        data.remaining.sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
+      } else await this.send(question.nodeId, `<baton-answer question="${id}">\n${summary}\n</baton-answer>`); return;
     }
     throw new Error("提问已处理或不存在");
   }
@@ -613,7 +676,7 @@ export class DemoClient implements BatonClient {
   askHuman(nodeId: string, input: Pick<QuestionRecord, "question" | "options" | "blocking">): QuestionRecord {
     const data = this.forNode(nodeId); const node = data.snapshot.nodes.find(row => row.id === nodeId)!;
     if (terminal(node.status) || !input.question.trim()) throw new Error("节点已结束或问题为空");
-    const question: QuestionRecord = { ...input, question: input.question.trim(), id: `question-${++this.serial}`, nodeId, runId: node.runId, status: "pending", askedAt: new Date(this.now()).toISOString() };
+    const question: QuestionRecord = { ...input, source: "ask_human", delivery: "async", question: input.question.trim(), id: `question-${++this.serial}`, nodeId, runId: node.runId, status: "pending", askedAt: new Date(this.now()).toISOString() };
     this.emit(data, { type: "question", question }); return question;
   }
   async resolveEscalation(id: string, request: ResolveEscalationRequest): Promise<void> {
@@ -663,6 +726,21 @@ export class DemoClient implements BatonClient {
     this.emit(data, { type: "escalation", escalation: stall });
     this.emit(data, { type: "escalation", escalation: { id: "demo-round-limit", runId: data.snapshot.run.id, nodeId: edges[1]!.toNodeId, delegationId: edges[1]!.id, kind: "round_limit", detail: "tester 已达到 3 轮，需要你决定是否继续。", pendingMessage: "请补充归档数据的回归测试。", status: "pending", createdAt: new Date(this.now()).toISOString() } });
     this.emit(data, { type: "delegation.updated", delegationId: edges[1]!.id, patch: { round: 3 } });
+  }
+  private setupQuestionDemo(): void {
+    const scenario = createScenario(this.now() - 120_000, "run-questions"); const seed = scenario.events.reduce(applyEvent, scenario.initial);
+    const root = seed.nodes[0]!; const child = seed.nodes.find(node => node.agentId === "pi")!; const ts = new Date(this.now()).toISOString();
+    const snapshot: RunSnapshot = { ...seed, run: { ...seed.run, projectId: "project-notes", cwd: "/workspace/notes", title: "内联问答 · 选择后继续执行", status: "active", endedAt: undefined, updatedAt: ts }, nodes: [root, child].map(node => ({ ...node, cwd: "/workspace/notes", status: "running", endedAt: undefined, turns: 1, activity: "等你回答", updatedAt: ts })), delegations: seed.delegations.filter(edge => edge.toNodeId === child.id).map(edge => ({ ...edge, status: "running", endedAt: undefined, deliveredAt: undefined, result: undefined })), turns: [], toolSpans: [], permissions: [], questions: [], escalations: [], lastSeq: 0 };
+    snapshot.run.usage = snapshot.nodes.reduce((usage, node) => ({ inputTokens: usage.inputTokens + node.usage.inputTokens, cachedInputTokens: usage.cachedInputTokens + node.usage.cachedInputTokens, outputTokens: usage.outputTokens + node.usage.outputTokens, costUsd: usage.costUsd + node.usage.costUsd }), emptyUsage());
+    const data: DemoRun = { snapshot, log: [], remaining: [] }; this.data.set(snapshot.run.id, data);
+    for (const node of snapshot.nodes) {
+      const turnId = `${node.id}:ask`; const native = node.id === root.id; const callId = `${node.id}:question`;
+      this.emit(data, { type: "turn.started", turn: { id: turnId, nodeId: node.id, runId: snapshot.run.id, trigger: "user", status: "running", startedAt: ts } });
+      this.append(data, node.id, { type: "assistant_message", text: native ? "先确认两个产品选择，再继续实现。" : "我会在你的回答后，沿着这张卡片继续给出审查结果。" });
+      const itemSeq = this.append(data, node.id, { type: "tool_call", callId, name: native ? "AskUserQuestion" : "mcp__baton__ask_human", status: "running", detail: { type: "unknown", input: { question: "请确认实现方案" }, output: null } });
+      const prompts = native ? [{ id: "scope", header: "范围", question: "搜索默认范围是什么？", options: [{ label: "当前项目", description: "只搜索本项目，响应更快。" }, { label: "所有项目", description: "跨项目搜索，需要展示归属。" }], allowFreeText: true }, { id: "checks", header: "验证", question: "需要覆盖哪些验证？", options: [{ label: "中文", description: "验证中文关键词。" }, { label: "权限", description: "确认跨项目边界。" }, { label: "性能", description: "检查索引查询耗时。" }], multiSelect: true, allowFreeText: true }] : [{ id: "q1", header: "审查重点", question: "是否有需要优先检查的风险？", options: [{ label: "输入校验" }, { label: "访问权限" }], allowFreeText: true }];
+      this.emit(data, { type: "question", question: { id: `${node.id}:q`, nodeId: node.id, runId: snapshot.run.id, question: prompts.map(prompt => prompt.question).join("\n"), prompts, source: native ? "native" : "ask_human", delivery: "inline", blocking: true, status: "pending", anchor: { itemSeq, callId, turnId }, askedAt: ts } });
+    }
   }
   private setupConversationDemo(): void {
     const scenario = createScenario(this.now() - 180_000, "run-conversation");

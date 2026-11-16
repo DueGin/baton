@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { idleScenario } from "../demo/idle.js";
-import { coordinateTime, fitSession, followSession, intervalDuration, panSession, sessionBounds, sessionCoordinate, sessionTimeline, splitAcrossGaps, timelineScale, unionIntervals, wallTimeAtWork, workClock, workTicks, workTimeAt, zoomSession } from "./timeline.js";
+import { coordinateTime, fitSession, followSession, intervalDuration, panSession, pauseBands, sessionBounds, sessionCoordinate, sessionTimeline, splitAcrossGaps, timelineScale, unionIntervals, wallTimeAtWork, workClock, workTicks, workTimeAt, zoomSession } from "./timeline.js";
 const base = Date.parse("2026-11-10T07:00:00Z"); const snapshot = idleScenario(base);
 describe("session work intervals", () => {
   it("unions overlap and ignores empty or invalid intervals", () => {
@@ -41,6 +41,15 @@ describe("piecewise session scale", () => {
     expect(splitAcrossGaps(model, base + 50_000, base + 8_500_000).map(([a, b]) => [a - base, b - base])).toEqual([[50000,120000], [7320000,7500000], [8400000,8500000]]);
     expect(splitAcrossGaps(model, base + 200_000, base + 300_000)).toEqual([]);
     const real = sessionTimeline(snapshot, false); expect(real.gaps).toEqual([]); expect(splitAcrossGaps(real, base, base + 8_500_000)).toEqual([[base, base + 8_500_000]]);
+  });
+  it("splits paused intervals across normal and compressed segments while leaving a visible broken-axis band", () => {
+    const paused = { ...snapshot, run: { ...snapshot.run, pauses: [{ at: new Date(base + 60000).toISOString(), resumedAt: new Date(base + 7380000).toISOString(), by: "human" as const }] } };
+    expect(pauseBands(paused, sessionTimeline(paused)).map(band => ({ start: band.start - base, end: band.end - base, collapsed: band.collapsed }))).toEqual([
+      { start: 60000, end: 120000, collapsed: false }, { start: 120000, end: 7320000, collapsed: true }, { start: 7320000, end: 7380000, collapsed: false },
+    ]);
+    expect(pauseBands(paused, sessionTimeline(paused, false))).toEqual([{ start: base + 60000, end: base + 7380000, collapsed: false }]);
+    const open = { ...snapshot, run: { ...snapshot.run, status: "paused" as const, pauses: [{ at: new Date(base + 7500000).toISOString(), by: "human" as const }] } };
+    expect(pauseBands(open, sessionTimeline(open)).at(-1)?.end).toBe(sessionBounds(open).end);
   });
   it("anchors zoom and pan to the pointer across broken axes", () => {
     for (const pixel of [0, 150, scale.x(base + 1_000_000), 500, 900]) {

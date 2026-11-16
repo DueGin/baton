@@ -30,4 +30,9 @@ describe("project derivations and preferences", () => {
     for (const path of ["../other", "src/../../outside", "/tmp", "~", "C:/tmp", "src\\other", "src\n"]) expect(subdirectoryPath(project.path, path).error).toBeDefined();
     expect(() => projectRunPayload(undefined, "", body)).toThrow("请选择"); expect(() => projectRunPayload({ ...project, archived: true }, "", body)).toThrow("未归档"); expect(() => projectRunPayload({ ...project, exists: false }, "", body)).toThrow("目录不存在");
   });
+  it("excludes paused sessions from project active counts even with stale active nodes", async () => {
+    const client = new DemoClient(() => now); const project = await client.project("project-atlas"); const run = (await client.runs())[0]!;
+    const paused = { ...run, projectId: project.id, status: "paused" as const, activeNodeCount: 2 };
+    expect(liveProjectSummaries([project], [paused])[0]!.activeRunCount).toBe(0);
+  });
 });

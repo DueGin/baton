@@ -33,7 +33,7 @@ export function runMetrics(snapshot: RunSnapshot) {
   const pendingByKind: Record<InboxItem["kind"], number> = { permission: 0, proposal: 0, question: 0, escalation: 0 };
   for (const item of pending) pendingByKind[item.kind]++;
   return {
-    activeNodes: snapshot.nodes.filter(node => !terminal(node.status) && node.status !== "idle").length,
+    activeNodes: snapshot.run.status === "paused" ? 0 : snapshot.nodes.filter(node => !terminal(node.status) && node.status !== "idle").length,
     totalNodes: snapshot.nodes.length,
     tokens: snapshot.run.usage.inputTokens + snapshot.run.usage.outputTokens,
     pendingTotal: pending.length, pendingByKind,

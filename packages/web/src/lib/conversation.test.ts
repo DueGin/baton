@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { ItemRecord, RunSnapshot } from "@baton/protocol";
 import { createScenario, replay } from "../demo/scenario.js";
-import { conversationPhase, conversationRows, deliveryLabel, messageActions, quietSeconds, reconcileOutgoing, type OutgoingMessage } from "./conversation.js";
+import { conversationPhase, conversationRows, deliveryLabel, messageActions, nodeIsLive, quietSeconds, reconcileOutgoing, type OutgoingMessage } from "./conversation.js";
+import { displayRunStatus, displayStatus } from "./derive.js";
 const base = Date.parse("2026-11-10T07:00:00Z");
 const ts = new Date(base).toISOString();
 const pending: OutgoingMessage = { clientId: "c1", nodeId: "n", text: "hello", state: "sending", ts };
@@ -66,5 +67,14 @@ describe("conversation live phase", () => {
     const edge = { ...original.delegations[0]!, fromNodeId: node.id, status: "running" as const };
     expect(phase([], { ...snapshot, delegations: [edge] })?.kind).toBe("children");
     expect(conversationPhase({ ...snapshot, turns: [] }, { ...node, status: "idle" }, [], base)).toBeNull();
+  });
+  it("links inline questions by card id and suppresses live indicators while paused", () => {
+    const question = { id: "question-id", runId: snapshot.run.id, nodeId: node.id, question: "请选择", blocking: false, delivery: "inline" as const, source: "native" as const, status: "pending" as const, askedAt: ts };
+    expect(phase([], { ...snapshot, questions: [question] })).toMatchObject({ kind: "question", label: "等你回答", related: ["question-id"] });
+    expect(displayStatus(node, { ...snapshot, questions: [question] })).toBe("waiting_answer");
+    const paused = { ...snapshot, run: { ...snapshot.run, status: "paused" as const } };
+    expect(phase([], paused)).toBeNull(); expect(nodeIsLive(paused, node)).toBe(false); expect(displayStatus(node, paused)).toBe("paused"); expect(displayRunStatus(paused)).toBe("paused");
+    const permission = { ...original.permissions[0]!, nodeId: node.id, status: "pending" as const, requestId: "call", request: { ...original.permissions[0]!.request, kind: "question" as const } };
+    expect(phase([], { ...snapshot, questions: [{ ...question, anchor: { callId: "call" } }], permissions: [permission] })?.kind).toBe("question");
   });
 });

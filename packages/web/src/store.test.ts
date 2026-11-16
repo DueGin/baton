@@ -12,6 +12,19 @@ const base = Date.parse("2026-11-10T07:00:00Z");
 afterEach(() => vi.useRealTimers());
 
 describe("RunStore and protocol integration", () => {
+  it("replays structured question replacements and pause/resume metadata without duplicating cards", async () => {
+    const client = new DemoClient(() => base); const store = new RunStore(client); await store.open("run-questions");
+    const before = store.getSnapshot().snapshot!; const question = before.questions[0]!;
+    const emit = (event: Omit<Extract<RunEventEnvelope, { type: "question" }>, "seq">) => { store.apply({ ...event, seq: store.getSnapshot().snapshot!.lastSeq + 1 }); };
+    emit({ type: "question", runId: before.run.id, ts: new Date(base + 1000).toISOString(), question: { ...question, status: "answered", answers: { scope: ["当前项目"], checks: ["中文", "权限"] }, answer: "当前项目，中文与权限", answeredAt: new Date(base + 1000).toISOString() } });
+    expect(store.getSnapshot().snapshot!.questions).toHaveLength(before.questions.length);
+    expect(store.getSnapshot().snapshot!.questions[0]).toMatchObject({ status: "answered", answers: { checks: ["中文", "权限"] } });
+    expect(store.getSnapshot().lastEventAt[question.nodeId]).toBe(base + 1000);
+    const snapshot = store.getSnapshot().snapshot!;
+    store.apply({ type: "run.updated", runId: snapshot.run.id, seq: snapshot.lastSeq + 1, ts: new Date(base + 2000).toISOString(), patch: { status: "paused", pauses: [{ at: new Date(base + 2000).toISOString(), by: "human" }] } });
+    expect(store.getSnapshot().snapshot!.run.status).toBe("paused"); expect(store.getSnapshot().snapshot!.run.pauses).toHaveLength(1);
+    store.close();
+  });
   it("applies an ordered live stream, replaces itemSeq and ignores old/cross-run envelopes", async () => {
     const client = new DemoClient(() => base + 86000);
     const store = new RunStore(client);

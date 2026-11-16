@@ -2,11 +2,12 @@ import { createContext, memo, useContext, useEffect, useMemo, useRef, useState }
 import dagre from "@dagrejs/dagre";
 import { Background, BaseEdge, Controls, EdgeLabelRenderer, Handle, MiniMap, Position, ReactFlow, ReactFlowProvider, getSmoothStepPath, useNodesState, useReactFlow, type Edge, type EdgeProps, type Node, type NodeProps } from "@xyflow/react";
 import type { NodeRecord, PermissionResponse, RunSnapshot } from "@baton/protocol";
+import { pendingQuestion, representedQuestion } from "../lib/questions.js";
 import { backgroundSummary } from "../lib/background.js";
 import { agentColors, cost, displayStatus, duration, terminal, tokens } from "../lib/derive.js";
 import type { HumanActions } from "./HumanActions.js";
 import { RosterStrip } from "./Teams.js";
-import { AgentMark, PermissionActions, Status, Toggle } from "./common.js";
+import { AgentMark, Icon, PermissionActions, Status, Toggle } from "./common.js";
 
 interface GraphContextValue extends HumanActions { snapshot: RunSnapshot; now: number; decide: (id: string, response: PermissionResponse) => void; busy: boolean; reassign: (id: string) => void; inspect: (id: string) => void }
 const GraphContext = createContext<GraphContextValue | null>(null);
@@ -16,8 +17,8 @@ const AgentCard = memo(function AgentCard({ data, selected }: NodeProps<AgentNod
   const { node } = data; const { snapshot, now } = context;
   const blocked = snapshot.delegations.find(edge => edge.toNodeId === node.id)?.blockedByProposal;
   const status = blocked ? "queued" : displayStatus(node, snapshot);
-  const permissions = snapshot.permissions.filter(permission => permission.nodeId === node.id && permission.status === "pending");
-  const questions = (snapshot.questions ?? []).filter(row => row.nodeId === node.id && row.status === "pending" && row.blocking);
+  const permissions = snapshot.permissions.filter(permission => permission.nodeId === node.id && permission.status === "pending" && !representedQuestion(permission, snapshot.questions));
+  const questions = (snapshot.questions ?? []).filter(row => row.nodeId === node.id && pendingQuestion(row));
   const stalls = (snapshot.escalations ?? []).filter(row => row.nodeId === node.id && row.status === "pending" && row.kind === "stall");
   const background = backgroundSummary(snapshot, node.id);
   const children = snapshot.delegations.filter(edge => edge.fromNodeId === node.id);
@@ -25,12 +26,12 @@ const AgentCard = memo(function AgentCard({ data, selected }: NodeProps<AgentNod
   return <div className={`node-card node-${node.status} ${selected ? "selected" : ""} ${permissions.length ? "needs-permission" : ""} ${questions.length ? "needs-answer" : ""} ${stalls.length ? "node-stalled" : ""}`}>
     <Handle type="target" position={Position.Top} />
     <div className="node-card-top"><AgentMark agent={node.agentId} small /><span className="node-agent">{node.agentId}</span><Status status={status} /></div>
-    <div className="node-role-row">{background.count > 0 && <span className={`node-background-badge${background.hasPorts ? " has-ports" : ""}`} title="此节点启动的后台进程">后台 {background.count}</span>}{node.role && <span className="role-badge">{node.role}</span>}{node.delegationId && !["canceled", "replaced"].includes(node.status) && !blocked && snapshot.run.policy.mode !== "solo" && <button className="text-button nodrag nopan" disabled={context.busy} onClick={event => { event.stopPropagation(); context.reassign(node.delegationId!); }}>改派 ↗</button>}</div><div className="node-title">{node.title}</div>
+    <div className="node-role-row">{snapshot.run.status === "paused" && !terminal(node.status) && <span className="node-paused"><Icon name="pause" size={11} />已暂停</span>}{background.count > 0 && <span className={`node-background-badge${background.hasPorts ? " has-ports" : ""}`} title="此节点启动的后台进程">后台 {background.count}</span>}{node.role && <span className="role-badge">{node.role}</span>}{node.delegationId && !["canceled", "replaced"].includes(node.status) && !blocked && snapshot.run.policy.mode !== "solo" && <button className="text-button nodrag nopan" disabled={context.busy} onClick={event => { event.stopPropagation(); context.reassign(node.delegationId!); }}>改派 ↗</button>}</div><div className="node-title">{node.title}</div>
     <div className="node-model">{node.model ?? "默认模型"}</div>
-    <div className={`node-activity ${terminal(node.status) ? "muted" : ""}`}><span className={`activity-indicator ${node.status === "running" ? "live" : ""}`} />{tool?.summary ?? node.activity ?? "等待活动"}</div>
+    <div className={`node-activity ${terminal(node.status) ? "muted" : ""}`}><span className={`activity-indicator ${snapshot.run.status !== "paused" && node.status === "running" ? "live" : ""}`} />{tool?.summary ?? node.activity ?? "等待活动"}</div>
     <div className="node-metrics"><span>{duration(node.createdAt, node.endedAt ?? now)}</span><span>{tokens(node.usage.inputTokens + node.usage.outputTokens)} tokens</span><span>{cost(node.usage.costUsd)}</span>{children.length > 0 && <span title="子委派">⑂ {children.length}</span>}</div>
     {permissions.length > 0 && <div className="node-permission"><span>⚑ {permissions[0]!.request.title ?? "需要授权"}</span><PermissionActions permission={permissions[0]!} decide={context.decide} busy={context.busy} /></div>}
-    {questions[0] && <div className="node-human nodrag nopan" onClick={event => event.stopPropagation()}><strong>等你回答</strong><p title={questions[0].question}>{questions[0].question}</p><div>{questions[0].options?.slice(0, 2).map((option, index) => <button className="button small" key={index} disabled={context.busy} onClick={() => context.answer(questions[0]!.id, option)}>{option}</button>)}<button className="text-button" onClick={() => context.inspect(node.id)}>回答 ↗</button></div></div>}
+    {questions[0] && <div className="node-human nodrag nopan" onClick={event => event.stopPropagation()}><strong>等你回答</strong><p title={questions[0].question}>{questions[0].question}</p><div><button className="text-button" onClick={() => context.inspect(node.id)}>回答 ↗</button></div></div>}
     {stalls[0] && <div className="node-human node-stall-actions nodrag nopan" onClick={event => event.stopPropagation()}><strong>停滞</strong><p title={stalls[0].detail}>{stalls[0].detail}</p><div><button className="button small" disabled={context.busy} onClick={() => context.resolve(stalls[0]!.id, { resolution: "dismiss" })}>忽略</button><button className="button small danger" disabled={context.busy} onClick={() => context.resolve(stalls[0]!.id, { resolution: "cancel" })}>取消委派</button></div></div>}
     <Handle type="source" position={Position.Bottom} />
   </div>;
@@ -54,12 +55,12 @@ export function graphPositions(snapshot: Pick<RunSnapshot, "nodes" | "delegation
 }
 
 /** Reserved node IDs in queued delegations are not ReactFlow endpoints yet. */
-export function graphEdges(snapshot: Pick<RunSnapshot, "nodes" | "delegations">): Edge[] {
+export function graphEdges(snapshot: Pick<RunSnapshot, "nodes" | "delegations"> & { run?: RunSnapshot["run"] }): Edge[] {
   const nodeIds = new Set(snapshot.nodes.map(node => node.id));
   const delegations: Edge[] = snapshot.delegations.filter(edge => nodeIds.has(edge.fromNodeId) && nodeIds.has(edge.toNodeId)).map(edge => ({
     id: edge.id, type: "delegation", source: edge.fromNodeId, target: edge.toNodeId,
     data: { status: edge.status }, label: `${edge.result ? edge.result.status === "success" ? "✓ " : edge.result.status === "partial" ? "◐ " : "✗ " : ""}${edge.brief.title}`,
-    animated: edge.status === "running", style: { stroke: edge.status === "failed" ? "var(--red)" : edge.status === "completed" ? "var(--green)" : "var(--edge)", strokeWidth: 1.5, ...(edge.status === "replaced" ? { strokeDasharray: "5 5", opacity: .55 } : {}) },
+    animated: edge.status === "running" && snapshot.run?.status !== "paused", style: { stroke: edge.status === "failed" ? "var(--red)" : edge.status === "completed" ? "var(--green)" : "var(--edge)", strokeWidth: 1.5, ...(edge.status === "replaced" ? { strokeDasharray: "5 5", opacity: .55 } : {}) },
   }));
   const replacements: Edge[] = snapshot.delegations.flatMap(edge => {
     const successor = snapshot.delegations.find(next => next.id === edge.replacedBy || next.replaces === edge.id);
@@ -99,7 +100,7 @@ function GraphView({ snapshot, selected, inspect, openTeam }: { snapshot: RunSna
     return () => clearTimeout(timer);
   }, [canvasWidth, fitView]);
   useEffect(() => () => cancelAnimationFrame(fitFrame.current), []);
-  const edges = useMemo(() => graphEdges(snapshot), [snapshot.nodes, snapshot.delegations]);
+  const edges = useMemo(() => graphEdges(snapshot), [snapshot.nodes, snapshot.delegations, snapshot.run.status]);
   return <div className="topology-view" ref={canvas}><RosterStrip snapshot={snapshot} open={openTeam} /><div className="view-toolbar"><span className="eyebrow">DELEGATION MAP</span><div className="toolbar-actions"><Toggle checked={follow} onChange={setFollow} label="跟随最新" /><Toggle checked={showMap} onChange={setShowMap} label="小地图" /><button className="button small" onClick={() => { void fitView(fitOptions); }}>适应画布</button></div></div>
     <ReactFlow<AgentNode> nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodeClick={(_, node) => inspect(node.id)} fitView fitViewOptions={fitOptions} minZoom={0.3} maxZoom={1.8} proOptions={{ hideAttribution: true }} defaultEdgeOptions={{ type: "delegation" }}>
       <Background gap={22} size={1} color="var(--grid)" />
