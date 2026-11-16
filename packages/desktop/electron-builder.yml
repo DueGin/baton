@@ -1,0 +1,48 @@
+appId: dev.baton.app
+productName: baton
+electronVersion: 45.3.2
+copyright: Copyright © 2026 baton contributors
+directories:
+  output: release
+  buildResources: assets
+files:
+  - dist/**
+  - package.json
+  - '!dist/**/*.map'
+  - '!dist/**/*.d.ts'
+  - '!dist/.tsbuildinfo'
+extraResources:
+  - from: staging/runtime
+    to: runtime
+  - from: assets
+    to: assets
+    filter: ['icon.png']
+asar: true
+npmRebuild: false
+electronLanguages: [en, zh-CN, zh-TW]
+artifactName: '${productName}-${version}-${os}-${arch}.${ext}'
+mac:
+  icon: assets/icon.icns
+  category: public.app-category.developer-tools
+  identity: null
+  hardenedRuntime: false
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+dmg:
+  sign: false
+win:
+  icon: assets/icon.ico
+  signExecutable: false
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: zip
+      arch: [x64]
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true

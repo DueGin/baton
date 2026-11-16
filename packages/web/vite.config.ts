@@ -6,8 +6,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": "http://127.0.0.1:7433",
-      "/mcp": "http://127.0.0.1:7433",
+      "/api": process.env.BATON_WEB_PROXY_URL ?? "http://127.0.0.1:7433",
+      "/mcp": process.env.BATON_WEB_PROXY_URL ?? "http://127.0.0.1:7433",
     },
   },
   build: {
