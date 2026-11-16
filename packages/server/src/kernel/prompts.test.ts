@@ -79,3 +79,11 @@ it("asks every agent to disclose long-running processes, ports and stopping inst
     expect(systemPrompt(node, { ...policy, mode })).toContain("tell the human in your reply what it is, its port(s), and how to stop it");
   }
 });
+
+it("asks every agent to print PR URLs and include URL artifacts", () => {
+  for (const node of [root, child]) for (const mode of ["dynamic", "preset", "solo"] as const) {
+    const text = systemPrompt(node, { ...policy, mode });
+    expect(text).toContain("make the command print its URL");
+    expect(text).toContain('{kind:"url", value:<PR URL>} in report_result.artifacts');
+  }
+});

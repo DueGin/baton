@@ -15,7 +15,7 @@ async function setup(options: Partial<StartServerOptions> = {}, config?: unknown
   const home = options.home ?? await mkdtemp(join(tmpdir(), "baton-titles-"));
   if (!homes.includes(home)) homes.push(home);
   if (config) await writeFile(join(home, "config.json"), JSON.stringify(config));
-  const server = await startServer({ home, port: 0, registry: new FakeDriverRegistry({ root: (c) => c.text("Done") }), notifier: () => {}, titleGenerator: async () => "Generated title", ...options });
+  const server = await startServer({ home, port: 0, registry: new FakeDriverRegistry({ root: (c) => c.text("Done") }), notifier: () => {}, titleGenerator: async () => "Generated title", pullRequests: { resolveExecutable: async () => undefined, autoPoll: false }, ...options });
   servers.push(server); return server;
 }
 async function request(server: BatonServer, path: string, method = "GET", body?: unknown): Promise<Response> {
@@ -34,14 +34,14 @@ async function create(server: BatonServer, prompt = "Build a pixel football game
 describe("run titles over HTTP", () => {
   it("persists settings without returning API keys and preserves unrelated config", async () => {
     const server = await setup({}, { notifications: { desktop: false }, custom: "preserved" });
-    expect(await api(server, "/api/settings")).toEqual({});
+    expect(await api(server, "/api/settings")).toEqual({ github: { ghFound: false, authenticated: false } });
     const settings = await api<SettingsResponse>(server, "/api/settings", "PUT", { titleModel: model });
-    expect(settings).toEqual({ titleModel: { enabled: true, baseUrl: model.baseUrl, model: model.model, hasApiKey: true } });
+    expect(settings).toEqual({ titleModel: { enabled: true, baseUrl: model.baseUrl, model: model.model, hasApiKey: true }, github: { ghFound: false, authenticated: false } });
     const read = await request(server, "/api/settings"); expect(await read.text()).not.toContain(model.apiKey);
     expect((await stat(join(server.home, "config.json"))).mode & 0o777).toBe(0o600);
     expect(JSON.parse(await readFile(join(server.home, "config.json"), "utf8"))).toMatchObject({ notifications: { desktop: false }, custom: "preserved", titleModel: model });
     expect((await request(server, "/api/settings", "PUT", { titleModel: { baseUrl: "file:///tmp/title" } })).status).toBe(400);
-    expect(await api(server, "/api/settings", "PUT", { titleModel: null })).toEqual({});
+    expect(await api(server, "/api/settings", "PUT", { titleModel: null })).toEqual({ github: { ghFound: false, authenticated: false } });
     expect((await request(server, "/api/settings", "PUT", { titleModel: { enabled: "yes" } })).status).toBe(400);
   });
 

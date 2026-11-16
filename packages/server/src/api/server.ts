@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile, chmod, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { CreateProjectRequest, PatchProjectRequest, CreatePermissionRuleRequest, ResolveEscalationRequest, ApproveTeamProposalRequest, AddMemberRequest, ReplaceMemberRequest, ReassignRequest, SaveTeamPresetRequest, TeamPresetInput, CreateRunRequest, PatchRunRequest, PermissionDecision, RunEventEnvelope, SendMessageResponse, UpdateSettingsRequest, TestTitleModelRequest } from "@baton/protocol";
+import type { PullRequestFeedbackRequest, CreateProjectRequest, PatchProjectRequest, CreatePermissionRuleRequest, ResolveEscalationRequest, ApproveTeamProposalRequest, AddMemberRequest, ReplaceMemberRequest, ReassignRequest, SaveTeamPresetRequest, TeamPresetInput, CreateRunRequest, PatchRunRequest, PermissionDecision, RunEventEnvelope, SendMessageResponse, UpdateSettingsRequest, TestTitleModelRequest } from "@baton/protocol";
 import type { DriverRegistry } from "../driver/types.js";
 import { FakeDriverRegistry } from "../driver/fake.js";
 import { Store } from "../store/index.js";
@@ -16,14 +16,16 @@ import { Settings } from "../settings/index.js";
 import { Titles, type TitleGenerator } from "../titles/index.js";
 import { BackgroundRegistry, type BackgroundOptions } from "../background/index.js";
 import { Projects, ProjectError } from "../projects/index.js";
+import { PullRequests, type PullRequestOptions } from "../pull-requests/index.js";
 export interface StartServerOptions {
   home?: string; port?: number; registry?: DriverRegistry; fake?: boolean; webDist?: string;
   maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; askTimeoutMinutes?: number; notifier?: Notifier; notificationCoalesceMs?: number;
   titleGenerator?: TitleGenerator;
   background?: BackgroundOptions;
+  pullRequests?: PullRequestOptions;
 }
 export interface BatonServer {
-  home: string; port: number; token: string; url: string; server: Server; store: Store; kernel: Kernel; background: BackgroundRegistry;
+  home: string; port: number; token: string; url: string; server: Server; store: Store; kernel: Kernel; background: BackgroundRegistry; pullRequests: PullRequests;
   close(): Promise<void>;
 }
 class HttpError extends Error { constructor(readonly status: number, message: string) { super(message); } }
@@ -65,8 +67,9 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
   let desktop = process.platform === "darwin";
   try { const config = await settings.config(), notifications = config.notifications; if (notifications && typeof notifications === "object" && "desktop" in notifications && typeof notifications.desktop === "boolean") desktop = notifications.desktop; }
   catch (error) { store.close(); throw error; }
-  const notifications = new Notifications(store, options.notifier ?? (desktop ? desktopNotifier : () => {}), options.notificationCoalesceMs);
-  let kernel: Kernel, background: BackgroundRegistry, port = 0;
+  const notify = options.notifier ?? (desktop ? desktopNotifier : () => {});
+  const notifications = new Notifications(store, notify, options.notificationCoalesceMs);
+  let kernel: Kernel, background: BackgroundRegistry, pullRequests: PullRequests, port = 0;
   const streams = new Set<ServerResponse>();
   const webDist = resolve(options.webDist ?? fileURLToPath(new URL("../../../web/dist", import.meta.url)));
   const server = createServer((request, response) => {
@@ -109,6 +112,16 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
         if (method === "PATCH") { kernel.projects.patch(id, record(await body(request)) as PatchProjectRequest); json(response, 200, await kernel.projects.summary(id)); return; }
       }
       if (method === "GET" && path === "/api/fs/dirs") { json(response, 200, await kernel.projects.dirs(url.searchParams.get("path") ?? undefined, url.searchParams.get("hidden") === "1")); return; }
+      if (method === "GET" && path === "/api/prs") { json(response, 200, pullRequests.list(url.searchParams.get("projectId") ?? undefined, url.searchParams.get("state") ?? "open")); return; }
+      const linkPr = /^\/api\/runs\/([^/]+)\/prs$/.exec(path);
+      if (method === "POST" && linkPr) { const input = record(await body(request)); json(response, 201, pullRequests.link(decodeURIComponent(linkPr[1]!), input.url as string, input.nodeId as string | undefined)); return; }
+      const pr = /^\/api\/prs\/([^/]+)(?:\/(refresh|feedback))?$/.exec(path);
+      if (pr) {
+        const id = decodeURIComponent(pr[1]!);
+        if (method === "DELETE" && !pr[2]) { json(response, 200, pullRequests.unlink(id)); return; }
+        if (method === "POST" && pr[2] === "refresh") { await body(request); json(response, 200, await pullRequests.refresh(id)); return; }
+        if (method === "POST" && pr[2] === "feedback") { json(response, 202, await pullRequests.feedback(id, record(await body(request)) as unknown as PullRequestFeedbackRequest)); return; }
+      }
       if (method === "GET" && path === "/api/background") { await background.scan(); json(response, 200, background.list(url.searchParams.get("status") ?? "running")); return; }
       const backgroundRoute = /^\/api\/background\/([^/]+)\/(stop|dismiss)$/.exec(path);
       if (method === "POST" && backgroundRoute) {
@@ -116,8 +129,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
         json(response, 200, backgroundRoute[2] === "stop" ? await background.stop(id, input.graceMs as number | undefined) : background.dismiss(id, input.dismissed as boolean)); return;
       }
       if (path === "/api/settings") {
-        if (method === "GET") { json(response, 200, await settings.get()); return; }
-        if (method === "PUT") { json(response, 200, await settings.update(record(await body(request)) as UpdateSettingsRequest)); return; }
+        if (method === "GET") { json(response, 200, { ...await settings.get(), github: await pullRequests.githubStatus() }); return; }
+        if (method === "PUT") { const saved = await settings.update(record(await body(request)) as UpdateSettingsRequest); json(response, 200, { ...saved, github: await pullRequests.githubStatus() }); return; }
       }
       if (method === "POST" && path === "/api/settings/title-model/test") {
         const input = record(await body(request)) as TestTitleModelRequest, latest = store.list()[0];
@@ -266,9 +279,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
   const url = `http://127.0.0.1:${port}`;
   kernel = new Kernel(store, registry, { ...options, baseUrl: url, titles }); kernel.recover();
   background = new BackgroundRegistry(store, () => kernel.processSources(), options.background);
+  pullRequests = new PullRequests(store, settings, { queue: (id, text) => kernel.queueFeedback(id, text), notify }, options.pullRequests);
   await writeFile(join(home, "daemon.json"), JSON.stringify({ url, port, pid: process.pid }), { mode: 0o600 });
   let closing: Promise<void> | undefined;
-  return { home, token, port, url, server, store, kernel, background, close() {
-    closing ??= (async () => { notifications.close(); await background.close(); await kernel.shutdown(); for (const stream of streams) stream.end(); const closed = new Promise<void>((resolveClosed, reject) => server.close((error) => error ? reject(error) : resolveClosed())); server.closeAllConnections(); await closed; store.close(); })(); return closing;
+  return { home, token, port, url, server, store, kernel, background, pullRequests, close() {
+    closing ??= (async () => { notifications.close(); await pullRequests.close(); await background.close(); await kernel.shutdown(); for (const stream of streams) stream.end(); const closed = new Promise<void>((resolveClosed, reject) => server.close((error) => error ? reject(error) : resolveClosed())); server.closeAllConnections(); await closed; store.close(); })(); return closing;
   } };
 }

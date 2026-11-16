@@ -1,8 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
-import { applyEvent, type ProjectRecord, type BackgroundProcess, type ItemRecord, type RunEvent, type RunEventEnvelope, type RunSnapshot, type RunSummary, type TeamPreset, type PermissionRule, type InboxItem, type QuestionRecord, type EscalationRecord, type TurnTrigger } from "@baton/protocol";
+import { applyEvent, type PullRequestRecord, type ProjectRecord, type BackgroundProcess, type ItemRecord, type RunEvent, type RunEventEnvelope, type RunSnapshot, type RunSummary, type TeamPreset, type PermissionRule, type InboxItem, type QuestionRecord, type EscalationRecord, type TurnTrigger } from "@baton/protocol";
 export interface HeldPrompt { text: string; trigger: TurnTrigger; humanSeq?: number }
 
-const tables = ["nodes", "delegations", "turns", "tool_spans", "permissions", "questions", "escalations", "background_processes"] as const;
+const tables = ["nodes", "delegations", "turns", "tool_spans", "permissions", "questions", "escalations", "background_processes", "pull_requests"] as const;
 export class Store {
   readonly db: DatabaseSync;
   private listeners = new Set<(event: RunEventEnvelope) => void>();
@@ -30,7 +30,8 @@ export class Store {
     const read = <T>(table: string): T[] => this.db.prepare(`SELECT data FROM ${table} WHERE run_id=? ORDER BY rowid`).all(id).map((r) => JSON.parse(String(r.data)) as T);
     const last = this.db.prepare("SELECT json_extract(data, '$.ts') AS ts FROM events WHERE run_id=? AND seq=?").get(id, Number(row.seq));
     const backgroundProcesses = visibleBackground(read<BackgroundProcess>("background_processes"));
-    return { run: JSON.parse(String(row.data)) as RunSnapshot["run"], lastSeq: Number(row.seq), ...(last?.ts ? { lastEventAt: String(last.ts) } : {}), ...(backgroundProcesses.length ? { backgroundProcesses } : {}), nodes: read("nodes"), delegations: read("delegations"), turns: read("turns"), toolSpans: read("tool_spans"), permissions: read("permissions"), questions: read("questions"), escalations: read("escalations") };
+    const pullRequests = read<PullRequestRecord>("pull_requests");
+    return { run: JSON.parse(String(row.data)) as RunSnapshot["run"], lastSeq: Number(row.seq), ...(last?.ts ? { lastEventAt: String(last.ts) } : {}), ...(backgroundProcesses.length ? { backgroundProcesses } : {}), ...(pullRequests.length ? { pullRequests } : {}), nodes: read("nodes"), delegations: read("delegations"), turns: read("turns"), toolSpans: read("tool_spans"), permissions: read("permissions"), questions: read("questions"), escalations: read("escalations") };
   }
   append(runId: string, payload: RunEvent): RunEventEnvelope {
     this.db.exec("BEGIN IMMEDIATE");
@@ -56,6 +57,7 @@ export class Store {
         case "escalation": upsert("escalations", event.escalation); break;
         case "permission": upsert("permissions", event.permission); break;
         case "background": upsert("background_processes", event.process); break;
+        case "pr": upsert("pull_requests", event.pr); break;
         case "item": {
           const localSeq = event.itemSeq;
           const item: ItemRecord = { nodeId: event.nodeId, seq: localSeq, turnId: event.turnId, ts: event.itemTs, item: event.item };
@@ -96,7 +98,7 @@ export class Store {
     const rows = projectId === undefined ? this.db.prepare("SELECT id FROM runs ORDER BY rowid DESC").all() : this.db.prepare("SELECT id FROM runs WHERE json_extract(data, '$.projectId')=? ORDER BY rowid DESC").all(projectId);
     return rows.map((r) => {
       const s = this.snapshot(String(r.id));
-      return { ...s.run, ...(s.lastEventAt ? { lastEventAt: s.lastEventAt } : {}), rootAgentId: s.nodes.find((n) => n.id === s.run.rootNodeId)?.agentId ?? "", agents: [...new Set(s.nodes.map((n) => n.agentId))], nodeCount: s.nodes.length, activeNodeCount: s.run.status === "paused" ? 0 : s.nodes.filter((n) => ["starting", "running", "waiting_permission"].includes(n.status)).length, pendingPermissions: s.permissions.filter((p) => p.status === "pending").length, pendingTotal: this.inboxFor(s).length, backgroundCount: backgroundCount(s.backgroundProcesses) };
+      return { ...s.run, ...(s.lastEventAt ? { lastEventAt: s.lastEventAt } : {}), rootAgentId: s.nodes.find((n) => n.id === s.run.rootNodeId)?.agentId ?? "", agents: [...new Set(s.nodes.map((n) => n.agentId))], nodeCount: s.nodes.length, activeNodeCount: s.run.status === "paused" ? 0 : s.nodes.filter((n) => ["starting", "running", "waiting_permission"].includes(n.status)).length, pendingPermissions: s.permissions.filter((p) => p.status === "pending").length, pendingTotal: this.inboxFor(s).length, backgroundCount: backgroundCount(s.backgroundProcesses), openPrCount: (s.pullRequests ?? []).filter((p) => !p.unlinkedAt && ["open", "draft"].includes(p.state)).length };
     });
   }
   private inboxFor(s: RunSnapshot): InboxItem[] {
@@ -134,6 +136,8 @@ export class Store {
   deletePreset(id: string): void { this.preset(id); this.db.prepare("DELETE FROM team_presets WHERE id=?").run(id); }
   background(): BackgroundProcess[] { return visibleBackground(this.db.prepare("SELECT data FROM background_processes ORDER BY rowid").all().map((r) => JSON.parse(String(r.data)) as BackgroundProcess)); }
   backgroundProcess(id: string): BackgroundProcess { const p = this.background().find((p) => p.id === id); if (!p) throw new Error("Background process not found"); return p; }
+  pullRequests(): PullRequestRecord[] { return this.db.prepare("SELECT data FROM pull_requests ORDER BY rowid").all().map((row) => JSON.parse(String(row.data)) as PullRequestRecord); }
+  pullRequest(id: string): PullRequestRecord { const row = this.db.prepare("SELECT data FROM pull_requests WHERE id=?").get(id); if (!row) throw new Error("Pull request not found"); return JSON.parse(String(row.data)) as PullRequestRecord; }
   projects(): ProjectRecord[] { return this.db.prepare("SELECT data FROM projects ORDER BY rowid").all().map((r) => JSON.parse(String(r.data)) as ProjectRecord); }
   project(id: string): ProjectRecord { const row = this.db.prepare("SELECT data FROM projects WHERE id=?").get(id); if (!row) throw new Error("Project not found"); return JSON.parse(String(row.data)) as ProjectRecord; }
   projectAt(path: string): ProjectRecord | undefined { const row = this.db.prepare("SELECT data FROM projects WHERE path=?").get(path); return row ? JSON.parse(String(row.data)) as ProjectRecord : undefined; }

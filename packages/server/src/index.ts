@@ -10,3 +10,4 @@ export { Settings, type StoredTitleModel } from "./settings/index.js";
 export { Titles, createTitleGenerator, sanitizeTitle, type TitleGenerator } from "./titles/index.js";
 export { BackgroundRegistry, type BackgroundOptions } from "./background/index.js";
 export { Projects } from "./projects/index.js";
+export { PullRequests, type PullRequestOptions, type ForgeRunner } from "./pull-requests/index.js";

@@ -21,7 +21,7 @@ export function isBatonToolPermission(request: PermissionRequest): boolean {
   const server = request.input?.serverName ?? request.input?.server_name ?? request.input?.server;
   return server === "baton";
 }
-export const DEFAULT_POLICY: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "dynamic", teamApproval: true, maxTeamSize: 5, stallMinutes: 10, maxRoundsPerDelegation: 3 };
+export const DEFAULT_POLICY: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "dynamic", teamApproval: true, maxTeamSize: 5, stallMinutes: 10, maxRoundsPerDelegation: 3, prFeedback: "notify" };
 const now = (): string => new Date().toISOString();
 const active = (status: string): boolean => ["starting", "running", "waiting_permission", "queued"].includes(status);
 const done = (d: DelegationRecord): boolean => ["completed", "failed", "canceled", "replaced"].includes(d.status);
@@ -218,6 +218,7 @@ export class Kernel {
     if (policy.teamApproval !== undefined && typeof policy.teamApproval !== "boolean") throw new Error("Invalid teamApproval policy");
     for (const key of ["maxTeamSize", "maxRoundsPerDelegation"] as const) if (policy[key] !== undefined && (!Number.isInteger(policy[key]) || policy[key]! < 1)) throw new Error(`Invalid ${key}`);
     if (policy.stallMinutes !== undefined && (!Number.isFinite(policy.stallMinutes) || policy.stallMinutes <= 0)) throw new Error("Invalid stallMinutes");
+    if (policy.prFeedback !== undefined && !["off", "notify", "auto"].includes(policy.prFeedback)) throw new Error("Invalid prFeedback policy");
     return { ...DEFAULT_POLICY, ...normalized, mode: normalized.mode ?? "dynamic", teamApproval: normalized.teamApproval ?? true };
   }
   patchRun(id: string, input: PatchRunRequest): RunSnapshot {
@@ -259,6 +260,13 @@ export class Kernel {
   }
   private async startTurn(id: string, text: string, trigger: TurnTrigger): Promise<void> {
     await this.startPrompts(id, [{ text, trigger }]);
+  }
+  /** External CI/review feedback waits for the running turn; never steer or interrupt it. */
+  async queueFeedback(id: string, text: string): Promise<void> {
+    const node = this.store.node(id), rt = this.runtime(id);
+    if (this.stopped || this.canceling.has(id) || ["canceled", "replaced"].includes(node.status)) throw new Error("Feedback node is canceled or replaced");
+    if (rt.turnId || rt.interrupting || this.paused(node.runId)) this.queuePrompts(id, [{ text, trigger: "followup" }]);
+    else await this.startTurn(id, text, "followup");
   }
   private async startPrompts(id: string, prompts: QueuedPrompt[], interrupt = false): Promise<MessageDelivery["delivery"]> {
     if (this.stopped) return "queued";
