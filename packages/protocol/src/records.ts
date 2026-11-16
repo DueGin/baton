@@ -539,7 +539,7 @@ export type InboxItem =
 
 /** A pull/merge request an agent of the run created or the human linked (DESIGN §4.11). */
 export interface PullRequestRecord {
-  /** `${forge}:${repo}#${number}` — unique per run. */
+  /** `${runId}:${forge}:${repo}#${number}` — globally unique (the same PR tracked by two runs has two records). */
   id: string;
   runId: string;
   projectId?: string;
@@ -584,6 +584,8 @@ export interface PullRequestRecord {
   createdAt: IsoTime;
   /** Feedback (CI failures / review comments) last sent to an agent, if any. */
   lastFeedbackAt?: IsoTime;
+  /** Set when the human unlinked it (tombstone; polling stops, counts and lists exclude it). */
+  unlinkedAt?: IsoTime;
 }
 
 // ───────────────────────────── background processes ─────────────────────────────

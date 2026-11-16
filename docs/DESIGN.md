@@ -317,7 +317,7 @@ agent 常会自己开 PR，比如 `gh pr create`。baton 要把这些 PR 记到�
 **发现方式**（按来源排序）：
 1. `created`：某次 shell 工具调用的命令包含 `gh pr create`、`gh pr new`、`glab mr create`、`hub pull-request`，并且输出里有 PR 或 MR 的 URL。记下节点和 `toolSpanId`。
 2. `artifact`：`report_result.artifacts` 中的 url 是 PR 链接。
-3. `mentioned`：agent 的回复或工具输出里提到了 PR URL，但不是它创建的。这类会登记，但界面上弱化显示。可以设置 `pr.trackMentioned=false` 关掉。
+3. `mentioned`：agent 的回复或工具输出里提到了 PR URL，但不是它创建的。这类会登记，但界面上弱化显示。可以设置 `github.trackMentioned=false` 关掉。
 4. `manual`：人在控制台手动关联（`POST /api/runs/:id/prs {url}`）。
 
 URL 识别规则：
@@ -411,7 +411,7 @@ URL 识别规则：
 | POST | `/api/runs/:runId/prs` | `LinkPullRequestRequest`，手动关联 |
 | POST | `/api/prs/:id/refresh` | 立即重新拉取状态 |
 | POST | `/api/prs/:id/feedback` | `PullRequestFeedbackRequest`，回推给 agent |
-| DELETE | `/api/prs/:id` | 取消关联 |
+| DELETE | `/api/prs/:id` | 取消关联：发 `pr` 事件，设置 `unlinkedAt` 作为删除标记，并停止拉取状态 |
 | GET | `/api/background?status=running｜all` | 跨 Run 的后台进程（默认只返回运行中、未隐藏的） |
 | POST | `/api/background/:id/stop` | `StopBackgroundRequest` |
 | POST | `/api/background/:id/dismiss` | `DismissBackgroundRequest` |

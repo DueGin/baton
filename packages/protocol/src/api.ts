@@ -313,4 +313,6 @@ export interface GithubSettings {
   ghPath?: string;
   /** Extra env for gh, e.g. { "HTTPS_PROXY": "http://127.0.0.1:7890" }. */
   env?: Record<string, string>;
+  /** Track PR URLs that agents merely mention (source "mentioned"). Default true. */
+  trackMentioned?: boolean;
 }
