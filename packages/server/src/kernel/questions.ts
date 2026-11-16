@@ -51,6 +51,7 @@ export function questionAnswers(prompts: QuestionPrompt[], input: AnswerQuestion
 }
 export function nativeUpdatedInput(request: PermissionRequest, prompts: QuestionPrompt[], answers: Record<string, string[]>): Record<string, unknown> {
   const original = request.input ?? {};
+  if (/^(acp_elicitation|cursor_ask_question)$/.test(request.name)) return { ...original, answers };
   if (/AskUserQuestion/i.test(request.name)) {
     const questions = (Array.isArray(original.questions) ? original.questions : []).map((value) => { const { allowOther: _ui, ...question } = record(value); return question; });
     return { ...original, questions, answers: Object.fromEntries(prompts.map((prompt) => [prompt.question, answers[prompt.id]!.join(", ")])) };

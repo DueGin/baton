@@ -3,12 +3,13 @@ import { mkdtemp, rm, writeFile, readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ACP_AGENT_SPECS } from "@baton/providers";
 import { createPaseoDriverRegistry, mapProviderEvent } from "./paseo-adapter.js";
 import type { DriverEvent, DriverRegistry, DriverSession } from "./types.js";
 let home: string;
 let registry: DriverRegistry;
 const fixture = fileURLToPath(new URL("../../../providers/src/test-utils/fake-agent.mjs", import.meta.url));
-const disabled = Object.fromEntries(["claude", "codex", "pi", "gemini", "qwen", "kimi", "opencode", "copilot", "cursor", "goose", "droid", "hermes", "openclaw", "kiro"].map(id => [id, { enabled: false }]));
+const disabled = Object.fromEntries(["claude", "codex", "pi", ...ACP_AGENT_SPECS.map(spec => spec.id)].map(id => [id, { enabled: false }]));
 beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), "baton-driver-test-"));
     const profiles = Object.fromEntries(["acp", "codex"].map(provider => [`fake-${provider}`, { extends: provider, command: [process.execPath, fixture, provider], env: { BATON_HOME: home } }]));

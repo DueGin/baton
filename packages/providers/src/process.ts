@@ -14,8 +14,12 @@ export function externalEnv(...overlays: Array<Record<string, string | undefined
 }
 export function spawnProcess(command: string, args: string[], options: SpawnOptions & {
     envOverlay?: Record<string, string>;
+    scrubEnv?: readonly string[];
 }): ChildProcessWithoutNullStreams {
-    const { envOverlay, ...rest } = options;
-    const env = externalEnv(rest.env, envOverlay), launch = processLaunch(command, args, env);
+    const { envOverlay, scrubEnv, ...rest } = options;
+    const env = externalEnv(rest.env, envOverlay);
+    const scrub = new Set(scrubEnv?.map(key => key.toLowerCase()));
+    for (const key of Object.keys(env)) if (scrub.has(key.toLowerCase())) delete env[key];
+    const launch = processLaunch(command, args, env);
     return spawn(launch.command, launch.args, { detached: process.platform !== "win32", ...rest, env, ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}), windowsHide: true, stdio: ["pipe", "pipe", "pipe"], shell: false }) as ChildProcessWithoutNullStreams;
 }

@@ -234,6 +234,8 @@ class PiSession extends ProviderSession {
         this.canceling = true;
         this.clearPermissions();
         try {
+            try { await this.process.requestStopWork({ type: "clear_queue" }, 2500); }
+            catch (error) { if (!/unknown (?:command|request).*clear_queue/i.test(errorText(error))) throw error; }
             await this.process.requestStopWork({ type: "abort" }, 2500);
             await this.waitForTurn();
         }

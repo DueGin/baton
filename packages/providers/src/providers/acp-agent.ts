@@ -1,4 +1,6 @@
 // Ported from Paseo (https://github.com/getpaseo/paseo) packages/server/src/server/agent/providers/acp-agent.ts @63ea3e5 — Copyright (c) 2025-present Mohamed Boudra, Apache-2.0. Modified for baton.
+// Session-free Cursor discovery and question/dialect bridging also derive from Orca
+// src/main/acp @a5781b8, Copyright (c) 2026 Lovecast Inc., MIT. Modified for baton.
 import { Readable, Writable } from "node:stream";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -11,10 +13,15 @@ import { terminateWithTreeKill } from "../tree-kill.js";
 import { acpToolDetail, type TerminalSnapshot } from "./acp-tool-detail.js";
 import { randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
+import { type AcpAgentSpec, modeFlags, scrubAcpEnv, staticAcpCatalog } from "../acp-spec.js";
+import { externalEnv } from "../process.js";
+import { acpDialect } from "./acp-dialect.js";
+import { formElicitation, cursorQuestion } from "./acp-elicitation.js";
+export interface AcpClientOptions extends ClientOptions { spec?: AcpAgentSpec }
 export class ACPAgentClient implements AgentClient {
     readonly provider = "acp" as const;
     readonly capabilities = { steer: false, resume: true, reasoning: true, mcp: true };
-    constructor(protected readonly options: ClientOptions) { }
+    constructor(protected readonly options: AcpClientOptions) { }
     async createSession(config: AgentSessionConfig): Promise<ACPSession> { return ACPSession.open(this.options, config); }
     async resumeSession(handle: AgentPersistenceHandle, config: AgentSessionConfig): Promise<ACPSession> { return ACPSession.open(this.options, config, handle); }
     async fetchCatalog(): Promise<ProviderCatalog> {
@@ -22,7 +29,9 @@ export class ACPAgentClient implements AgentClient {
         const cwd = await mkdtemp(join(this.options.home, "catalog-acp-"));
         let session: ACPSession | undefined;
         try {
-            session = await this.createSession({ cwd });
+            // Initialize and session-free extension RPCs only. Some agents retain
+            // every session forever, even when the process and cwd are removed.
+            session = await ACPSession.open(this.options, { cwd }, undefined, true);
             Object.assign(this.capabilities, session.detectedCapabilities);
             return session.catalog;
         }
@@ -35,6 +44,7 @@ export class ACPAgentClient implements AgentClient {
 export class GenericACPAgentClient extends ACPAgentClient {
 }
 class ACPSession extends ProviderSession implements Client {
+    supportsLongToolCalls(): boolean { return this.options.spec?.longToolCalls === true && !!this.options.spec.toolTimeout; }
     processIds(): number[] { return this.child.pid && this.child.exitCode === null && this.child.signalCode === null ? [this.child.pid] : []; }
     private child: ChildProcessWithoutNullStreams;
     private connection: ClientSideConnection;
@@ -53,19 +63,21 @@ class ACPSession extends ProviderSession implements Client {
     private totalCost = 0;
     private startingCost = 0;
     catalog: ProviderCatalog = { models: [], modes: [] };
-    private constructor(private options: ClientOptions, config: AgentSessionConfig) {
+    private constructor(private options: AcpClientOptions, config: AgentSessionConfig) {
         super("acp", config);
-        this.child = spawnProcess(options.command[0]!, options.command.slice(1), { cwd: config.cwd, envOverlay: { ...options.env, ...config.env } });
+        const knob = options.spec?.toolTimeout;
+        const env = scrubAcpEnv(externalEnv(options.spec?.env, options.env, config.env, knob ? { [knob.env]: String(knob.milliseconds) } : undefined), options.spec?.scrubEnv ?? []);
+        this.child = spawnProcess(options.command[0]!, options.command.slice(1), { cwd: config.cwd, env, scrubEnv: options.spec?.scrubEnv });
         this.child.stderr.on("data", (chunk: Buffer) => { this.stderr = (this.stderr + chunk.toString()).slice(-8192); });
         this.child.on("error", error => this.processExited(error.message));
         this.child.on("close", (code, signal) => this.processExited(`ACP exited (${code ?? signal}) ${this.stderr}`));
         this.connection = new ClientSideConnection(() => this, ndJsonStream(Writable.toWeb(this.child.stdin), Readable.toWeb(this.child.stdout)));
         void this.connection.closed.then(() => this.processExited(`ACP disconnected ${this.stderr}`));
     }
-    static async open(options: ClientOptions, config: AgentSessionConfig, handle?: AgentPersistenceHandle): Promise<ACPSession> {
+    static async open(options: AcpClientOptions, config: AgentSessionConfig, handle?: AgentPersistenceHandle, probe = false): Promise<ACPSession> {
         const session = new ACPSession(options, config);
         try {
-            await session.initialize(handle);
+            await session.initialize(handle, probe);
             return session;
         }
         catch (error) {
@@ -82,17 +94,29 @@ class ACPSession extends ProviderSession implements Client {
             clearTimeout(timer);
         }
     }
-    private async initialize(handle?: AgentPersistenceHandle): Promise<void> {
-        const initialized = await this.bounded(this.connection.initialize({ protocolVersion: PROTOCOL_VERSION, clientInfo: { name: "baton", version: "0.1.0" }, clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true } }));
+    private async initialize(handle?: AgentPersistenceHandle, probe = false): Promise<void> {
+        const elicitation = this.options.spec?.elicitation ?? { form: true, url: true };
+        const clientCapabilities = { fs: { readTextFile: true, writeTextFile: true }, terminal: true, elicitation: { ...(elicitation.form ? { form: {} } : {}), ...(elicitation.url ? { url: {} } : {}) } };
+        // Older ACP SDK typings predate elicitation. Keep the extension additive.
+        const initialized = await this.bounded(this.connection.initialize({ protocolVersion: PROTOCOL_VERSION, clientInfo: { name: "baton", version: "0.1.0" }, clientCapabilities }));
         this.canResume = initialized.agentCapabilities?.loadSession ?? false;
         this.detectedCapabilities.resume = this.canResume;
-        this.detectedCapabilities.mcp = initialized.agentCapabilities?.mcpCapabilities?.http ?? false;
+        this.detectedCapabilities.mcp = this.options.spec?.mcp.supported !== false && this.options.spec?.mcp.http !== false && (initialized.agentCapabilities?.mcpCapabilities?.http ?? false);
+        this.readCatalog({ ...record(record(initialized)._meta), ...record(initialized) });
+        const rpc = this.options.spec?.modelCatalogRpc ?? (this.options.spec?.modelDiscovery === "cursor" ? "cursor/list_available_models" : undefined);
+        if (rpc) {
+            const response = await this.bounded(this.connection.extMethod(rpc, {}));
+            if (Array.isArray(response.models)) this.catalog.models = response.models.map(record).map(model => ({ id: text(model.value ?? model.modelId ?? model.id), label: text(model.name ?? model.label), thinkingOptions: flattenOptions((Array.isArray(model.configOptions) ? model.configOptions.map(record) : []).find(o => o.category === "thought_level")?.options).map(o => ({ id: text(o.value), label: text(o.name) })) }));
+        }
+        if (probe) return;
         if (handle && !this.canResume)
             throw new Error("ACP agent does not support loading sessions");
         const mcpServers: McpServer[] = Object.entries(this.config.mcpServers ?? {}).map(([name, config]) => config.type === "stdio"
             ? { name, command: config.command, args: config.args ?? [], env: Object.entries(config.env ?? {}).map(([name, value]) => ({ name, value })) }
             : { name, type: config.type, url: config.url, headers: Object.entries(config.headers ?? {}).map(([name, value]) => ({ name, value })) });
         for (const server of mcpServers) {
+            const transport = "type" in server ? server.type : "stdio";
+            if (this.options.spec && (!this.options.spec.mcp.supported || !this.options.spec.mcp[transport])) throw new Error(`ACP agent ${this.options.spec.id} does not support ${transport} MCP injection`);
             if ("type" in server && server.type === "http" && !initialized.agentCapabilities?.mcpCapabilities?.http)
                 throw new Error("ACP agent does not support HTTP MCP injection");
             if ("type" in server && server.type === "sse" && !initialized.agentCapabilities?.mcpCapabilities?.sse)
@@ -110,7 +134,13 @@ class ACPSession extends ProviderSession implements Client {
         const modeSelector = configOptions.find(option => option.category === "mode");
         const modelSelector = configOptions.find(option => option.category === "model");
         if (this.config.modeId) {
-            if (modeSelector && typeof modeSelector.id === "string")
+            if (this.options.spec?.dialect === "copilot" && this.config.modeId === "allow-all") {
+                await this.bounded(this.connection.setSessionMode({ sessionId: this.sessionId, modeId: "https://agentclientprotocol.com/protocol/session-modes#agent" }));
+                await this.bounded(this.connection.setSessionConfigOption({ sessionId: this.sessionId, configId: "allow_all", value: "on" }));
+            } else if (this.options.spec?.dialect === "copilot") {
+                await this.bounded(this.connection.setSessionConfigOption({ sessionId: this.sessionId, configId: "allow_all", value: "off" }));
+                await this.bounded(this.connection.setSessionMode({ sessionId: this.sessionId, modeId: this.config.modeId }));
+            } else if (modeSelector && typeof modeSelector.id === "string")
                 await this.bounded(this.connection.setSessionConfigOption({ sessionId: this.sessionId, configId: modeSelector.id, value: this.config.modeId }));
             else
                 await this.bounded(this.connection.setSessionMode({ sessionId: this.sessionId, modeId: this.config.modeId }));
@@ -139,8 +169,8 @@ class ACPSession extends ProviderSession implements Client {
         const modes = record(response.modes);
         const models = record(response.models);
         this.catalog = {
-            modes: Array.isArray(modes.availableModes) ? modes.availableModes.map(record).map(mode => ({ id: text(mode.id), label: text(mode.name), description: text(mode.description), isUnattended: /bypass|yolo|full.access|auto.?approve/i.test(text(mode.id)), isReadOnly: /plan|read.only/i.test(text(mode.id)) })) : [],
-            models: Array.isArray(models.availableModels) ? models.availableModels.map(record).map(model => ({ id: text(model.modelId), label: text(model.name), description: text(model.description), isDefault: model.modelId === models.currentModelId })) : [],
+            modes: Array.isArray(modes.availableModes) ? modes.availableModes.map(record).map(mode => ({ id: text(mode.id), label: text(mode.name), description: text(mode.description), ...modeFlags(text(mode.id), this.options.spec?.modeMap) })) : staticAcpCatalog(this.options.spec).modes,
+            models: Array.isArray(models.availableModels) ? models.availableModels.map(record).map(model => ({ id: text(model.modelId), label: text(model.name), description: text(model.description), isDefault: model.modelId === models.currentModelId })) : this.catalog.models,
             defaultModeId: text(modes.currentModeId) || null,
         };
         const configs = response.configOptions;
@@ -149,14 +179,20 @@ class ACPSession extends ProviderSession implements Client {
                 const options = flattenOptions(option.options);
                 if (option.category === "model" && !this.catalog.models.length)
                     this.catalog.models = options.map(o => ({ id: text(o.value), label: text(o.name), isDefault: o.value === option.currentValue }));
-                if (option.category === "mode" && !this.catalog.modes.length) {
-                    this.catalog.modes = options.map(o => ({ id: text(o.value), label: text(o.name), isUnattended: /bypass|yolo|full.access|auto.?approve/i.test(text(o.value)), isReadOnly: /plan|read.only/i.test(text(o.value)) }));
+                if (option.category === "mode" && !Array.isArray(modes.availableModes)) {
+                    this.catalog.modes = options.map(o => ({ id: text(o.value), label: text(o.name), ...modeFlags(text(o.value), this.options.spec?.modeMap) }));
                     this.catalog.defaultModeId = text(option.currentValue) || null;
                 }
                 if (option.category === "thought_level")
                     for (const model of this.catalog.models)
                         model.thinkingOptions = options.map(o => ({ id: text(o.value), label: text(o.name), isDefault: o.value === option.currentValue }));
             }
+        if (this.options.spec?.dialect === "copilot") {
+            this.catalog.modes = this.catalog.modes.filter(mode => !mode.id.endsWith("#autopilot") && mode.id !== "allow-all");
+            this.catalog.modes.push({ id: "allow-all", label: "Allow All", isUnattended: true });
+            if (this.catalog.defaultModeId?.endsWith("#autopilot")) this.catalog.defaultModeId = "https://agentclientprotocol.com/protocol/session-modes#agent";
+            if (Array.isArray(configs) && configs.map(record).some(o => o.id === "allow_all" && o.currentValue === "on")) this.catalog.defaultModeId = "allow-all";
+        }
     }
     protected async launchTurn(prompt: string): Promise<void> {
         this.canceling = false;
@@ -187,9 +223,11 @@ class ACPSession extends ProviderSession implements Client {
             case "tool_call":
             case "tool_call_update": {
                 const id = text(update.toolCallId);
-                const merged = { ...this.tools.get(id), ...Object.fromEntries(Object.entries(update).filter(([key, value]) => value !== undefined && (!(key === "title" || key === "kind" || key === "status" || key === "content" || key === "locations") || value !== null))) };
+                const dialect = acpDialect(this.options.spec);
+                const next = { ...this.tools.get(id), ...Object.fromEntries(Object.entries(update).filter(([key, value]) => value !== undefined && (!(key === "title" || key === "kind" || key === "status" || key === "content" || key === "locations") || value !== null))) };
+                const merged = dialect.normalizeTool?.(next) ?? next;
                 this.tools.set(id, merged);
-                const name = text(merged.title) || text(merged.kind) || "tool";
+                const name = dialect.toolName?.(merged) ?? (text(merged.title) || text(merged.kind) || "tool");
                 const status = merged.status === "completed" ? "completed" : merged.status === "failed" ? "failed" : "running";
                 const output = Array.isArray(merged.content) ? merged.content.map(record).map(c => text(record(c.content).text)).filter(Boolean).join("\n") : "";
                 const detail = acpToolDetail(merged, this.terminals);
@@ -235,10 +273,61 @@ class ACPSession extends ProviderSession implements Client {
             }
         }
     }
+    async extMethod(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+        if (method === "elicitation/create" || method === "_elicitation/create") {
+            if (params.mode === "url") {
+                if (this.options.spec?.elicitation.url === false) return { action: "cancel" };
+                const url = new URL(text(params.url));
+                if (!["http:", "https:"].includes(url.protocol)) throw new Error("Unsupported elicitation URL protocol");
+                this.timeline({ type: "notification", level: "info", message: `${text(params.message)}\n${url.href}` });
+                // Merely showing a link is not consent or a completed sign-in.
+                return { action: "cancel" };
+            }
+            if (this.options.spec?.elicitation.form === false) return { action: "cancel" };
+            const form = formElicitation({ ...params, mode: "form" });
+            return this.askExtensionQuestion(form);
+        }
+        if (this.options.spec?.dialect === "cursor" && method === "cursor/ask_question") {
+            const question = cursorQuestion(params);
+            return this.askExtensionQuestion(question);
+        }
+        if (this.options.spec?.dialect === "cursor" && ["cursor/update_todos", "cursor/task", "cursor/generate_image"].includes(method)) return {};
+        throw new Error(`Unsupported ACP extension method: ${method}`);
+    }
+    private async askExtensionQuestion(question: import("./acp-elicitation.js").AcpQuestion): Promise<Record<string, unknown>> {
+        const id = randomUUID(), name = question.request.name;
+        const input = { ...question.request.input, callId: id };
+        this.timeline({ type: "tool_call", callId: id, name, status: "running", error: null, detail: { type: "unknown", input, output: null } });
+        try {
+            const response = await this.ask({ ...question.request, id, input });
+            const result = question.reply(response);
+            this.timeline({ type: "tool_call", callId: id, name, status: response.behavior === "allow" ? "completed" : "canceled", error: null, detail: { type: "unknown", input, output: result } });
+            return result;
+        } catch (error) {
+            this.timeline({ type: "tool_call", callId: id, name, status: "failed", error: errorText(error), detail: { type: "unknown", input, output: errorText(error) } });
+            throw error;
+        }
+    }
+    async extNotification(method: string, params: Record<string, unknown>): Promise<void> {
+        const message = acpDialect(this.options.spec).extensionNotification?.(method, params);
+        if (message) this.timeline({ type: "notification", level: "info", message });
+    }
     async requestPermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
         const call = params.toolCall;
         const id = randomUUID();
-        const response = await this.ask({ id, name: call.title ?? "tool", kind: "tool", input: record(call.rawInput), detail: acpToolDetail(record(call), this.terminals), actions: params.options.map(option => ({ id: option.optionId, label: option.name, behavior: option.kind.startsWith("allow") ? "allow" : "deny" })) });
+        // Cursor's legacy fallback offers question choices as allow_once entries.
+        // Keep them on the human-question path so autoApprove cannot pick an answer.
+        if (this.options.spec?.dialect === "cursor" && params.options.some(o => o.optionId === "__ask_question_skip__")) {
+            const options = params.options.filter(o => o.optionId !== "__ask_question_skip__");
+            const response = await this.ask({ id, name: "cursor_ask_question", kind: "question", input: { callId: call.toolCallId, questions: [{ id: "q1", question: call.title ?? "Choose an answer", options: options.map(o => ({ label: o.name })) }] } });
+            const values = record(response.behavior === "allow" ? response.updatedInput?.answers : undefined);
+            const labels = Array.isArray(values.q1) ? values.q1 : [];
+            const selected = options.find(o => o.name === labels[0]);
+            return { outcome: selected ? { outcome: "selected", optionId: selected.optionId } : { outcome: "cancelled" } };
+        }
+        const dialect = acpDialect(this.options.spec), tool = dialect.normalizeTool?.(record(call)) ?? record(call);
+        const description = this.options.spec?.dialect === "kimi" && Array.isArray(call.content) ? call.content.map(record).map(c => text(record(c.content).text).match(/^Requesting approval to ([\s\S]+)$/)?.[1]).find(Boolean)?.slice(0, 512) : undefined;
+        const response = await this.ask({ id, name: dialect.toolName?.(tool) ?? call.title ?? "tool", kind: "tool", description, input: { ...record(call.rawInput), callId: call.toolCallId }, detail: acpToolDetail(tool, this.terminals), actions: params.options.map(option => ({ id: option.optionId, label: option.name, behavior: option.kind.startsWith("allow") ? "allow" : "deny" })) });
         const selected = params.options.find(o => o.optionId === response.selectedActionId && (o.kind.startsWith("allow") ? "allow" : "deny") === response.behavior)
             ?? params.options.find(o => response.behavior === "allow" ? o.kind === "allow_once" : o.kind === "reject_once")
             ?? params.options.find(o => response.behavior === "allow" ? o.kind.startsWith("allow") : o.kind.startsWith("reject"));
@@ -279,7 +368,7 @@ class ACPSession extends ProviderSession implements Client {
         const command = params.args?.length ? params.command : process.platform === "win32" ? "cmd.exe" : "/bin/sh";
         const args = params.args?.length ? params.args : process.platform === "win32" ? ["/d", "/s", "/c", params.command] : ["-c", params.command];
         const cwd = params.cwd ?? this.config.cwd;
-        const child = spawnProcess(command, args, { cwd, envOverlay: { ...this.options.env, ...this.config.env, ...Object.fromEntries((params.env ?? []).map(entry => [entry.name, entry.value])) } });
+        const child = spawnProcess(command, args, { cwd, envOverlay: { ...this.options.env, ...this.config.env, ...Object.fromEntries((params.env ?? []).map(entry => [entry.name, entry.value])) }, scrubEnv: this.options.spec?.scrubEnv });
         let settle!: (exit: TerminalExitStatus) => void;
         const done = new Promise<TerminalExitStatus>(resolve => { settle = resolve; });
         const entry = { child, command: [params.command, ...(params.args ?? [])].join(" "), cwd, output: "", truncated: false, done, exit: undefined as TerminalExitStatus | undefined };

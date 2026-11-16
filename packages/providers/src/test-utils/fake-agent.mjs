@@ -1,6 +1,7 @@
 // Ported from Paseo (https://github.com/getpaseo/paseo) packages/server/src/server/agent/providers/codex-app-server-agent.test.ts @63ea3e5 — Copyright (c) 2025-present Mohamed Boudra, Apache-2.0. Modified for baton.
 import { createInterface } from 'node:readline';
 import { appendFileSync } from 'node:fs';
+if (process.argv.includes('--version')) { console.log(process.env.FAKE_VERSION ?? '2.5.0'); process.exit(0); }
 const kind = process.argv[2];
 let turn = 0, pendingPrompt, requestId = 1000;
 const permissions = new Map();
@@ -63,7 +64,9 @@ createInterface({ input: process.stdin }).on('line', line => {
    default: return reply(message);
   }
  }
- if (message.method === 'initialize') return reply(message, kind === 'acp' ? { protocolVersion: 1, agentInfo: { name: 'fake', version: '1' }, agentCapabilities: { loadSession: true, mcpCapabilities: { http: true, sse: true } } } : {});
+ if (message.method === 'initialize') return reply(message, kind === 'acp' ? { protocolVersion: 1, _meta: { models: { currentModelId: 'fake-model', availableModels: [{ modelId: 'fake-model', name: 'Fake model' }] } }, agentInfo: { name: 'fake', version: '1' }, agentCapabilities: { loadSession: true, mcpCapabilities: { http: true, sse: true } } } : {});
+ if (message.method === 'cursor/list_available_models') return reply(message, { models: [{ value: 'cursor-model', name: 'Cursor Model' }] });
+ if (message.method === 'fake/env') return reply(message, { models: [{ value: process.env.COPILOT_ALLOW_ALL ?? 'scrubbed', name: 'env' }] });
  if (message.method === 'initialized') return;
  if (message.method === 'model/list') return reply(message, { data: [model], nextCursor: null });
  if (message.method === 'thread/start' || message.method === 'thread/resume') return reply(message, { thread: { id: sessionId }, model: model.id });
@@ -89,6 +92,13 @@ createInterface({ input: process.stdin }).on('line', line => {
   pendingPrompt = message; turn++;
   const prompt = message.params.prompt[0].text;
   if (prompt.includes('hold')) { notify('item/started', { threadId: sessionId, turnId: `turn-${turn}`, item: { id: 'live-shell', type: 'commandExecution', command: 'wait', cwd: process.cwd(), status: 'inProgress', commandActions: [], processId: 'process-42' } }); return; }
+  if (prompt.includes('elicitation')) {
+   const id = ++requestId;
+   const url = prompt.includes('url-elicitation');
+   permissions.set(id, () => complete());
+   send({ jsonrpc: '2.0', id, method: 'elicitation/create', params: url ? { mode: 'url', message: 'Sign in', url: 'https://example.test/signin', elicitationId: 'e1' } : { mode: 'form', message: 'Choose a flavor', requestedSchema: { type: 'object', properties: { flavor: { type: 'string', enum: ['Vanilla', 'Chocolate'] } }, required: ['flavor'] } } });
+   return;
+  }
   if (prompt.includes('permission')) return askPermission();
   if (prompt.includes('exit')) return process.exit(3);
   return complete();

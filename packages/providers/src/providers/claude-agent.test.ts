@@ -31,7 +31,7 @@ function setup() {
     const messages = new Messages();
     let captured: Parameters<ClaudeQueryFactory>[0] | undefined;
     const generator = messages[Symbol.asyncIterator]();
-    const query = Object.assign(generator, { supportedModels: vi.fn(async () => [{ value: "fake", displayName: "Fake", description: "", supportedEffortLevels: ["high"] }]), interrupt: vi.fn(async () => { messages.push(result(0, true)); }), close: vi.fn(() => messages.end()) }) as unknown as Query;
+    const query = Object.assign(generator, { supportedModels: vi.fn(async () => [{ value: "fake", displayName: "Fake", description: "", supportedEffortLevels: ["high"] }]), cancelAsyncMessage: vi.fn(async (_uuid: string) => true), interrupt: vi.fn(async () => { messages.push(result(0, true)); }), close: vi.fn(() => messages.end()) }) as unknown as Query;
     const factory: ClaudeQueryFactory = input => { captured = input; return query; };
     const client = new ClaudeAgentClient({ home, command: ["fake-claude"], queryFactory: factory });
     return { client, messages, query, options: () => captured!.options!, input: () => captured!.prompt };
@@ -102,6 +102,42 @@ describe("Claude SDK client", () => {
         expect(fake.query.interrupt).toHaveBeenCalledOnce();
         expect(events.filter(event => event.type === "turn_canceled")).toHaveLength(1);
     });
+    it("withdraws both local and SDK-consumed steers before interrupt", async () => {
+        const fake = setup();
+        session = await fake.client.createSession({ cwd: home });
+        await session.startTurn("first");
+        await session.steerActiveTurn?.("sdk-queued");
+        const input = fake.input();
+        if (typeof input === "string") throw new Error("stream required");
+        const iterator = input[Symbol.asyncIterator]();
+        const first = (await iterator.next()).value;
+        fake.messages.push({ type: "command_lifecycle", state: "started", command_uuid: first.uuid });
+        const queued = (await iterator.next()).value;
+        await new Promise(resolve => setTimeout(resolve, 0));
+        await session.steerActiveTurn?.("local-queued");
+        const query = fake.query as Query & { cancelAsyncMessage: ReturnType<typeof vi.fn> };
+        await session.interrupt();
+        expect(query.cancelAsyncMessage).toHaveBeenCalledExactlyOnceWith(queued.uuid);
+        expect(query.cancelAsyncMessage.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(fake.query.interrupt).mock.invocationCallOrder[0]!);
+        await session.startTurn("next human turn");
+        expect((await iterator.next()).value).toMatchObject({ message: { content: "next human turn" } });
+    });
+    it("does not withdraw a steer that Claude has already started", async () => {
+        const fake = setup();
+        session = await fake.client.createSession({ cwd: home });
+        await session.startTurn("first");
+        await session.steerActiveTurn?.("started");
+        const input = fake.input();
+        if (typeof input === "string") throw new Error("stream required");
+        const iterator = input[Symbol.asyncIterator]();
+        const first = (await iterator.next()).value;
+        fake.messages.push({ type: "command_lifecycle", state: "started", command_uuid: first.uuid });
+        const steer = (await iterator.next()).value;
+        fake.messages.push({ type: "command_lifecycle", state: "started", command_uuid: steer.uuid });
+        await new Promise(resolve => setTimeout(resolve, 0));
+        await session.interrupt();
+        expect((fake.query as Query & { cancelAsyncMessage: ReturnType<typeof vi.fn> }).cancelAsyncMessage).not.toHaveBeenCalled();
+    });
     it("resumes the SDK session and reads its model catalog", async () => {
         const fake = setup();
         session = await fake.client.resumeSession({ provider: "claude", sessionId: "resume-id" }, { cwd: home });
@@ -122,4 +158,18 @@ describe("Claude SDK client", () => {
         await wait(events, "turn_failed");
         expect(events.find(event => event.type === "turn_failed")).toMatchObject({ error: "provider refused" });
     });
+});
+
+it("closes before interruption when an older SDK cannot recall consumed input", async () => {
+    const fake = setup();
+    Object.assign(fake.query, { cancelAsyncMessage: undefined });
+    session = await fake.client.createSession({ cwd: home });
+    await session.startTurn("queued but not announced");
+    const input = fake.input();
+    if (typeof input === "string") throw new Error("stream required");
+    await input[Symbol.asyncIterator]().next();
+    await session.interrupt();
+    expect(fake.query.close).toHaveBeenCalledOnce();
+    expect(fake.query.interrupt).not.toHaveBeenCalled();
+    await expect(session.startTurn("must not revive")).rejects.toThrow("closed");
 });
