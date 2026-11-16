@@ -108,6 +108,15 @@ export interface ServerInfo {
   home: string;
   port: number;
   defaults: RunPolicy;
+  /** Server platform ("darwin" | "win32" | "linux"). */
+  platform?: string;
+  /** Capability flags; absent = unknown. */
+  features?: {
+    /** Background process registry is supported on this platform (false on win32). */
+    backgroundProcesses?: boolean;
+    /** GET /api/notifications/events exists. */
+    notificationStream?: boolean;
+  };
 }
 
 // ───────────────────────────── team ─────────────────────────────
@@ -280,6 +289,7 @@ export type CreateProjectResponse = ProjectRecord;
 
 /** GET /api/fs/dirs?path=<abs or ~> — directory browser for adding projects (directories only). */
 export interface ListDirsResponse {
+  /** "" on win32 means "the list of drives" (dirs are the drive roots); its entries have no parent. */
   path: string;
   parent?: string;
   home: string;
