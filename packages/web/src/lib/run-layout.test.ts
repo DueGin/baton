@@ -45,6 +45,7 @@ describe("compact layout data", () => {
     expect(metrics.tokens).toBe(snapshot.run.usage.inputTokens + snapshot.run.usage.outputTokens);
     const withReplaced = runMetrics({ ...run, nodes: run.nodes.map(node => ({ ...node, status: "replaced" })) });
     expect(withReplaced.activeNodes).toBe(0);
+    expect(runMetrics({ ...snapshot, run: { ...snapshot.run, status: "paused" } }).activeNodes).toBe(0);
   });
   it("grows the composer from two to eight lines and scrolls overflow", () => {
     expect(composerHeight(0, 20)).toBe(40);

@@ -1,17 +1,14 @@
 import { useState } from "react";
-import type { EscalationRecord, PermissionDecision, PermissionRecord, QuestionRecord, ResolveEscalationRequest } from "@baton/protocol";
+import type { AnswerQuestionRequest, EscalationRecord, PermissionDecision, PermissionRecord, ResolveEscalationRequest } from "@baton/protocol";
 import { escalationLabels, permissionPattern } from "../lib/inbox.js";
 import { clock } from "../lib/derive.js";
 import { Markdown, ToolDetail } from "./Transcript.js";
 
 export interface HumanActions {
-  answer: (id: string, answer: string) => void;
+  answer: (id: string, request: AnswerQuestionRequest) => void;
   resolve: (id: string, request: ResolveEscalationRequest) => void;
 }
-export function QuestionCard({ question, answer, busy }: { question: QuestionRecord; answer: HumanActions["answer"]; busy: boolean }) {
-  const [text, setText] = useState("");
-  return <article className={`human-card question-card question-${question.status}`}><div className="human-card-heading"><strong>{question.status === "pending" ? question.blocking ? "等你回答" : "Agent 提问" : question.status === "answered" ? "已回答" : "提问已取消"}</strong><span className="tag">{question.blocking ? "阻塞任务" : "不阻塞"}</span><time>{clock(question.askedAt)}</time></div><Markdown text={question.question} />{question.status === "pending" ? <><div className="question-options">{question.options?.map((option, index) => <button key={index} className="button small" disabled={busy} onClick={() => answer(question.id, option)}>{option}</button>)}</div><form className="question-answer-form" onSubmit={event => { event.preventDefault(); if (text.trim()) answer(question.id, text.trim()); }}><textarea aria-label="自由回答" rows={2} value={text} onChange={event => setText(event.target.value)} placeholder="也可以自由回答…" /><button className="button small primary" disabled={busy || !text.trim()}>发送回答</button></form></> : question.answer && <div className="question-saved-answer"><strong>你的回答</strong><Markdown text={question.answer} /></div>}</article>;
-}
+export { QuestionCard } from "./QuestionCard.js";
 export function EscalationCard({ escalation, resolve, busy, jump }: { escalation: EscalationRecord; resolve: HumanActions["resolve"]; busy: boolean; jump?: () => void }) {
   const [note, setNote] = useState(""); const [extra, setExtra] = useState(2);
   return <article className={`human-card escalation-card escalation-${escalation.status}`}><div className="human-card-heading"><strong>{escalationLabels[escalation.kind]}</strong><span className="tag">{escalation.status === "pending" ? "需要介入" : "已处理"}</span><time>{clock(escalation.createdAt)}</time></div><Markdown text={escalation.detail} />{escalation.pendingMessage && <details open className="pending-message"><summary>暂存的追问</summary><Markdown text={escalation.pendingMessage} /></details>}{escalation.status === "pending" ? <><label className="form-field">留言（可选）<input aria-label="升级处理留言" value={note} onChange={event => setNote(event.target.value)} /></label><div className="human-card-actions">{escalation.kind === "round_limit" && <><label className="extra-rounds">延长 <input aria-label="增加轮次" type="number" min={1} max={100} value={extra} onChange={event => setExtra(Number(event.target.value))} /> 轮</label><button className="button small primary" disabled={busy || !Number.isInteger(extra) || extra < 1} onClick={() => resolve(escalation.id, { resolution: "extend", extraRounds: extra, note: note.trim() || undefined })}>延长 +{extra}</button></>}<button className="button small" disabled={busy} onClick={() => resolve(escalation.id, { resolution: "dismiss", note: note.trim() || undefined })}>忽略</button><button className="button small danger" disabled={busy} onClick={() => resolve(escalation.id, { resolution: "cancel", note: note.trim() || undefined })}>{escalation.delegationId ? "取消该委派" : "取消节点"}</button>{jump && <button className="text-button" onClick={jump}>跳到节点 ↗</button>}</div></> : <p className="muted">{escalation.resolution === "extend" ? "已延长" : escalation.resolution === "cancel" ? "已取消" : "已忽略"}{escalation.note ? ` · ${escalation.note}` : ""}</p>}</article>;

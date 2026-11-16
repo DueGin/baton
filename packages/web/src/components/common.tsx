@@ -8,7 +8,7 @@ export function AgentMark({ agent, small = false }: { agent: string; small?: boo
 export function Status({ status, dot = true }: { status: string; dot?: boolean }) {
   return <span className={`status status-${status}`}>{dot && <i className="status-dot" />}{statusLabels[status] ?? status}</span>;
 }
-export function Icon({ name, size = 18 }: { name: "trash" | "clock" | "steer" | "lightning" | "undo" | "grip" | "up" | "down" | "warning" | "folder" | "server" | "edit" | "panel" | "inbox" | "graph" | "timeline" | "chat" | "agents" | "settings" | "plus" | "close" | "sun" | "moon" | "arrow" | "stop" | "chevron" | "refresh" | "check"; size?: number }) {
+export function Icon({ name, size = 18 }: { name: "pause" | "play" | "trash" | "clock" | "steer" | "lightning" | "undo" | "grip" | "up" | "down" | "warning" | "folder" | "server" | "edit" | "panel" | "inbox" | "graph" | "timeline" | "chat" | "agents" | "settings" | "plus" | "close" | "sun" | "moon" | "arrow" | "stop" | "chevron" | "refresh" | "check"; size?: number }) {
   const paths: Record<typeof name, ReactNode> = {
     folder: <path d="M3 6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v10H3V6Z" />,
     server: <><rect x="3" y="3" width="18" height="7" rx="2" /><rect x="3" y="14" width="18" height="7" rx="2" /><path d="M7 6.5h.01M7 17.5h.01M16 6.5h2M16 17.5h2" /></>,
@@ -38,6 +38,8 @@ export function Icon({ name, size = 18 }: { name: "trash" | "clock" | "steer" | 
     down: <path d="m6 10 6 6 6-6" />,
     warning: <><path d="m12 3 10 18H2L12 3Z" /><path d="M12 9v5m0 3h.01" /></>,
     trash: <><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7" /></>,
+    pause: <><path d="M7 4h3v16H7zM14 4h3v16h-3z" /></>,
+    play: <path d="m7 3 14 9-14 9V3Z" />,
   };
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }

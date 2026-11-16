@@ -36,6 +36,7 @@ export function sessionBounds(snapshot: RunSnapshot, lastEventAt?: number): Time
   const values = [Date.parse(snapshot.run.createdAt)];
   const take = (...times: Array<string | undefined>) => { for (const time of times) if (time && Number.isFinite(Date.parse(time))) values.push(Date.parse(time)); };
   take(snapshot.lastEventAt, snapshot.run.updatedAt, snapshot.run.endedAt);
+  snapshot.run.pauses?.forEach(pause => take(pause.at, pause.resumedAt));
   snapshot.nodes.forEach(node => take(node.createdAt, node.updatedAt, node.endedAt));
   snapshot.turns.forEach(turn => take(turn.startedAt, turn.endedAt));
   snapshot.toolSpans.forEach(span => take(span.startedAt, span.endedAt));
@@ -135,6 +136,13 @@ export function splitAcrossGaps(model: SessionTimeline, start: number, end: numb
   const result: Interval[] = []; let cursor = Math.max(model.bounds.start, start); const last = Math.min(model.bounds.end, end);
   for (const [gapStart, gapEnd] of model.gaps) { if (gapEnd <= cursor) continue; if (gapStart >= last) break; if (gapStart > cursor) result.push([cursor, Math.min(gapStart, last)]); cursor = Math.max(cursor, gapEnd); }
   if (last > cursor) result.push([cursor, last]); return result;
+}
+/** Pause bands include collapsed-axis segments: a paused gap still has a visible hatched marker. */
+export function pauseBands(snapshot: RunSnapshot, model: SessionTimeline): Array<{ start: number; end: number; collapsed: boolean }> {
+  return (snapshot.run.pauses ?? []).flatMap(pause => {
+    const start = Date.parse(pause.at); const end = Date.parse(pause.resumedAt ?? new Date(model.bounds.end).toISOString());
+    return model.segments.flatMap(segment => { const a = Math.max(start, segment.start); const b = Math.min(end, segment.end); return b > a ? [{ start: a, end: b, collapsed: segment.collapsed }] : []; });
+  });
 }
 export function workTimeAt(model: SessionTimeline, time: number): number { return model.work.reduce((sum, [start, end]) => sum + Math.max(0, Math.min(time, end) - start), 0); }
 export function wallTimeAtWork(model: SessionTimeline, workTime: number): number {

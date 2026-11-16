@@ -68,5 +68,6 @@ describe("timeline scale and layout", () => {
     const edges = graphEdges(snapshot);
     expect(edges.some(edge => edge.id.startsWith("replacement-") && edge.style?.strokeDasharray)).toBe(true);
     expect(edges.every(edge => snapshot.nodes.some(node => node.id === edge.source) && snapshot.nodes.some(node => node.id === edge.target))).toBe(true);
+    expect(graphEdges({ ...running, run: { ...running.run, status: "paused" } }).every(edge => !edge.animated)).toBe(true);
   });
 });

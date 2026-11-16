@@ -1,6 +1,6 @@
 import type { InboxItem, ProjectSummary, RunSnapshot } from "@baton/protocol";
 import type { ConnectionState } from "../store.js";
-import { cost, displayRunStatus, duration, terminal, tokens } from "../lib/derive.js";
+import { clock, cost, displayRunStatus, duration, terminal, tokens } from "../lib/derive.js";
 import { runMetrics } from "../lib/run-layout.js";
 import { collaborationLabels } from "../lib/teams.js";
 import { inboxLabels } from "../lib/inbox.js";
@@ -27,6 +27,7 @@ export function RunDetails({ snapshot, now, connection, busy, close, autoApprove
       <section className="run-detail-section"><h3>协作与策略</h3><dl className="detail-policy"><dt>协作方式</dt><dd>{collaborationLabels[policy.mode ?? "dynamic"]}</dd><dt>名单确认</dt><dd>{policy.teamApproval === false ? "关闭" : "需要我确认"}</dd><dt>委派深度</dt><dd>最多 {policy.maxDepth} 层</dd><dt>并行子委派</dt><dd>每节点最多 {policy.maxActiveChildren}</dd><dt>团队人数</dt><dd>最多 {policy.maxTeamSize ?? 5} 人</dd><dt>停滞提醒</dt><dd>{policy.stallMinutes ?? 10} 分钟</dd><dt>委派轮次</dt><dd>最多 {policy.maxRoundsPerDelegation ?? 3} 轮</dd>{policy.budget?.maxCostUsd !== undefined && <><dt>费用预算</dt><dd>${policy.budget.maxCostUsd}</dd></>}{policy.budget?.maxTokens !== undefined && <><dt>Token 预算</dt><dd>{tokens(policy.budget.maxTokens)}</dd></>}{policy.budget?.maxWallMinutes !== undefined && <><dt>时间预算</dt><dd>{policy.budget.maxWallMinutes} 分钟</dd></>}</dl><div className="detail-auto-approve"><Toggle label="autoApprove" checked={policy.autoApprove} disabled={busy} onChange={autoApprove} /></div></section>
       <section className="run-detail-section"><h3>团队 <button className="text-button" onClick={openTeam}>查看团队 ↗</button></h3>{metrics.activeMembers.length ? <div className="detail-team-list">{metrics.activeMembers.map(member => <div key={member.id}><AgentMark agent={member.agentId} small /><strong>{member.role}</strong><span>{member.agentId}</span></div>)}</div> : <p className="muted">{policy.mode === "solo" ? "由 Lead 单独完成" : "尚未组建团队"}</p>}{run.team?.presetName && <p className="muted">预设 · {run.team.presetName}</p>}</section>
       <section className="run-detail-section"><h3>后台进程 <span className="pending-mini-badge">{backgroundSummary(snapshot).count}</span></h3><BackgroundList projectName={project?.name} key={snapshot.run.id} snapshot={snapshot} now={now} client={client} compact /></section>
+      {(run.pauses?.length ?? 0) > 0 && <section className="run-detail-section"><h3>暂停记录</h3><ol className="pause-history">{run.pauses!.map((pause, index) => <li key={`${pause.at}-${index}`}><Icon name="pause" size={12} /><div><time>{clock(pause.at)}</time><span> → {pause.resumedAt ? clock(pause.resumedAt) : "尚未继续"}</span><small>人工暂停 · {duration(pause.at, pause.resumedAt ?? now)}</small></div></li>)}</ol></section>}
       <section className="run-detail-section detail-run-actions"><code>{run.id}</code><button className="button danger" disabled={busy || terminal(run.status)} onClick={cancel}><Icon name="stop" size={13} />取消 Run</button></section>
     </div>
   </aside>;

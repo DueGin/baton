@@ -2,7 +2,7 @@ import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState, useSyncE
 import type { ItemRecord, NodeRecord, RunSnapshot, ToolCallDetail } from "@baton/protocol";
 import { activeTurn, conversationPhase, conversationRows, messageActionKey, queuedRows, nodeIsLive, phaseTimerLabel, type ConversationPhase, type OutgoingMessage, type MessageActionState, type MessageAction } from "../lib/conversation.js";
 import { composerHeight } from "../lib/run-layout.js";
-import { clock, duration, tokens, treeOrder } from "../lib/derive.js";
+import { clock, displayStatus, duration, tokens, treeOrder } from "../lib/derive.js";
 import { AgentMark, Empty, Icon, Status } from "./common.js";
 import type { RunStore } from "../store.js";
 import { parseBatonMessage, type BatonMessagePart } from "../lib/baton-messages.js";
@@ -10,6 +10,9 @@ import { parseBatonMessage, type BatonMessagePart } from "../lib/baton-messages.
 import { Markdown } from "./Markdown.js";
 import { reasoningBlockId, reasoningOpen, reasoningPreferences } from "../lib/reasoning.js";
 import { BackgroundPopover } from "./BackgroundProcesses.js";
+import { QuestionCard } from "./QuestionCard.js";
+import { inlineQuestionEntries, questionCardId } from "../lib/questions.js";
+import type { HumanActions } from "./HumanActions.js";
 import { QueueDock } from "./QueueDock.js";
 import { DeliveryIcon, EditedMarker, MessageActionIcons } from "./MessageActions.js";
 import { ReasoningControls } from "./ReasoningControls.js";
@@ -87,7 +90,7 @@ export function TranscriptRow({ row, node, snapshot, inspect, streaming = false,
   </article>;
 }
 
-export function ConversationStatus({ phase, snapshot, now, inspect }: { phase: ConversationPhase; snapshot: RunSnapshot; now: number; inspect: (id: string) => void }) {
+export function ConversationStatus({ phase, snapshot, now, inspect, jumpQuestion }: { jumpQuestion?: (id: string) => void; phase: ConversationPhase; snapshot: RunSnapshot; now: number; inspect: (id: string) => void }) {
   const [expanded, setExpanded] = useState(false); const previewId = useId();
   const linkedNode = (id: string) => snapshot.nodes.find(node => node.id === id);
   return <div className={`conversation-live phase-${phase.kind}`}>
@@ -96,15 +99,15 @@ export function ConversationStatus({ phase, snapshot, now, inspect }: { phase: C
       <span className="live-turn-time">{phaseTimerLabel(phase)} {duration(phase.since, now)}</span>
       {phase.quiet > 30 && <span className="quiet-label">已 {phase.quiet}s 无新输出</span>}
       {phase.tokens > 0 && <span className="live-token-count">{tokens(phase.tokens)} tokens</span>}
-      <div className="live-inline-links">{phase.related.map(id => <button className="text-button" key={id} title={linkedNode(id)?.title} onClick={() => inspect(id)}>{phase.kind === "permission" ? "处理授权 ↗" : phase.kind === "question" ? "回答问题 ↗" : `${linkedNode(id)?.title ?? "子任务"} ↗`}</button>)}</div>
+      <div className="live-inline-links">{phase.related.map(id => <button className="text-button" key={id} title={linkedNode(id)?.title} onClick={() => { if (phase.kind === "question") jumpQuestion?.(id); else inspect(id); }}>{phase.kind === "permission" ? "处理授权 ↗" : phase.kind === "question" ? "回答问题 ↗" : `${linkedNode(id)?.title ?? "子任务"} ↗`}</button>)}</div>
       {phase.reasoning && <button type="button" className={`icon-button live-expand${expanded ? " expanded" : ""}`} aria-label={expanded ? "收起实时思考" : "展开实时思考"} aria-expanded={expanded} aria-controls={previewId} onClick={() => setExpanded(value => !value)}><Icon name="chevron" size={13} /></button>}
     </div>
     {phase.reasoning && expanded && <div id={previewId} className="live-reasoning-expanded"><Markdown text={phase.reasoning} streaming /></div>}
   </div>;
 }
 
-export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNodeId, now, inspect, projectName }: {
-  projectName?: string; snapshot: RunSnapshot; store: RunStore; items: Record<string, ItemRecord[]>; itemStatus: Record<string, string>;
+export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNodeId, now, inspect, projectName, answer, busy }: {
+  answer: HumanActions["answer"]; busy: boolean; projectName?: string; snapshot: RunSnapshot; store: RunStore; items: Record<string, ItemRecord[]>; itemStatus: Record<string, string>;
   nodeId: string; setNodeId: (id: string) => void; now: number; inspect: (id: string) => void;
 }) {
   const [draft, setDraft] = useState(""); const [follow, setFollow] = useState(true); const bottom = useRef<HTMLDivElement>(null);
@@ -114,15 +117,17 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
   useEffect(() => { if (node) { void store.loadItems(node.id); setDraft(""); setFollow(true); } }, [node?.id, store]);
   const rows = items[node?.id ?? nodeId] ?? [];
   const messages = conversationRows(rows, state.outgoing, node?.id ?? nodeId);
+  const entries = inlineQuestionEntries(messages, snapshot.questions, node?.id ?? nodeId);
+  const jumpQuestion = (id: string) => { const card = document.getElementById(questionCardId(id)); card?.scrollIntoView({ block: "center", behavior: "smooth" }); card?.focus({ preventScroll: true }); };
   const queueState = state.queues[node?.id ?? nodeId];
   const queue = queuedRows(rows, state.outgoing, node?.id ?? nodeId, queueState?.order);
   const pending = state.outgoing.findLast(message => message.nodeId === node?.id && (message.state === "sending" || (message.state === "accepted" && message.delivery === "turn" && !rows.some(row => row.seq === message.itemSeq))));
   const phase = node ? conversationPhase(snapshot, node, rows, now, state.lastEventAt[node.id], pending?.ts) : null;
-  const live = node ? nodeIsLive(snapshot, node) : false;
+  const live = snapshot.run.status !== "paused" && node ? nodeIsLive(snapshot, node) : false;
   const turn = node ? activeTurn(snapshot, node.id) : undefined;
   const latestText = rows.filter(row => row.item.type === "reasoning" || row.item.type === "assistant_message").at(-1);
   const inTurn = (row: ItemRecord) => turn ? row.turnId === turn.id || (!row.turnId && Date.parse(row.ts) >= Date.parse(turn.startedAt)) : live && row.seq === latestText?.seq;
-  useEffect(() => { if (follow) bottom.current?.scrollIntoView({ block: "end" }); }, [rows, state.outgoing, follow]);
+  useEffect(() => { if (follow) bottom.current?.scrollIntoView({ block: "end" }); }, [rows, state.outgoing, snapshot.questions, follow]);
   useEffect(() => {
     const content = bottom.current?.parentElement;
     if (!content || !follow) return;
@@ -147,11 +152,11 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
   }, [draft, node?.id]);
   const submit = (): void => { const text = draft.trim(); if (!text || !node) return; setDraft(""); setFollow(true); void store.sendMessage(node.id, text); };
   if (!node) return <Empty>等待根节点创建…</Empty>;
-  return <div className="transcript-view"><div className="view-toolbar conversation-toolbar"><div className="transcript-selector"><AgentMark agent={node.agentId} small /><select aria-label="选择会话节点" value={node.id} onChange={event => setNodeId(event.target.value)}>{treeOrder(snapshot.nodes).map(entry => <option key={entry.id} value={entry.id}>{"　".repeat(entry.depth)}{nodeIsLive(snapshot, entry) ? "◉ " : ""}{entry.title} · {entry.agentId}{nodeIsLive(snapshot, entry) ? " · 运行中" : ""}</option>)}</select><Status status={node.status} /></div><div className="conversation-toolbar-actions"><ReasoningControls rows={rows} /><span className="muted">{messages.length} items</span><button className="text-button" onClick={() => inspect(node.id)} title="查看当前节点详情">节点详情 ↗</button></div></div>
-    <div className="transcript-scroll" ref={scroll} onScroll={() => { const el = scroll.current; if (el) setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 100); }}><div className="transcript-content">{itemStatus[node.id] === "loading" && <div className="loading-line">正在加载会话…</div>}{itemStatus[node.id] === "error" && <button className="button" onClick={() => { void store.loadItems(node.id, true); }}>重试加载会话</button>}{messages.map(({ row, outgoing }) => <TranscriptRow key={outgoing?.clientId ?? row.seq} row={row} node={node} snapshot={snapshot} inspect={inspect} outgoing={outgoing} actionState={state.messageActions[messageActionKey(node.id, row.seq)]} act={action => { void store.actOnMessage(node.id, row.seq, action); }} retry={outgoing ? () => { void store.sendMessage(node.id, outgoing.text, outgoing.clientId); } : undefined} streaming={live && inTurn(row) && (row.item.type === "reasoning" || (row.seq === latestText?.seq && phase?.kind === "reply"))} />)}{!messages.length && itemStatus[node.id] === "ready" && <Empty>这个节点还没有消息。</Empty>}<div ref={bottom} /></div></div>
-    {phase && <ConversationStatus key={node.id} phase={phase} snapshot={snapshot} now={now} inspect={inspect} />}
+  return <div className="transcript-view"><div className="view-toolbar conversation-toolbar"><div className="transcript-selector"><AgentMark agent={node.agentId} small /><select aria-label="选择会话节点" value={node.id} onChange={event => setNodeId(event.target.value)}>{treeOrder(snapshot.nodes).map(entry => <option key={entry.id} value={entry.id}>{"　".repeat(entry.depth)}{snapshot.run.status === "paused" && !["canceled", "completed", "failed", "replaced"].includes(entry.status) ? "⏸ " : nodeIsLive(snapshot, entry) ? "◉ " : ""}{entry.title} · {entry.agentId}{nodeIsLive(snapshot, entry) ? " · 运行中" : ""}</option>)}</select><Status status={displayStatus(node, snapshot)} /></div><div className="conversation-toolbar-actions"><ReasoningControls rows={rows} /><span className="muted">{messages.length} items</span><button className="text-button" onClick={() => inspect(node.id)} title="查看当前节点详情">节点详情 ↗</button></div></div>
+    <div className="transcript-scroll" ref={scroll} onScroll={() => { const el = scroll.current; if (el) setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 100); }}><div className="transcript-content">{itemStatus[node.id] === "loading" && <div className="loading-line">正在加载会话…</div>}{itemStatus[node.id] === "error" && <button className="button" onClick={() => { void store.loadItems(node.id, true); }}>重试加载会话</button>}{entries.map(entry => { if (entry.type === "question") return <QuestionCard inline key={entry.question.id} question={entry.question} answer={answer} busy={busy} />; const { row, outgoing } = entry.entry; return <TranscriptRow key={outgoing?.clientId ?? row.seq} row={row} node={node} snapshot={snapshot} inspect={inspect} outgoing={outgoing} actionState={state.messageActions[messageActionKey(node.id, row.seq)]} act={action => { void store.actOnMessage(node.id, row.seq, action); }} retry={outgoing ? () => { void store.sendMessage(node.id, outgoing.text, outgoing.clientId); } : undefined} streaming={live && inTurn(row) && (row.item.type === "reasoning" || (row.seq === latestText?.seq && phase?.kind === "reply"))} />; })}{!entries.length && itemStatus[node.id] === "ready" && <Empty>这个节点还没有消息。</Empty>}<div ref={bottom} /></div></div>
+    {phase && snapshot.run.status !== "paused" && <ConversationStatus key={node.id} phase={phase} snapshot={snapshot} now={now} inspect={inspect} jumpQuestion={jumpQuestion} />}
     <div className="composer-tools"><BackgroundPopover projectName={projectName} key={snapshot.run.id} snapshot={snapshot} now={now} client={store.client} /></div>
     <QueueDock key={node.id} entries={queue} actions={state.messageActions} pending={queueState?.pending} error={queueState?.error} reorder={order => { void store.reorderQueue(node.id, order); }} act={(seq, action) => store.actOnMessage(node.id, seq, action)} edit={(seq, text) => store.editMessage(node.id, seq, text)} />
-    <form className="composer" onSubmit={event => { event.preventDefault(); submit(); }}><textarea ref={input} aria-label="消息" placeholder={`向 ${node.agentId} 发送消息…${live ? "（运行中也可发送）" : ""}`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); submit(); } }} disabled={["canceled", "replaced"].includes(node.status)} rows={2} /><div className="composer-footer"><span title="送达方式会显示在消息旁">{live ? "运行中 · 发送后排队，可在消息上改为引导或立即发送" : "发送到当前节点"} · ⌘ / Ctrl + Enter</span><button className="button primary" disabled={!draft.trim() || ["canceled", "replaced"].includes(node.status)}><Icon name="arrow" size={15} />发送</button></div></form>
+    <form className="composer" onSubmit={event => { event.preventDefault(); submit(); }}><textarea ref={input} aria-label="消息" placeholder={`向 ${node.agentId} 发送消息…${live ? "（运行中也可发送）" : ""}`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); submit(); } }} disabled={["canceled", "replaced"].includes(node.status)} rows={2} /><div className="composer-footer"><span title="送达方式会显示在消息旁">{snapshot.run.status === "paused" ? "会话已暂停，消息会在继续后送达" : live ? "运行中 · 发送后排队，可在消息上改为引导或立即发送" : "发送到当前节点"} · ⌘ / Ctrl + Enter</span><button className="button primary" disabled={!draft.trim() || ["canceled", "replaced"].includes(node.status)}><Icon name="arrow" size={15} />发送</button></div></form>
   </div>;
 }

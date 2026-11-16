@@ -3,7 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { DemoClient } from "../demo/client.js";
 import { RunBar } from "./RunBar.js";
 import { RunDetails } from "./RunDetails.js";
-import { ConversationStatus } from "./Transcript.js";
+import { ConversationStatus, Transcript } from "./Transcript.js";
+import { RunStore } from "../store.js";
 
 const now = Date.parse("2026-11-10T07:00:00Z");
 describe("compact Run chrome", () => {
@@ -41,5 +42,17 @@ describe("compact Run chrome", () => {
     const thinking = renderToStaticMarkup(<ConversationStatus phase={{ kind: "reasoning", label: "思考中", reasoning: "hidden live reasoning", since: new Date(now).toISOString(), quiet: 0, related: [], tokens: 0 }} snapshot={snapshot} now={now} inspect={() => undefined} />);
     expect(thinking).toContain('aria-expanded="false"'); expect(thinking).toContain("展开实时思考");
     expect(thinking).not.toContain("hidden live reasoning"); expect(thinking).toContain("本轮 0s");
+  });
+  it("exposes pause/resume controls and paused state while keeping the composer usable", async () => {
+    const client = new DemoClient(() => now); const store = new RunStore(client); const snapshot = await client.run("run-questions");
+    const bar = () => renderToStaticMarkup(<RunBar snapshot={snapshot} tab="transcript" setTab={() => undefined} detailsOpen={false} toggleDetails={() => undefined} pause={() => undefined} resume={() => undefined} />);
+    expect(bar()).toContain('aria-label="暂停会话"'); expect(bar()).not.toContain('aria-label="继续会话"');
+    snapshot.run = await client.pauseRun(snapshot.run.id);
+    expect(bar()).toContain('aria-label="继续会话"'); expect(bar()).toContain("已暂停"); expect(bar()).toContain("status-paused");
+    const transcript = renderToStaticMarkup(<Transcript snapshot={snapshot} store={store} items={{}} itemStatus={{}} nodeId={snapshot.run.rootNodeId} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} />);
+    expect(transcript).toContain("会话已暂停，消息会在继续后送达"); expect(transcript).toContain("⏸ ");
+    expect(transcript).not.toContain('aria-label="消息" disabled'); expect(transcript).not.toContain("conversation-live");
+    const details = renderToStaticMarkup(<RunDetails snapshot={snapshot} now={now + 30000} connection="live" busy={false} close={() => undefined} autoApprove={() => undefined} cancel={() => undefined} openTeam={() => undefined} openPending={() => undefined} />);
+    expect(details).toContain("暂停记录"); expect(details).toContain("尚未继续");
   });
 });
