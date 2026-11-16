@@ -80,6 +80,12 @@ export interface DriverSession {
    * drivers that cannot tell return [] or omit it.
    */
   processIds?(): number[];
+  /**
+   * True when this session's MCP tool calls may stay open for a long time (≥ the ask timeout),
+   * e.g. because the driver raised the agent's MCP tool timeout. When false or omitted, blocking
+   * ask_human falls back to async delivery (DESIGN §4.6).
+   */
+  supportsLongToolCalls?(): boolean;
 }
 
 export interface AgentDriver {
