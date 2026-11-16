@@ -170,8 +170,13 @@ export type GetInboxResponse = InboxItem[];
 
 /** POST /api/questions/:id/answer */
 export interface AnswerQuestionRequest {
-  answer: string;
+  /** Free-text answer (single-prompt cards); also used as a summary for structured answers. */
+  answer?: string;
+  /** Structured answers for multi-prompt / option cards: prompt id → labels and/or free text. */
+  answers?: Record<string, string[]>;
 }
+
+/** POST /api/runs/:runId/pause and /resume take no body; both return the RunRecord. */
 
 /** POST /api/escalations/:id/resolve */
 export interface ResolveEscalationRequest {

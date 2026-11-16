@@ -124,11 +124,12 @@ export const reassignInput = z.object({
 
 export const askHumanInput = z.object({
   question: z.string().min(1).describe("One clear question with the context the human needs to answer it."),
-  options: z.array(z.string().min(1)).max(6).optional().describe("Suggested answers (the human may still type their own)."),
+  options: z.array(z.string().min(1)).max(8).optional().describe("Suggested answers shown as choices (the human may still type their own)."),
+  multiSelect: z.boolean().default(false).describe("Allow choosing several options."),
   blocking: z
     .boolean()
     .default(true)
-    .describe("True: you cannot continue without the answer — end your turn after asking. False: keep working; the answer arrives later."),
+    .describe("True (default): this call waits until the human answers and returns the answer — then continue your work in the same turn. False: returns immediately; the answer arrives later as a <baton-answer> message."),
 });
 
 export const BATON_TOOLS = {
@@ -185,7 +186,7 @@ export const BATON_TOOLS = {
   ask_human: {
     input: askHumanInput,
     description:
-      "Ask the human a judgment question (a decision, missing information, a risky trade-off). Do not use it for things you can find out yourself. The answer arrives as a <baton-answer> message; if blocking, end your turn after asking.",
+      "Ask the human a judgment question (a decision, missing information, a risky trade-off). Do not use it for things you can find out yourself. By default the call waits for the answer and returns it, so you can continue right away. If it returns \"no answer yet\", continue with other work or end your turn; the answer will arrive as a <baton-answer> message.",
   },
   report_result: {
     input: reportResultInput,

@@ -69,7 +69,7 @@ export interface AgentEntry {
  */
 export type CollaborationMode = "dynamic" | "preset" | "solo";
 
-export type RunStatus = "active" | "idle" | "completed" | "failed" | "canceled";
+export type RunStatus = "active" | "idle" | "paused" | "completed" | "failed" | "canceled";
 
 export interface RunPolicy {
   /** Max delegation depth below the root (root depth = 0). */
@@ -245,6 +245,8 @@ export interface RunRecord {
   policy: RunPolicy;
   /** Present in dynamic runs once a team is formed, and in preset runs from the start. */
   team?: TeamRecord;
+  /** Pause history (DESIGN §4.10); the last entry without resumedAt means the run is paused now. */
+  pauses?: Array<{ at: IsoTime; resumedAt?: IsoTime; by: "human" }>;
   createdAt: IsoTime;
   updatedAt: IsoTime;
   endedAt?: IsoTime;
@@ -363,7 +365,7 @@ export interface DelegationRecord {
   subtreeUsage: UsageTotals;
 }
 
-export type TurnTrigger = "user" | "delegation" | "result" | "followup" | "correction";
+export type TurnTrigger = "user" | "delegation" | "result" | "followup" | "correction" | "resume";
 export type TurnStatus = "running" | "completed" | "failed" | "canceled" | "interrupted";
 
 export interface TurnRecord {
@@ -430,6 +432,18 @@ export interface ItemRecord {
 // ───────────────────────────── human-in-the-loop (inbox) ─────────────────────────────
 
 /** A question an agent asked the human with ask_human. */
+/** One question of a question card (native multi-question tools have up to 4). */
+export interface QuestionPrompt {
+  /** Stable key used in answers (provider question id, header, or "q1"). */
+  id: string;
+  header?: string;
+  question: string;
+  options: Array<{ label: string; description?: string }>;
+  multiSelect?: boolean;
+  /** A free-text answer is allowed (always for ask_human; the "Other" choice for native tools). */
+  allowFreeText: boolean;
+}
+
 export interface QuestionRecord {
   id: string;
   runId: string;
@@ -441,6 +455,24 @@ export interface QuestionRecord {
   blocking: boolean;
   status: "pending" | "answered" | "canceled";
   answer?: string;
+  /**
+   * "ask_human" = baton's MCP tool; "native" = the agent's own question tool (Claude
+   * AskUserQuestion, Codex request_user_input, pi ask) surfaced through its permission flow.
+   */
+  source?: "ask_human" | "native";
+  /** Structured questions (native tools; ask_human produces one prompt). */
+  prompts?: QuestionPrompt[];
+  /** Structured answers: prompt id → chosen option labels and/or free text. */
+  answers?: Record<string, string[]>;
+  /**
+   * "inline": the agent's tool call is waiting — the answer returns as the tool result and the agent
+   * continues in the same turn, below the card. "async": delivered later as a <baton-answer> message.
+   */
+  delivery?: "inline" | "async";
+  /** Where the card belongs in the transcript: the tool call that asked. */
+  anchor?: { itemSeq?: number; callId?: string; turnId?: string };
+  /** Why it was canceled (turn interrupted, run paused, node ended…). */
+  cancelReason?: string;
   askedAt: IsoTime;
   answeredAt?: IsoTime;
 }

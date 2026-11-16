@@ -176,10 +176,21 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
 
 原则：agent 自己能决定的不打扰人。只有需要判断的事才进**跨 Run 的待处理收件箱**，有四类：权限请求、名单提案、agent 的提问、内核升级。
 
-- **提问 `ask_human`**：任何节点都可以调用，参数是 `{question, options?, blocking}`。
-  - 工具立即返回 `{questionId, status:"pending"}`，不阻塞 MCP 调用，因为工具调用有超时。`blocking` 为真时，提示词要求节点结束本轮，此时节点卡片显示"等你回答"。
-  - 人在收件箱回答后，答案以 `<baton-answer question="<id>">…</baton-answer>` 发给提问的节点，送达方式和结果送达相同：steer、新开一轮或排队。
-  - Run 取消或节点进入终态时，未回答的提问标为 `canceled`。
+- **问答卡片**：agent 向人提问有两种来源，都记成 `QuestionRecord`，**以卡片形式显示在对话流里提问的那次工具调用处**（`anchor`），同时出现在收件箱。
+  - **agent 自带的提问工具**（`source:"native"`）：Claude 的 `AskUserQuestion`、Codex 的 `request_user_input`、pi 的 ask。它们原本走 provider 的权限流程（`PermissionRequest.kind:"question"`），内核要把这类请求**改成生成问答卡片，不当作权限请求处理**：
+    - 不受 `autoApprove` 影响，也不匹配审批规则；
+    - 保留结构化的问题：1 到 4 个子问题，每个有标题、选项（标签和说明）和 `multiSelect`，并允许"其他"（自由文本）。
+    - 人回答后，按各 provider 要求的格式回填，通过 `respondToPermission(allow, updatedInput)` 交回。Claude 的 `answers` 按问题全文作为 key；Codex 按问题 id。参考 Paseo 的 `normalizeClaudeAskUserQuestion*` 和 `codex/async-questions`。
+    - agent 拿到答案后**在同一回合内继续执行**，后续输出自然出现在卡片下方。`delivery:"inline"`。
+  - **baton 的 `ask_human`**（`source:"ask_human"`），参数 `{question, options?, multiSelect?, blocking}`：
+    - `blocking`（默认）：MCP 调用**挂起不返回，直到人回答**，把答案作为工具结果返回，agent 在同一回合内接着做（`inline`）。
+      - 等待期间每 20 秒发一次 MCP 进度通知保活。最长等待 `askTimeoutMinutes`，默认 60 分钟。超时后返回 `{status:"no_answer_yet", questionId}`，问题转为 `async`，之后人回答时以 `<baton-answer>` 消息送达。
+      - 注入 MCP 时，为各 provider 调高 MCP 工具超时：Claude 用 `MCP_TOOL_TIMEOUT` 环境变量，Codex 用 `tool_timeout_sec`，pi 视适配器支持情况而定。做不到的 provider 退回 `async`。
+    - `blocking:false`：立即返回 `{questionId, status:"pending"}`，答案之后以 `<baton-answer question="<id>">…</baton-answer>` 消息送达（`async`），送达方式和结果送达相同。
+  - 等待回答期间，节点不算停滞。节点卡片和状态条显示"等你回答"。
+  - Run 取消、节点进入终态、回合被中断或暂停时：
+    - `inline` 的原生问题标为 `canceled`，并写明原因，因为 provider 的回合已经结束，无法再回填。
+    - `ask_human` 的问题保留为 `async` 继续等待回答，之后以消息送达；Run 取消时同样取消。
 - **停滞升级**：节点处于运行中的一轮里，超过 `stallMinutes` 分钟（默认 10）没有任何 driver 事件，内核就生成一条 `stall` 升级。
   - 非根节点：同时给父节点发 `<baton-notice>`，建议父节点 `send`、`reassign` 或 `cancel`。
   - 同一段停滞只升级一次，收到下一个事件就重置。
@@ -281,6 +292,24 @@ agent 常会启动长期运行的进程，比如 `npm run dev`、`nohup … &`�
 - Run 完成的通知里会附上"仍有 N 个后台进程在运行"。
 - 节点系统提示里加一句："启动长期运行的进程后，在回复里告诉人它是什么、端口和怎么停止。"
 
+### 4.10 暂停与继续
+
+- **暂停**（`POST /api/runs/:id/pause`）：
+  - 记一条 `pauses` 记录，Run 状态变为 `paused`。
+  - 中断 Run 内所有正在进行的回合，包括根节点和所有子孙节点。这些回合记为 `canceled`，原因"paused by human"。和人工中断一样，**不采集委派结果，不当作失败，也不送给父节点**。
+  - 记下哪些节点被打断了。
+  - 暂停期间 Run 内**不开始任何新的回合**：
+    - 委派结果、通知、答案、纠正提示、排队消息全部暂存；
+    - 排队中的委派保持 `queued`；
+    - 人发的消息一律排队，即使节点空闲也不开新的一轮；
+    - 新委派的子节点建好后不开第一轮。
+  - 已经启动的后台进程不受影响。待处理的权限请求随回合中断而失效。问题按 §4.6 的规则处理。
+- **继续**（`POST /api/runs/:id/resume`）：
+  - 补上 `resumedAt`，Run 状态恢复为 `active`。
+  - 每个被暂停打断的节点开一轮 `trigger:"resume"` 的回合，提示词是：`<baton-notice>The human paused this run and has now resumed it. Continue where you left off.</baton-notice>`，后面合并该节点暂存的送达内容和排队消息。
+  - 其他节点上暂存的送达内容和排队消息照常冲刷。排队中的委派开始第一轮。
+- 暂停中的 Run 不算"活跃"（`activeRunCount`），但会显示"已暂停"。重启 daemon 后仍保持暂停。时间线用浅灰斜纹画出暂停的时间段。
+
 ## 5. Driver 接口（server 和 providers 之间的边界）
 
 契约文件是 `packages/server/src/driver/types.ts`。内核只依赖这个接口：
@@ -328,6 +357,7 @@ agent 常会启动长期运行的进程，比如 `npm run dev`、`nohup … &`�
 | POST | `/api/nodes/:nodeId/messages` | `{ text }`，人给节点发消息 |
 | POST | `/api/nodes/:nodeId/cancel` | 级联取消该节点的子树 |
 | POST | `/api/permissions/:requestId` | `PermissionDecision`（可带 `remember` 生成规则） |
+| POST | `/api/runs/:runId/pause` · `/resume` | 暂停 / 继续整个会话（§4.10） |
 | GET | `/api/inbox` · `/api/inbox/events` | 跨 Run 待处理项 · 变化推送（SSE） |
 | POST | `/api/questions/:id/answer` | `AnswerQuestionRequest` |
 | POST | `/api/escalations/:id/resolve` | `ResolveEscalationRequest` |
@@ -468,6 +498,21 @@ agent 常会启动长期运行的进程，比如 `npm run dev`、`nohup … &`�
    - 被替换的节点置灰，标"已替换"，用虚线连到接手的节点。
    - 节点卡片和详情抽屉里有"改派"按钮。
    - 时间线根节点那一行标出团队变更。
+
+12. **暂停与问答卡片**：
+    - RunBar 上有暂停、继续图标按钮，暂停时状态显示"已暂停"。
+    - 暂停时，输入框提示"会话已暂停，消息会在继续后送达"。
+    - 拓扑图卡片显示暂停标记。
+    - 时间线画出暂停的时间段。
+    - **问答卡片显示在对话流里提问的那次工具调用处**（`anchor`），卡片里有：
+      - 标题和问题；
+      - 选项按钮（单选，或 `multiSelect` 时多选）及其说明；
+      - 自由文本框；
+      - 多个子问题时分段展示；
+      - 提交按钮。
+    - 已回答的卡片收起成"你的回答：…"。agent 接着输出的内容出现在卡片**下方**。
+    - `async` 的卡片注明"答案会作为新消息送达"，已取消的写明原因。
+    - 原生提问不再以"权限请求"卡片出现。
 
 8. **待处理收件箱**：左侧导航最上方是"待处理"，带数字。按 Run 分组，每类有对应的卡片：
    - 权限卡：允许一次 / 总是允许（可改作用域和 pattern）/ 拒绝；
