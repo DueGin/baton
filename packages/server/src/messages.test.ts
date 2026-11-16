@@ -126,12 +126,31 @@ describe("human message delivery", () => {
     const childRows = server.store.items(childId).filter((r) => r.item.type === "user_message");
     expect(childRows).toHaveLength(3);
     expect(childRows.find((r) => r.seq === human.itemSeq)?.item).toMatchObject({ text: "human instruction", delivery: "turn", clientId: "mixed-client" });
-    expect(childRows.at(-1)?.item).toEqual({ type: "user_message", text: "parent instruction" });
-    expect(driver.sessions[1]!.prompts[1]).toBe("human instruction\n\nparent instruction");
+    const followup = `<baton-followup delegation="${child.delegationId}">\nparent instruction\n</baton-followup>`;
+    expect(childRows.at(-1)?.item).toEqual({ type: "user_message", text: followup });
+    expect(driver.sessions[1]!.prompts[1]).toBe(`human instruction\n\n${followup}`);
     // Root result/notice prompts remain kernel messages without human delivery metadata.
     await until(() => !!server.store.delegation(child.delegationId).deliveredAt);
     expect(rows().filter((r) => r.item.type === "user_message").every((r) => r.item.type === "user_message" && r.item.delivery === undefined)).toBe(true);
     expect(server.store.snapshot(run.run.id).delegations).toHaveLength(1);
+  });
+
+  it("tags a parent follow-up delivered by steer without tagging human messages", async () => {
+    const hold = gate();
+    const { server, driver, root } = await setup();
+    await until(() => server.store.node(root).status === "idle");
+    driver.options.script = (c) => hold.wait(c);
+    const child = await server.kernel.delegate(root, { agent: "root", title: "child", task: "work" });
+    await until(() => server.store.node(child.nodeId!).status === "running");
+    await server.kernel.tool(root, "send", { delegationId: child.delegationId, message: "parent instruction" });
+    await server.kernel.message(child.nodeId!, "human instruction", undefined, "steer");
+    const followup = `<baton-followup delegation="${child.delegationId}">\nparent instruction\n</baton-followup>`;
+    expect(driver.sessions[1]!.steered).toEqual([followup, "human instruction"]);
+    expect(server.store.items(child.nodeId!).filter((r) => r.item.type === "user_message").map((r) => r.item)).toEqual([
+      expect.objectContaining({ text: expect.stringContaining("<baton-assignment") }),
+      { type: "user_message", text: followup },
+      expect.objectContaining({ text: "human instruction", delivery: "steered" }),
+    ]);
   });
 
   it("leaves canceled queued messages visible and appends a warning exactly once", async () => {
@@ -577,7 +596,7 @@ describe("human queue order", () => {
     server.kernel.reorderQueue(id, [second.itemSeq, first.itemSeq]);
     hold.release();
     await until(() => server.store.node(id).turns === 2 && server.store.node(id).status === "completed");
-    expect(driver.sessions[1]!.prompts[1]).toBe("human second\n\nkernel middle\n\nhuman first");
+    expect(driver.sessions[1]!.prompts[1]).toBe(`human second\n\n<baton-followup delegation="${child.delegationId}">\nkernel middle\n</baton-followup>\n\nhuman first`);
   });
 
   it("uses item sequence as fallback for older queued rows without positions", async () => {

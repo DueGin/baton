@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { BATON_TOOLS, LEAD_ONLY_TOOLS, emptyUsage, type AgentEntry, type AskHumanInput, type PermissionDecision, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionRequest, type PermissionResponse, type ReportResultInput, type FormTeamInput, type ReplaceMemberInput, type ReassignInput, type ReorderQueueResponse, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type SendMessageResponse, type SendMode, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
 import type { DriverEvent, DriverRegistry, DriverSession, OpenSessionSpec } from "../driver/types.js";
 import { Store } from "../store/index.js";
-import { briefPrompt, correctionPrompt, resultsPrompt, systemPrompt } from "./prompts.js";
+import { briefPrompt, correctionPrompt, followupPrompt, noticePrompt, resultsPrompt, systemPrompt } from "./prompts.js";
 import { Teams, type ResolvedMember } from "./teams.js";
 import { HumanInteraction } from "./human.js";
 import { PermissionRules, HUMAN_DENIAL } from "./permission-rules.js";
@@ -32,7 +32,7 @@ type MessageDelivery = Omit<SendMessageResponse, "accepted">;
 export class MessageError extends Error { readonly status = 409; }
 const HUMAN_INTERRUPT = "interrupted by human message";
 const PAUSE_REASON = "paused by human";
-const RESUME_PROMPT = "<baton-notice>The human paused this run and has now resumed it. Continue where you left off.</baton-notice>";
+const RESUME_PROMPT = noticePrompt("system", "The human paused this run and has now resumed it. Continue where you left off.");
 interface Runtime {
   token: string; session?: DriverSession; opening?: Promise<DriverSession>; unsubscribe?: () => void;
   turnId?: string; driverTurnId?: string; report?: ReportResultInput; finalText: string; corrections: number;
@@ -527,7 +527,7 @@ export class Kernel {
         const old = this.store.delegation(d.replaces);
         if (!old.blockedByProposal) { this.replacing.add(old.id); await this.cancelNode(old.toNodeId, "Reassignment approved", true); this.patchNode(old.toNodeId, { status: "replaced", endedAt: now() }); }
         this.patchDelegation(old.id, { status: "replaced", replacedBy: d.id, replaceReason: "Reassignment approved", endedAt: now() });
-        const notice = `<baton-notice>\nDelegation ${old.id} → ${d.id} reassignment approved. Use the successor id for results.\n</baton-notice>`;
+        const notice = noticePrompt("team", `Delegation ${old.id} → ${d.id} reassignment approved. Use the successor id for results.`);
         this.store.queueNotice(randomUUID(), old.fromNodeId, runId, notice); this.scheduleDelivery(old.fromNodeId);
       }
       // The human's approved spec wins over the proposal (including model/mode edits).
@@ -625,7 +625,7 @@ export class Kernel {
     if (["canceled", "replaced"].includes(d.status)) throw new Error(`Delegation is ${d.status}`);
     this.patchDelegation(d.id, { round: d.round + 1, result: undefined, status: "running", deliveredAt: undefined, deliveredVia: undefined, endedAt: undefined });
     this.runtime(d.toNodeId).corrections = 0;
-    await this.sendPrompt(d.toNodeId, message, "followup");
+    await this.sendPrompt(d.toNodeId, followupPrompt(d.id, message), "followup");
   }
   private armStall(id: string): void {
     const rt = this.runtime(id); clearTimeout(rt.stallTimer);

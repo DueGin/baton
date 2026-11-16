@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { AnswerQuestionRequest, AskHumanInput, EscalationRecord, NodeRecord, QuestionRecord, ResolveEscalationRequest } from "@baton/protocol";
 import type { Store } from "../store/index.js";
 import { questionAnswers } from "./questions.js";
+import { noticePrompt } from "./prompts.js";
 interface HumanHooks {
   activity(id: string, text: string): void;
   enqueue(id: string, text: string): void;
@@ -74,7 +75,7 @@ export class HumanInteraction {
   shutdown(): void { for (const run of this.store.list()) for (const node of this.store.snapshot(run.id).nodes) this.endQuestions(node.id, "Daemon restarted"); }
   stall(node: NodeRecord, milliseconds: number): EscalationRecord {
     const record = this.escalate({ nodeId: node.id, runId: node.runId, delegationId: node.delegationId ?? undefined, kind: "stall", detail: `${node.title} (${node.agentId}) has sent no driver events for ${(milliseconds / 60000).toFixed(2)} minutes. Last activity: ${node.activity ?? "unknown"}.` });
-    if (node.parentNodeId) this.hooks.enqueue(node.parentNodeId, `<baton-notice>\nDelegation ${node.delegationId} appears stalled (${record.id}). Consider send, reassign or cancel.\n${record.detail}\n</baton-notice>`);
+    if (node.parentNodeId) this.hooks.enqueue(node.parentNodeId, noticePrompt("system", `Delegation ${node.delegationId} appears stalled (${record.id}). Consider send, reassign or cancel.\n${record.detail}`));
     return record;
   }
   limit(delegationId: string, message: string, maximum: number): { status: "escalated"; escalationId: string } {
@@ -109,7 +110,7 @@ export class HumanInteraction {
       this.store.append(e.runId, { type: "escalation", escalation: e }); throw error;
     }
     const node = this.store.node(e.nodeId), parent = e.delegationId ? this.store.delegation(e.delegationId).fromNodeId : node.id;
-    this.hooks.enqueue(parent, `<baton-notice>\nEscalation ${e.id} (${e.kind}) resolved: ${valid.resolution}${valid.resolution === "extend" ? ` (+${valid.extraRounds ?? 2} rounds)` : ""}.\nHuman note: ${valid.note ?? "(none)"}\n</baton-notice>`);
+    this.hooks.enqueue(parent, noticePrompt("system", `Escalation ${e.id} (${e.kind}) resolved: ${valid.resolution}${valid.resolution === "extend" ? ` (+${valid.extraRounds ?? 2} rounds)` : ""}.\nHuman note: ${valid.note ?? "(none)"}`));
     return resolved;
   }
 }

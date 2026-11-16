@@ -78,7 +78,7 @@ describe("supervision", () => {
     expect(s.store.snapshot(run.run.id).escalations.filter((e) => e.nodeId === child.nodeId)).toHaveLength(0);
     await until(() => s.store.snapshot(run.run.id).escalations.some((e) => e.nodeId === child.nodeId)); await delay(150);
     expect(s.store.snapshot(run.run.id).escalations.filter((e) => e.nodeId === child.nodeId)).toHaveLength(1);
-    expect((s.kernel.registry as FakeDriverRegistry).get("root")!.sessions[0]!.steered.some((m) => m.includes("appears stalled"))).toBe(true);
+    expect((s.kernel.registry as FakeDriverRegistry).get("root")!.sessions[0]!.steered.some((m) => m.startsWith('<baton-notice kind="system">') && m.includes("appears stalled"))).toBe(true);
     emit!(); await until(() => s.store.snapshot(run.run.id).escalations.filter((e) => e.nodeId === child.nodeId).length === 2);
     const e = s.store.snapshot(run.run.id).escalations.find((e) => e.nodeId === child.nodeId)!;
     await api(s, `/api/escalations/${e.id}/resolve`, "POST", { resolution: "dismiss", note: "Expected delay" }); expect(s.store.escalation(e.id).resolution).toBe("dismiss");
@@ -92,10 +92,10 @@ describe("supervision", () => {
     const result = await s.kernel.tool(run.run.rootNodeId, "send", { delegationId: child.delegationId, message: "Fix the edge case" }) as { status: string; escalationId: string };
     expect(result.status).toBe("escalated"); expect(s.store.delegation(child.delegationId).round).toBe(1); expect(messages).toHaveLength(1);
     await api(s, `/api/escalations/${result.escalationId}/resolve`, "POST", { resolution, extraRounds: 2, note: "Human decision" });
-    if (resolution === "extend") { await until(() => messages.length === 2); expect(messages[1]).toBe("Fix the edge case"); expect(s.store.delegation(child.delegationId).round).toBe(2); }
+    if (resolution === "extend") { await until(() => messages.length === 2); expect(messages[1]).toBe(`<baton-followup delegation="${child.delegationId}">\nFix the edge case\n</baton-followup>`); expect(s.store.delegation(child.delegationId).round).toBe(2); }
     if (resolution === "cancel") expect(s.store.delegation(child.delegationId).status).toBe("canceled");
     if (resolution === "dismiss") expect(messages).toHaveLength(1);
-    await until(() => s.store.items(run.run.rootNodeId).some((r) => r.item.type === "user_message" && r.item.text.includes("Human decision")));
+    await until(() => s.store.items(run.run.rootNodeId).some((r) => r.item.type === "user_message" && r.item.text.includes('<baton-notice kind="system">') && r.item.text.includes("Human decision")));
   });
 });
 
