@@ -1,12 +1,8 @@
-import { applyEvent, emptyUsage, type AgentEntry, type DelegationRecord, type ItemRecord, type NodeRecord, type RunEvent, type RunEventEnvelope, type RunSnapshot, type TeamMember, type TeamRecord, type TimelineItem, type ToolCallDetail } from "@baton/protocol";
+import { applyEvent, emptyUsage, type DelegationRecord, type ItemRecord, type NodeRecord, type RunEvent, type RunEventEnvelope, type RunSnapshot, type TeamMember, type TeamRecord, type TimelineItem, type ToolCallDetail } from "@baton/protocol";
 import { demoBriefPrompt, demoResultsPrompt } from "./prompts.js";
 
-export const demoAgents: AgentEntry[] = [
-  { id: "claude", label: "Claude Code", version: "2.1.38", model: "claude-sonnet-4-6", modelLabel: "Sonnet 4.6" },
-  { id: "codex", label: "Codex", version: "0.106.0", model: "gpt-5.3-codex", modelLabel: "GPT-5.3 Codex" },
-  { id: "pi", label: "pi", version: "0.55.0", model: "gemini-2.5-pro", modelLabel: "Gemini 2.5 Pro" },
-  { id: "gemini", label: "Gemini CLI", version: undefined, model: "gemini-2.5-pro", modelLabel: "Gemini 2.5 Pro" },
-].map(agent => ({ id: agent.id, label: agent.label, kind: "native", status: agent.id === "gemini" ? "unavailable" : "ready", enabled: true, version: agent.version, diagnostic: agent.id === "gemini" ? "未在 PATH 中找到 gemini。安装 CLI 后重新检测。" : undefined, models: [{ id: agent.model, label: agent.modelLabel, isDefault: true, thinkingOptions: [{ id: "medium", label: "Medium", isDefault: true }, { id: "high", label: "High" }] }], modes: [{ id: "default", label: "Default" }, { id: "plan", label: "Read only", isReadOnly: true }], defaultModeId: "default", capabilities: { steer: agent.id !== "pi", resume: true, reasoning: true, mcp: true }, notes: agent.id === "codex" ? "代码实现、测试和重构" : agent.id === "pi" ? "快速检索、独立审查" : "任务拆分、跨 agent 协调", checkedAt: new Date("2026-11-10T07:00:00Z").toISOString() }));
+import { demoAgents } from "./agents.js";
+export { demoAgents } from "./agents.js";
 
 export interface DemoScenario { initial: RunSnapshot; events: RunEventEnvelope[]; items: Record<string, ItemRecord[]>; at: (offset: number) => string }
 
