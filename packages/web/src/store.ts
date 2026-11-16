@@ -1,5 +1,5 @@
 import { applyEvent, type ItemRecord, type RunEventEnvelope, type RunSnapshot } from "@baton/protocol";
-import { messageActionKey, queuedRows, reconcileOutgoing, type MessageAction, type MessageActionState, type OutgoingMessage } from "./lib/conversation.js";
+import { messageActionKey, pruneOutgoing, queuedRows, reconcileOutgoing, type MessageAction, type MessageActionState, type OutgoingMessage } from "./lib/conversation.js";
 import { HttpError, type BatonClient } from "./api.js";
 import { queueEditError } from "./lib/queue-editor.js";
 
@@ -29,6 +29,7 @@ export class RunStore {
   private controller: AbortController | null = null;
   private generation = 0;
   private retry: ReturnType<typeof setTimeout> | undefined;
+  private acknowledged = new Set<string>();
   constructor(readonly client: BatonClient) {}
   getSnapshot = (): ConsoleState => this.state;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => this.listeners.delete(listener); };
@@ -38,10 +39,11 @@ export class RunStore {
     this.close();
     const generation = this.generation;
     this.update(initial());
+    this.acknowledged.clear();
     try {
       const snapshot = await this.client.run(id);
       if (generation !== this.generation) return;
-      this.update({ snapshot });
+      this.update({ snapshot, outgoing: pruneOutgoing(this.state.outgoing, Object.values(this.state.items).flat(), Date.now()) });
       this.connect(id, generation, 0);
     } catch (error) {
       if (generation === this.generation) this.update({ connection: "offline", error: errorText(error) });
@@ -63,6 +65,7 @@ export class RunStore {
     if (nodeId) patch.lastEventAt = { ...this.state.lastEventAt, [nodeId]: Date.parse(event.ts) };
     if (event.type === "item") {
       patch.outgoing = reconcileOutgoing(this.state.outgoing, { seq: event.itemSeq, nodeId: event.nodeId, turnId: event.turnId, ts: event.itemTs, item: event.item });
+      this.rememberAcknowledgements(patch.outgoing);
       const key = messageActionKey(event.nodeId, event.itemSeq);
       if (event.item.type === "user_message" && this.state.messageActions[key]) patch.messageActions = { ...this.state.messageActions, [key]: { ...this.state.messageActions[key], error: undefined, ...(event.item.delivery !== "queued" ? { steerUnsupported: false } : {}) } };
     }
@@ -84,7 +87,9 @@ export class RunStore {
       // Live events received during fetch win over rows in the response.
       const streamed = (this.state.items[nodeId] ?? []).filter(row => before.get(row.seq) !== row);
       const rows = mergeItems(mergeItems(this.state.items[nodeId] ?? [], result.items), streamed);
-      this.update({ outgoing: rows.reduce(reconcileOutgoing, this.state.outgoing), items: { ...this.state.items, [nodeId]: rows }, itemStatus: { ...this.state.itemStatus, [nodeId]: "ready" } });
+      const allRows = [...Object.entries(this.state.items).flatMap(([id, items]) => id === nodeId ? [] : items), ...rows];
+      this.rememberAcknowledgements(allRows.reduce(reconcileOutgoing, this.state.outgoing));
+      this.update({ outgoing: pruneOutgoing(this.state.outgoing, allRows, Date.now()), items: { ...this.state.items, [nodeId]: rows }, itemStatus: { ...this.state.itemStatus, [nodeId]: "ready" } });
     } catch (error) {
       if (generation === this.generation) this.update({ itemStatus: { ...this.state.itemStatus, [nodeId]: "error" }, error: errorText(error) });
     }
@@ -119,17 +124,23 @@ export class RunStore {
     const generation = this.generation;
     const clientId = retryId ?? crypto.randomUUID();
     const existing = this.state.outgoing.find(message => message.clientId === clientId);
-    const message: OutgoingMessage = { ...existing, clientId, nodeId, text, ts: existing?.ts ?? new Date().toISOString(), state: "sending", error: undefined };
+    const message: OutgoingMessage = { ...existing, clientId, nodeId, text, ts: new Date().toISOString(), state: "sending", acknowledged: false, error: undefined };
     this.update({ outgoing: [...this.state.outgoing.filter(row => row.clientId !== clientId), message] });
     try {
       const response = await this.client.send(nodeId, text, clientId, "queue");
       if (generation !== this.generation) return;
-      this.update({ outgoing: this.state.outgoing.map(row => row.clientId === clientId ? { ...row, state: "accepted", itemSeq: response.itemSeq, delivery: row.delivery && row.delivery !== "queued" ? row.delivery : response.delivery } : row) });
+      const accepted = this.state.outgoing.map(row => row.clientId === clientId ? { ...row, state: "accepted" as const, itemSeq: response.itemSeq, delivery: row.delivery && row.delivery !== "queued" ? row.delivery : response.delivery } : row);
+      const reconciled = (this.state.items[nodeId] ?? []).reduce(reconcileOutgoing, accepted);
+      this.rememberAcknowledgements(reconciled);
+      this.update({ outgoing: reconciled });
     } catch (error) {
       if (generation !== this.generation) return;
       // An SSE acknowledgement is authoritative even if the HTTP response was lost.
-      this.update({ outgoing: this.state.outgoing.map(row => row.clientId === clientId && row.state !== "accepted" ? { ...row, state: "failed", error: errorText(error) } : row) });
+      this.update({ outgoing: this.state.outgoing.map(row => row.clientId === clientId && row.state !== "accepted" && !this.acknowledged.has(clientId) ? { ...row, state: "failed", error: errorText(error) } : row) });
     }
+  }
+  private rememberAcknowledgements(messages: OutgoingMessage[]): void {
+    messages.filter(message => message.acknowledged).forEach(message => this.acknowledged.add(message.clientId));
   }
 
   async editMessage(nodeId: string, itemSeq: number, text: string): Promise<boolean> {

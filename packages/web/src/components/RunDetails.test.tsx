@@ -3,7 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { DemoClient } from "../demo/client.js";
 import { RunBar } from "./RunBar.js";
 import { RunDetails } from "./RunDetails.js";
-import { ConversationStatus, Transcript } from "./Transcript.js";
+import { Transcript } from "./Transcript.js";
+import { TurnIndicator } from "./TurnIndicator.js";
 import { RunStore } from "../store.js";
 
 const now = Date.parse("2026-11-10T07:00:00Z");
@@ -37,9 +38,9 @@ describe("compact Run chrome", () => {
   });
   it("keeps status on one line by default and names child waiting time correctly", async () => {
     const snapshot = await new DemoClient(() => now).run("run-demo");
-    const waiting = renderToStaticMarkup(<ConversationStatus phase={{ kind: "children", label: "等待 2 个子任务", since: new Date(now - 149_000).toISOString(), quiet: 45, related: [], tokens: 1200 }} snapshot={snapshot} now={now} inspect={() => undefined} />);
+    const waiting = renderToStaticMarkup(<TurnIndicator phase={{ kind: "children", label: "等待 2 个子任务", since: new Date(now - 149_000).toISOString(), quiet: 45, related: [], tokens: 1200 }} snapshot={snapshot} now={now} inspect={() => undefined} />);
     expect(waiting).toContain("等待 2m 29s"); expect(waiting).not.toContain("本轮"); expect(waiting).toContain("已 45s 无新输出");
-    const thinking = renderToStaticMarkup(<ConversationStatus phase={{ kind: "reasoning", label: "思考中", reasoning: "hidden live reasoning", since: new Date(now).toISOString(), quiet: 0, related: [], tokens: 0 }} snapshot={snapshot} now={now} inspect={() => undefined} />);
+    const thinking = renderToStaticMarkup(<TurnIndicator phase={{ kind: "reasoning", label: "思考中", reasoning: "hidden live reasoning", since: new Date(now).toISOString(), quiet: 0, related: [], tokens: 0 }} snapshot={snapshot} now={now} inspect={() => undefined} />);
     expect(thinking).toContain('aria-expanded="false"'); expect(thinking).toContain("展开实时思考");
     expect(thinking).not.toContain("hidden live reasoning"); expect(thinking).toContain("本轮 0s");
   });

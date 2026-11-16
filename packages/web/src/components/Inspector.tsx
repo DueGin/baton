@@ -1,12 +1,15 @@
-import { useEffect } from "react";
+import { Fragment, useEffect } from "react";
 import type { ItemRecord, PermissionResponse, RunSnapshot } from "@baton/protocol";
 import type { RunStore } from "../store.js";
-import { activeTurn, conversationRows, messageActionKey, nodeIsLive } from "../lib/conversation.js";
+import { activeTurn, conversationRows, messageActionKey, nodeIsLive, conversationPhase, inFlightMessage } from "../lib/conversation.js";
 import { clock, cost, displayStatus, duration, terminal, tokens } from "../lib/derive.js";
 import { AgentMark, Icon, PermissionActions, Status } from "./common.js";
 import { EscalationCard, QuestionCard, type HumanActions } from "./HumanActions.js";
 import { inlineQuestionEntries, representedQuestion } from "../lib/questions.js";
 import { resolutionLabels } from "../lib/inbox.js";
+import { turnFooters } from "../lib/turns.js";
+import { TurnFooter, TurnIndicator } from "./TurnIndicator.js";
+import { questionCardId } from "../lib/questions.js";
 import { Markdown, ToolDetail, TranscriptRow } from "./Transcript.js";
 
 export function Inspector({ snapshot, nodeId, now, close, back, converse, cancel, decide, busy, store, items, inspect, reassign, answer, resolve }: {
@@ -19,9 +22,13 @@ export function Inspector({ snapshot, nodeId, now, close, back, converse, cancel
   const edge = snapshot.delegations.find(entry => entry.toNodeId === nodeId);
   const turn = activeTurn(snapshot, nodeId);
   const latestText = (items[nodeId] ?? []).findLast(row => row.item.type === "reasoning" || row.item.type === "assistant_message");
-  const streaming = (row: ItemRecord) => nodeIsLive(snapshot, node) && (turn ? row.turnId === turn.id || (!row.turnId && Date.parse(row.ts) >= Date.parse(turn.startedAt)) : row.seq === latestText?.seq);
+  const streaming = (row: ItemRecord) => nodeIsLive(snapshot, node) && Boolean(turn && (row.turnId === turn.id || !row.turnId && Date.parse(row.ts) >= Date.parse(turn.startedAt))) && (row.item.type === "reasoning" || row.seq === latestText?.seq);
   const permissions = snapshot.permissions.filter(permission => permission.nodeId === nodeId && !representedQuestion(permission, snapshot.questions));
-  const recent = inlineQuestionEntries(conversationRows(items[node.id] ?? [], [], node.id), snapshot.questions, node.id).filter(entry => entry.type === "row").slice(-8);
+  const recent = inlineQuestionEntries(conversationRows(items[node.id] ?? [], [], node.id), snapshot.questions, node.id).slice(-8);
+  const footers = turnFooters(recent, snapshot, nodeId);
+  const state = store.getSnapshot();
+  const pending = inFlightMessage(state.outgoing, items[nodeId] ?? [], nodeId, now);
+  const phase = conversationPhase(snapshot, node, items[nodeId] ?? [], now, state.lastEventAt[nodeId], pending);
   return <aside className="inspector" aria-label="节点详情"><div className="inspector-header"><div className="inspector-heading-label">{back && <button className="text-button panel-back" onClick={back}><span>‹</span> Run 详情</button>}<span className="eyebrow">节点详情</span></div><button className="icon-button" title="关闭侧栏" aria-label="关闭节点详情" onClick={close}><Icon name="close" /></button></div><div className="inspector-scroll">
     <div className="inspector-node"><AgentMark agent={node.agentId} /><div><h2>{node.title}</h2><span>{node.agentId} · depth {node.depth}</span></div></div><Status status={edge?.blockedByProposal ? "queued" : displayStatus(node, snapshot)} />
     <div className="inspector-actions">{edge && !edge.blockedByProposal && !["canceled", "replaced"].includes(node.status) && snapshot.run.policy.mode !== "solo" && <button className="button" disabled={busy} onClick={() => reassign(edge.id)}>改派</button>}<button className="button" disabled={["canceled", "replaced"].includes(node.status)} onClick={() => converse(node.id)}><Icon name="chat" size={15} />发消息</button><button className="button danger" disabled={busy || terminal(node.status)} onClick={() => cancel(node.id)}><Icon name="stop" size={14} />取消子树</button></div>
@@ -33,6 +40,6 @@ export function Inspector({ snapshot, nodeId, now, close, back, converse, cancel
     {edge?.result && <section className="inspector-section"><h3>交付结果 <span className={`result-${edge.result.status}`}>{edge.result.status}</span></h3><Markdown text={edge.result.summary} />{!edge.result.reported && <div className="notice-row warning">结果由最后一条回复自动生成</div>}{edge.result.result !== undefined && <pre>{JSON.stringify(edge.result.result, null, 2)}</pre>}{edge.result.artifacts?.map((artifact, index) => <div className="artifact" key={index}><span>{artifact.kind === "file" ? "↗" : "◇"}</span><div><code>{artifact.value}</code>{artifact.description && <Markdown text={artifact.description} />}</div></div>)}{edge.result.error && <Markdown text={edge.result.error} />}</section>}
     <section className="inspector-section"><h3>节点信息</h3><dl className="meta-grid"><dt>角色</dt><dd>{node.role ?? "Lead"}</dd><dt>成员</dt><dd className="mono">{node.memberId ?? "—"}</dd><dt>Agent</dt><dd>{node.agentId}</dd><dt>Model</dt><dd>{node.model ?? "默认"}</dd><dt>Mode / Thinking</dt><dd>{node.modeId ?? "default"} / {node.thinking ?? "default"}</dd><dt>工作目录</dt><dd><code>{node.cwd}</code></dd><dt>创建</dt><dd>{clock(node.createdAt)}</dd><dt>更新</dt><dd>{clock(node.updatedAt)}</dd><dt>结束</dt><dd>{node.endedAt ? clock(node.endedAt) : "—"}</dd><dt>用时 / 轮次</dt><dd>{duration(node.createdAt, node.endedAt ?? now)} / {node.turns}</dd><dt>Input / Output</dt><dd>{tokens(node.usage.inputTokens)} / {tokens(node.usage.outputTokens)}</dd><dt>Cached / Cost</dt><dd>{tokens(node.usage.cachedInputTokens)} / {cost(node.usage.costUsd)}</dd><dt>Node ID</dt><dd className="mono">{node.id}</dd></dl></section>
     {permissions.length > 0 && <section className="inspector-section"><h3>权限记录</h3>{permissions.map(permission => <div className="permission-history" key={permission.id}><strong>{permission.request.title ?? permission.request.name}</strong><span>{permission.status === "pending" ? "待处理" : permission.resolution?.behavior === "allow" ? "已允许" : permission.status === "expired" ? "已过期" : "已拒绝"} · {permission.resolvedBy ? resolutionLabels[permission.resolvedBy] : "—"}{permission.ruleId ? ` · ${permission.ruleId}` : ""} · {duration(permission.requestedAt, permission.resolvedAt ?? now)}</span></div>)}</section>}
-    <section className="inspector-section inspector-transcript"><h3>最近会话 <button className="text-button" onClick={() => converse(node.id)}>查看全部 ↗</button></h3>{recent.map(({ entry: { row } }) => <TranscriptRow client={store.client} key={row.seq} streaming={streaming(row)} row={row} actionState={store.getSnapshot().messageActions[messageActionKey(node.id, row.seq)]} act={action => { void store.actOnMessage(node.id, row.seq, action); }} node={node} snapshot={snapshot} inspect={inspect} />)}{!items[node.id]?.length && <p className="muted">暂无消息</p>}</section>
+    <section className="inspector-section inspector-transcript"><h3>最近会话 <button className="text-button" onClick={() => converse(node.id)}>查看全部 ↗</button></h3>{recent.map((entry, index) => <Fragment key={entry.type === "question" ? entry.question.id : entry.entry.row.seq}>{entry.type === "question" ? <QuestionCard inline question={entry.question} answer={answer} busy={busy} /> : <TranscriptRow client={store.client} streaming={streaming(entry.entry.row)} row={entry.entry.row} actionState={state.messageActions[messageActionKey(node.id, entry.entry.row.seq)]} act={action => { void store.actOnMessage(node.id, entry.entry.row.seq, action); }} node={node} snapshot={snapshot} inspect={inspect} />}{footers.get(index)?.map(turn => <TurnFooter key={turn.id} turn={turn} />)}</Fragment>)}{phase && <TurnIndicator phase={phase} snapshot={snapshot} now={now} inspect={inspect} jumpQuestion={id => { const cards = document.querySelectorAll(`[id="${questionCardId(id)}"]`); const card = cards[cards.length - 1]; card?.scrollIntoView({ block: "center", behavior: "smooth" }); }} />}{!items[node.id]?.length && <p className="muted">暂无消息</p>}</section>
   </div></aside>;
 }

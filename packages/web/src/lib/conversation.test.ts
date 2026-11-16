@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ItemRecord, RunSnapshot } from "@baton/protocol";
 import { createScenario, replay } from "../demo/scenario.js";
-import { conversationPhase, conversationRows, deliveryLabel, messageActions, nodeIsLive, quietSeconds, reconcileOutgoing, type OutgoingMessage } from "./conversation.js";
+import { conversationPhase, conversationRows, deliveryLabel, inFlightMessage, messageActions, nodeIsLive, outgoingMatches, pruneOutgoing, quietSeconds, reconcileOutgoing, type OutgoingMessage } from "./conversation.js";
 import { displayRunStatus, displayStatus } from "./derive.js";
 const base = Date.parse("2026-11-10T07:00:00Z");
 const ts = new Date(base).toISOString();
@@ -35,6 +35,24 @@ describe("message delivery", () => {
   it("never merges equal sequences across nodes", () => {
     expect(reconcileOutgoing([pending], { ...row, nodeId: "other" })).toEqual([pending]);
   });
+  it("falls back to same-node/text within two minutes without merging distinct known identities", () => {
+    const legacy = { ...row, ts: new Date(base + 119_000).toISOString(), item: { type: "user_message" as const, text: "hello", delivery: "turn" as const } };
+    expect(reconcileOutgoing([pending], legacy)[0]).toMatchObject({ acknowledged: true, itemSeq: 9, delivery: "turn" });
+    expect(conversationRows([legacy], [pending], "n")).toHaveLength(1);
+    expect(outgoingMatches(pending, { ...legacy, ts: new Date(base + 121_000).toISOString() })).toBe(false);
+    expect(outgoingMatches(pending, { ...legacy, nodeId: "other" })).toBe(false);
+    expect(outgoingMatches(pending, { ...legacy, item: { ...legacy.item, clientId: "different" } })).toBe(false);
+    const duplicate = { ...pending, clientId: "c2" };
+    expect(reconcileOutgoing([pending, duplicate], legacy).filter(message => message.acknowledged)).toHaveLength(1);
+  });
+  it("prunes persisted and stale outgoing records and only treats fresh unreconciled sending as in flight", () => {
+    expect(pruneOutgoing([pending], [row], base)).toEqual([]);
+    expect(pruneOutgoing([pending], [], base + 120_001)).toEqual([]);
+    expect(pruneOutgoing([pending], [], base + 119_999)).toEqual([pending]);
+    expect(inFlightMessage([pending], [], "n", base + 29_999)).toEqual(pending);
+    for (const message of [{ ...pending, state: "accepted" as const }, { ...pending, state: "failed" as const }, { ...pending, acknowledged: true }, { ...pending, ts: new Date(base - 30_000).toISOString() }]) expect(inFlightMessage([message], [], "n", base)).toBeUndefined();
+    expect(inFlightMessage([pending], [row], "n", base)).toBeUndefined();
+  });
 });
 describe("conversation live phase", () => {
   const original = replay(createScenario(base), base + 86_000);
@@ -67,6 +85,31 @@ describe("conversation live phase", () => {
     const edge = { ...original.delegations[0]!, fromNodeId: node.id, status: "running" as const };
     expect(phase([], { ...snapshot, delegations: [edge] })?.kind).toBe("children");
     expect(conversationPhase({ ...snapshot, turns: [] }, { ...node, status: "idle" }, [], base)).toBeNull();
+  });
+  it("never resurrects a completed idle turn from a stale accepted send or its final assistant text (08:14:38–08:17:10 regression)", () => {
+    const startedAt = "2026-11-16T08:14:38Z"; const endedAt = "2026-11-16T08:17:10Z";
+    const idle = { ...node, status: "idle" as const, updatedAt: endedAt, usage: { ...node.usage, inputTokens: 2_847_200 } };
+    const value = { ...snapshot, nodes: [idle], turns: [{ ...snapshot.turns[0]!, status: "completed" as const, startedAt, endedAt }] };
+    const rows: ItemRecord[] = [{ ...textRow("assistant_message"), ts: endedAt }];
+    const stale = { ...pending, nodeId: node.id, state: "accepted" as const, delivery: "turn" as const, ts: startedAt };
+    expect(conversationPhase(value, idle, rows, Date.parse(endedAt), Date.parse(endedAt), stale)).toBeNull();
+    expect(conversationPhase(value, idle, rows, Date.parse(endedAt) + 600_000, Date.parse(endedAt), { ...stale, state: "sending" })).toBeNull();
+    expect(nodeIsLive(value, idle)).toBe(false);
+  });
+  it("uses a running turn, blockers or a fresh sending message as the only liveness sources", () => {
+    const quiet = { ...snapshot, turns: [] }; const rows = [textRow("assistant_message")];
+    for (const status of ["starting", "running", "idle", "waiting_permission", "completed", "failed", "canceled", "replaced"] as const) expect(conversationPhase(quiet, { ...node, status }, rows, base)).toBeNull();
+    const sending = { ...pending, nodeId: node.id };
+    expect(conversationPhase(quiet, node, rows, base + 20_000, undefined, sending)?.kind).toBe("waiting");
+    expect(conversationPhase(quiet, node, rows, base + 30_000, undefined, sending)).toBeNull();
+    const staleTool = { ...original.toolSpans[0]!, nodeId: node.id, status: "running" as const };
+    expect(conversationPhase({ ...quiet, toolSpans: [staleTool] }, node, rows, base)).toBeNull();
+    const permission = { ...original.permissions[0]!, nodeId: node.id, status: "pending" as const };
+    expect(conversationPhase({ ...quiet, permissions: [permission] }, node, rows, base)?.kind).toBe("permission");
+    const question = { id: "async-question", nodeId: node.id, runId: snapshot.run.id, status: "pending" as const, question: "确认范围", blocking: false, delivery: "async" as const, askedAt: ts };
+    expect(conversationPhase({ ...quiet, questions: [question] }, node, rows, base)?.kind).toBe("question");
+    expect(phase()?.tokens).toBeUndefined();
+    expect(phase([], { ...snapshot, turns: [{ ...snapshot.turns[0]!, usage: { inputTokens: 1000, outputTokens: 160 } }] })?.tokens).toBe(1160);
   });
   it("links inline questions by card id and suppresses live indicators while paused", () => {
     const question = { id: "question-id", runId: snapshot.run.id, nodeId: node.id, question: "请选择", blocking: false, delivery: "inline" as const, source: "native" as const, status: "pending" as const, askedAt: ts };
