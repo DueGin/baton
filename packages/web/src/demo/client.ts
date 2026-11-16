@@ -13,6 +13,9 @@ import type { BatonClient, TeamPresetResult } from "../api.js";
 import { summarize, terminal } from "../lib/derive.js";
 import { createScenario, demoAgents } from "./scenario.js";
 import { agentMessageDemo } from "./messages.js";
+import { pullRequestDemo } from "./pull-requests.js";
+import { isOpenPr, linkedPullRequests, safePrUrl } from "../lib/pull-requests.js";
+import type { PullRequestRecord, ListPullRequestsResponse, LinkPullRequestRequest, PullRequestFeedbackRequest } from "@baton/protocol";
 import { demoNoticePrompt, demoBriefPrompt, demoResultsPrompt } from "./prompts.js";
 import { snapshotInbox, sortInbox, permissionPattern } from "../lib/inbox.js";
 import { matchPermissionRule } from "../lib/permission-rules.js";
@@ -28,7 +31,7 @@ export class DemoClient implements BatonClient {
   private inboxListeners = new Set<() => void>();
   private rules = new Map<string, PermissionRule>();
   private roundExtensions = new Map<string, number>();
-  private titleSettings: SettingsResponse = { titleModel: { enabled: true, baseUrl: "http://127.0.0.1:3425/v1", model: "demo-title-model", hasApiKey: false } };
+  private titleSettings: SettingsResponse = { titleModel: { enabled: true, baseUrl: "http://127.0.0.1:3425/v1", model: "demo-title-model", hasApiKey: false }, github: { ghFound: true, authenticated: true, ghPath: "gh", env: {}, trackMentioned: true } };
   private titleJobs = new Map<string, { at: number; force: boolean }>();
   private prompts = new Map<string, string>();
   private abandonedMessages = new Set<string>();
@@ -77,6 +80,9 @@ export class DemoClient implements BatonClient {
     this.emit(backgroundRun, { type: "run.updated", patch: { title: "后台服务 · Vite 与 Python", projectId: "project-atlas", titleSource: "human" } });
     demoBackground(backgroundRun.snapshot, now()).forEach(process => this.emit(backgroundRun, { type: "background", process }));
     const idle = idleScenario(now() - 9_000_000); idle.run.projectId = "project-notes"; idle.run.cwd = "/workspace/notes"; this.data.set(idle.run.id, { snapshot: idle, log: [], remaining: [] });
+    const prDemo = pullRequestDemo(now()); const prData: DemoRun = { snapshot: prDemo.snapshot, log: [], remaining: [] }; this.data.set(prDemo.snapshot.run.id, prData);
+    prDemo.items.forEach(row => this.emit(prData, { type: "item", nodeId: row.nodeId, itemSeq: row.seq, itemTs: row.ts, item: row.item }));
+    prDemo.prs.forEach(pr => this.emit(prData, { type: "pr", pr }));
   }
   agents = async () => structuredClone(demoAgents);
   runs = async (projectId?: string) => { this.advance(); return [...this.data.values()].map(data => summarize(data.snapshot)).filter(run => !projectId || run.projectId === projectId).reverse(); };
@@ -134,14 +140,42 @@ export class DemoClient implements BatonClient {
   }
   settings = async (): Promise<SettingsResponse> => structuredClone(this.titleSettings);
   async updateSettings(request: UpdateSettingsRequest): Promise<SettingsResponse> {
-    if (request.titleModel === null) this.titleSettings = {};
+    if (request.titleModel === null) { const { titleModel: _old, ...rest } = this.titleSettings; this.titleSettings = rest; }
     else if (request.titleModel) {
       const { apiKey, apiKeyEnv, ...fields } = request.titleModel;
       const old = this.titleSettings.titleModel ?? { enabled: false, baseUrl: "", model: "", hasApiKey: false };
-      this.titleSettings = { titleModel: { ...old, ...fields, hasApiKey: apiKey === undefined ? old.hasApiKey : Boolean(apiKey), apiKeyEnv: apiKeyEnv === null ? undefined : apiKeyEnv ?? old.apiKeyEnv } };
+      this.titleSettings = { ...this.titleSettings, titleModel: { ...old, ...fields, hasApiKey: apiKey === undefined ? old.hasApiKey : Boolean(apiKey), apiKeyEnv: apiKeyEnv === null ? undefined : apiKeyEnv ?? old.apiKeyEnv } };
     }
+    if (request.github === null) this.titleSettings.github = { ghFound: true, authenticated: true, trackMentioned: true };
+    else if (request.github) { this.titleSettings.github = { ...this.titleSettings.github, ghFound: true, authenticated: true, ...structuredClone(request.github) }; if (request.github.ghPath !== undefined && !request.github.ghPath.trim()) delete this.titleSettings.github.ghPath; }
     return this.settings();
   }
+  pullRequests = async (projectId?: string, state: "open" | "all" = "open"): Promise<ListPullRequestsResponse> => [...this.data.values()].flatMap(data => linkedPullRequests(data.snapshot).filter(pr => (!projectId || pr.projectId === projectId) && (state === "all" || isOpenPr(pr))).map(pr => ({ ...structuredClone(pr), runTitle: data.snapshot.run.title })));
+  private forPr(id: string): { data: DemoRun; pr: PullRequestRecord } {
+    for (const data of this.data.values()) { const pr = linkedPullRequests(data.snapshot).find(pr => pr.id === id); if (pr) return { data, pr }; }
+    throw new HttpError(404, "PR 不存在或已取消关联");
+  }
+  async linkPullRequest(runId: string, request: LinkPullRequestRequest): Promise<PullRequestRecord> {
+    const data = this.get(runId); const url = safePrUrl(request.url.trim()); if (!url) throw new HttpError(400, "PR URL 无效");
+    const parsed = new URL(url); const match = /\/(.+)\/-\/merge_requests\/(\d+)\/?$/.exec(parsed.pathname) ?? /\/([^/]+)\/([^/]+)\/(?:pull|pulls|pull-requests|pr)\/(\d+)\/?$/.exec(parsed.pathname);
+    if (!match) throw new HttpError(400, "请输入 PR 或 Merge Request 链接");
+    if (request.nodeId && !data.snapshot.nodes.some(node => node.id === request.nodeId)) throw new HttpError(400, "节点不属于本会话");
+    const forge = parsed.hostname === "github.com" ? "github" : parsed.pathname.includes("/merge_requests/") ? "gitlab" : "other";
+    const repo = match.length === 4 ? `${match[1]}/${match[2]}` : match[1]!; const number = Number(match.at(-1)); const id = `${runId}:${forge}:${repo}#${number}`; const old = data.snapshot.pullRequests?.find(pr => pr.id === id);
+    const pr: PullRequestRecord = old ? { ...old, unlinkedAt: undefined } : { id, runId, projectId: data.snapshot.run.projectId, nodeId: request.nodeId, source: "manual", url, forge, repo, number, title: `手动关联 PR #${number}`, state: "open", checks: { state: "pending", total: 1, passed: 0, failed: 0, pending: 1, failedChecks: [] }, createdAt: new Date(this.now()).toISOString() };
+    this.emit(data, { type: "pr", pr }); return structuredClone(pr);
+  }
+  async refreshPullRequest(id: string): Promise<void> {
+    const { data, pr } = this.forPr(id);
+    this.emit(data, { type: "pr", pr: { ...pr, error: undefined, lastCheckedAt: new Date(this.now()).toISOString(), ...(pr.checks.state === "pending" ? { checks: { ...pr.checks, state: "success", passed: pr.checks.total, pending: 0 } } : {}) } });
+  }
+  async feedbackPullRequest(id: string, request: PullRequestFeedbackRequest): Promise<void> {
+    const { data, pr } = this.forPr(id); const nodeId = request.nodeId ?? pr.nodeId ?? data.snapshot.run.rootNodeId;
+    const text = [`PR #${pr.number} ${pr.title ?? ""}\n${pr.url}`, ...(request.include.includes("checks") ? [`CI：${pr.checks.failed} 失败，${pr.checks.pending} 进行中`, ...pr.checks.failedChecks.map(check => `- ${check.name}${check.url ? ` ${check.url}` : ""}`)] : []), ...(request.include.includes("reviews") ? [`评审：${pr.reviewDecision ?? "暂无结论"}`, "请检查边界条件与回归测试，修复后更新 PR。"] : []), request.note ?? ""].filter(Boolean).join("\n");
+    await this.send(nodeId, text, undefined, "queue");
+    this.emit(data, { type: "pr", pr: { ...pr, lastFeedbackAt: new Date(this.now()).toISOString() } });
+  }
+  async unlinkPullRequest(id: string): Promise<void> { const { data, pr } = this.forPr(id); this.emit(data, { type: "pr", pr: { ...pr, unlinkedAt: new Date(this.now()).toISOString() } }); }
   async testTitleModel(request: TestTitleModelRequest): Promise<TestTitleModelResponse> {
     const value = { ...this.titleSettings.titleModel, ...request.titleModel };
     if (!value.baseUrl || !value.model) return { ok: false, error: "请填写 Base URL 和 Model", latencyMs: 120 };

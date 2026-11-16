@@ -1189,3 +1189,65 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .agent-message-stack .human-answer { margin: 4px 0; }
 @media (max-width: 650px) { .agent-card-counterpart span, .agent-card-time { display: none; } .agent-card-counterpart { max-width: 25%; } .agent-card-copy { opacity: 1; } .agent-card-row { gap: 5px; padding-left: 6px; padding-right: 6px; } }
 @media (prefers-reduced-motion: reduce) { .agent-card-state { animation: none !important; } }
+
+/* Pull requests: compact transcript cards and shared detail surface. */
+.composer-tools { gap: 7px; align-items: center; }
+.composer-tools:has(.pr-pill) { min-height: 25px; }
+.pr-popover-anchor { position: relative; }
+.pr-popover { width: min(560px, calc(100vw - 92px)); }
+.pr-list { overflow-y: auto; min-height: 0; padding: 0 12px 12px; }
+.pr-entry { padding: 11px 0; border-bottom: 1px solid var(--border); min-width: 0; font-size: 11px; }
+.pr-entry:last-child { border-bottom: 0; }
+.pr-mentioned { opacity: .76; }
+.pr-entry-heading { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.pr-entry-heading > svg { flex: none; }
+.pr-entry-heading > strong { overflow-wrap: anywhere; }
+.pr-entry-heading .pr-state { margin-left: auto; flex: none; }
+.pr-entry-title { font-size: 12px; font-weight: 600; margin: 6px 0; overflow-wrap: anywhere; }
+.pr-state { display: inline-flex; font-size: 9px; padding: 1px 5px; border: 1px solid currentColor; border-radius: 10px; color: var(--text-dim); white-space: nowrap; line-height: 1.5; }
+.pr-state-open { color: var(--green); }
+.pr-state-merged { color: var(--purple, #9866cf); }
+.pr-state-closed { color: var(--red); }
+.pr-state-draft { border-style: dashed; }
+.pr-details { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.pr-branches, .pr-detail-line, .pr-actions { display: flex; gap: 6px 12px; align-items: center; flex-wrap: wrap; }
+.pr-branches code { overflow-wrap: anywhere; font-size: 10px; }
+.pr-branches > span, .pr-detail-line { color: var(--text-dim); }
+.pr-checks { font-size: 10px; white-space: nowrap; }
+.pr-tone-red { color: var(--red); }
+.pr-tone-amber { color: var(--amber); }
+.pr-tone-blue { color: var(--blue); }
+.pr-tone-green { color: var(--green); }
+.pr-tone-purple { color: var(--purple, #9866cf); }
+.pr-tone-neutral { color: var(--text-dim); }
+.pr-pill { border-color: currentColor; }
+.pr-creator { display: flex; gap: 5px; align-items: center; min-width: 0; border: 0; padding: 0; background: none; color: var(--text); text-align: left; font: inherit; cursor: pointer; }
+.pr-creator:disabled { cursor: default; opacity: 1; }
+.pr-creator > span:not(.agent-mark) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pr-times { display: flex; flex-wrap: wrap; gap: 3px 10px; color: var(--text-dim); font-size: 9px; }
+.pr-actions { margin-top: 9px; }
+.pr-actions a { font-size: inherit; }
+.pr-failed-checks { padding: 0 0 0 14px; margin: 0; color: var(--red); overflow-wrap: anywhere; }
+.pr-failed-checks a { color: inherit; }
+.pr-link-form { display: flex; flex-wrap: wrap; align-items: end; gap: 7px; padding-top: 12px; }
+.pr-link-form .form-field { flex: 1 1 180px; }
+.pr-link-form .error-panel { width: 100%; }
+.pr-feedback-form, .pr-unlink-confirm { margin-top: 10px; padding: 9px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
+.pr-unlink-confirm { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; }
+.pr-list.is-compact { padding: 0; overflow: visible; }
+.inline-pr-card { margin-top: 4px; }
+.inline-pr-card .agent-card-row > .pr-checks { flex: none; }
+.inline-pr-card .agent-card-title { min-width: 45px; }
+.inline-pr-card .pr-entry { padding: 0; }
+.node-pr-badge, .project-pr-count { font-size: 9px; padding: 1px 4px; border: 1px solid currentColor; border-radius: 4px; }
+.github-settings h2 { display: flex; align-items: center; gap: 6px; }
+.github-detection { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; margin: 12px 0; }
+.github-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.github-fields > .form-field { margin: 12px 0; }
+.github-env-heading, .github-env-row { display: flex; gap: 7px; align-items: center; }
+.github-env-heading { justify-content: space-between; font-size: 12px; margin-top: 12px; }
+.github-env-row { margin-top: 7px; }
+.github-env-row > input { min-width: 0; flex: 1; width: 0; }
+.github-env-row > input:first-child { flex: .65; }
+.github-env-row > .icon-button { flex: none; }
+@media (max-width: 680px) { .pr-popover { left: -55px; } .inline-pr-card .pr-checks { display: none; } }
