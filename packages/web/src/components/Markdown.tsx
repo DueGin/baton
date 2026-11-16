@@ -1,8 +1,11 @@
 import { Children, isValidElement, memo, useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkBreaks from "remark-breaks";
+import remarkCjkFriendly from "remark-cjk-friendly";
+import remarkCjkFriendlyGfmStrikethrough from "remark-cjk-friendly-gfm-strikethrough";
 import rehypeHighlight from "rehype-highlight";
-import { codeFences, safeLink } from "../lib/markdown.js";
+import { codeFences, fixBareUrls, remarkBrTags, safeLink } from "../lib/markdown.js";
 import { useColorTheme } from "../lib/theme.js";
 import { MermaidBlock } from "./MermaidBlock.js";
 
@@ -11,7 +14,11 @@ import { CopyButton } from "./CopyButton.js";
 function plainChildren(children: ReactNode): string {
   return Children.toArray(children).map(child => typeof child === "string" || typeof child === "number" ? String(child) : isValidElement<{ children?: ReactNode }>(child) ? plainChildren(child.props.children) : "").join("");
 }
-export const Markdown = memo(function Markdown({ text, streaming = false }: { text: string; streaming?: boolean }) {
+// Chat-style text: single newlines are line breaks (no stray spaces between CJK lines).
+const REMARK_PLUGINS = [remarkGfm, remarkCjkFriendly, remarkCjkFriendlyGfmStrikethrough, remarkBreaks, remarkBrTags];
+export const Markdown = memo(function Markdown({ text: source, streaming = false }: { text: string; streaming?: boolean }) {
+  // Fence offsets, Mermaid stability and rendering all use the same normalized text.
+  const text = useMemo(() => fixBareUrls(source), [source]);
   const theme = useColorTheme();
   const [stableText, setStableText] = useState<string | null>(null);
   useEffect(() => { const timer = setTimeout(() => setStableText(text), 500); return () => clearTimeout(timer); }, [text]);
@@ -31,5 +38,5 @@ export const Markdown = memo(function Markdown({ text, streaming = false }: { te
       return language === "mermaid" ? <MermaidBlock code={code} complete={fence?.complete ?? false} stable={stableText === text} theme={theme} /> : <div className="code-block"><div className="code-language"><span>{language}</span><CopyButton text={code} /></div><pre>{children}</pre></div>;
     },
   }), [fences, stableText, text, theme]);
-  return <div className={`markdown theme-${theme}${streaming ? " streaming-text" : ""}`}><ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[[rehypeHighlight, { detect: false, plainText: ["mermaid"] }]]} urlTransform={url => safeLink(url) ?? ""} components={components}>{text}</ReactMarkdown></div>;
+  return <div className={`markdown theme-${theme}${streaming ? " streaming-text" : ""}`}><ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={[[rehypeHighlight, { detect: false, plainText: ["mermaid"] }]]} urlTransform={url => safeLink(url) ?? ""} components={components}>{text}</ReactMarkdown></div>;
 });

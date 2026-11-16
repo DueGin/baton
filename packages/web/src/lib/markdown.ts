@@ -21,3 +21,44 @@ export function codeFences(text: string): CodeFence[] {
   return result;
 }
 export function diagramReady(complete: boolean, stableForMs: number): boolean { return complete && stableForMs >= 500; }
+
+// Fullwidth / CJK characters never belong to a bare URL in agent prose ("…/create**。").
+const CJK = "\\u2E80-\\u2FFF\\u3000-\\u303F\\u3040-\\u30FF\\u3100-\\u31FF\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uAC00-\\uD7AF\\uF900-\\uFAFF\\uFE30-\\uFE4F\\uFF00-\\uFFEF";
+const BARE_URL = /(^|[^\w<(\[\]/"'=`])(https?:\/\/[^\s<>]+)/gu;
+const URL_END = new RegExp(`(\\*\\*|__|~~|[*_~]+$|[${CJK}])`, "u");
+
+/**
+ * GFM autolink literals swallow trailing emphasis markers and CJK punctuation when there is no
+ * space after the URL ("可以试 **http://127.0.0.1:25173/create**。" renders as a link ending in
+ * "create**。" with a literal "**" in front). Wrap such bare URLs in angle brackets so the URL ends
+ * exactly where it should and the surrounding emphasis parses. Code fences and inline code are left
+ * untouched.
+ */
+export function fixBareUrls(text: string): string {
+  const fences = codeFences(text);
+  let out = "", cursor = 0;
+  const prose = (chunk: string): string => chunk.split(/(`+[^`]*`+)/u).map((part, index) => index % 2 === 1 ? part : part.replace(BARE_URL, (match, lead: string, url: string) => {
+    const cut = URL_END.exec(url);
+    if (!cut || cut.index === 0) return match;
+    return `${lead}<${url.slice(0, cut.index)}>${url.slice(cut.index)}`;
+  })).join("");
+  for (const fence of fences) {
+    out += prose(text.slice(cursor, fence.start)) + text.slice(fence.start, fence.end);
+    cursor = fence.end;
+  }
+  return out + prose(text.slice(cursor));
+}
+
+interface MdNode { type: string; value?: string; children?: MdNode[] }
+/**
+ * Raw HTML is never rendered, but agents often write `<br>` (especially inside table cells).
+ * Turn exactly that tag into a Markdown line break; every other HTML node stays inert text.
+ */
+export function remarkBrTags() {
+  const walk = (node: MdNode): void => {
+    if (!node.children) return;
+    node.children = node.children.map(child => child.type === "html" && /^<br\s*\/?>$/iu.test((child.value ?? "").trim()) ? { type: "break" } : child);
+    node.children.forEach(walk);
+  };
+  return (tree: MdNode): void => walk(tree);
+}
