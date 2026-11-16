@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
+import { terminateProcessIds } from "@baton/providers";
 import { setTimeout as delay } from "node:timers/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -43,11 +44,12 @@ export class FakeSession implements DriverSession {
   private permissions = new Map<string, { request: PermissionRequest; resolve: (response: PermissionResponse) => void }>();
   private client?: Client; private connecting?: Promise<Client>;
   private supervisor?: ChildProcess;
+  private spawned = new Set<number>();
   constructor(readonly driver: FakeDriver, readonly spec: OpenSessionSpec) {}
   processIds(): number[] { return this.supervisor?.pid && this.supervisor.exitCode === null && this.supervisor.signalCode === null ? [this.supervisor.pid] : []; }
   private async spawnChild(command: string, args: string[], detached: boolean): Promise<number> {
     if (!this.supervisor) {
-      this.supervisor = spawn(process.execPath, ["-e", `const {spawn}=require('node:child_process');process.on('message',m=>{const c=spawn(m.command,m.args,{cwd:m.cwd,detached:m.detached,stdio:'ignore'});c.once('error',e=>process.send({id:m.id,error:e.message}));c.once('spawn',()=>{c.unref();process.send({id:m.id,pid:c.pid})})});`], { cwd: this.spec.cwd, stdio: ["ignore", "ignore", "ignore", "ipc"] });
+      this.supervisor = spawn(process.execPath, ["-e", `const {spawn}=require('node:child_process');process.on('message',m=>{const c=spawn(m.command,m.args,{cwd:m.cwd,detached:m.detached,stdio:'ignore'});c.once('error',e=>process.send({id:m.id,error:e.message}));c.once('spawn',()=>{c.unref();process.send({id:m.id,pid:c.pid})})});`], { cwd: this.spec.cwd, detached: process.platform !== "win32", stdio: ["ignore", "ignore", "ignore", "ipc"] });
     }
     const supervisor = this.supervisor, id = randomUUID();
     return new Promise<number>((resolve, reject) => {
@@ -57,7 +59,7 @@ export class FakeSession implements DriverSession {
       const message = (value: unknown): void => {
         if (!value || typeof value !== "object" || !("id" in value) || value.id !== id) return;
         cleanup();
-        if ("pid" in value && typeof value.pid === "number") resolve(value.pid);
+        if ("pid" in value && typeof value.pid === "number") { this.spawned.add(value.pid); resolve(value.pid); }
         else reject(new Error("error" in value ? String(value.error) : "Spawn failed"));
       };
       supervisor.on("message", message); supervisor.once("error", error); supervisor.once("exit", exit);
@@ -143,7 +145,7 @@ export class FakeSession implements DriverSession {
     this.permissions.delete(requestId); pending.resolve(response); this.emit({ type: "permission_resolved", requestId, response, turnId: this.active?.id });
   }
   pendingPermissions(): PermissionRequest[] { return [...this.permissions.values()].map((p) => p.request); }
-  async close(): Promise<void> { if (this.closed) return; this.closed = true; await this.interrupt(); await this.client?.close(); this.supervisor?.kill(); this.listeners.clear(); }
+  async close(): Promise<void> { if (this.closed) return; this.closed = true; await this.interrupt(); await this.client?.close(); await terminateProcessIds([...this.spawned, ...this.processIds()]); this.spawned.clear(); this.supervisor?.kill(); this.listeners.clear(); }
 }
 export class FakeDriverRegistry implements DriverRegistry {
   readonly drivers: Map<string, FakeDriver>;

@@ -10,7 +10,7 @@ import { FakeDriverRegistry } from "../driver/fake.js";
 import { Store } from "../store/index.js";
 import { DEFAULT_POLICY, Kernel, MessageError } from "../kernel/index.js";
 import { handleMcp } from "../mcp/index.js";
-import { Notifications, desktopNotifier, type Notifier } from "../notifications/index.js";
+import { NotificationHub, Notifications, desktopNotifier, notificationMode, type NotificationMode, type Notifier } from "../notifications/index.js";
 import { exportRun, type ExportFormat } from "../telemetry/index.js";
 import { Settings } from "../settings/index.js";
 import { Titles, type TitleGenerator } from "../titles/index.js";
@@ -23,6 +23,13 @@ export interface StartServerOptions {
   titleGenerator?: TitleGenerator;
   background?: BackgroundOptions;
   pullRequests?: PullRequestOptions;
+  notifications?: NotificationMode;
+  /** Injectable OS transport; notifier remains an application/test observer. */
+  osNotifier?: Notifier;
+  /** Internal platform injection for deterministic filesystem/capability tests. */
+  platform?: NodeJS.Platform;
+  /** Default-port base for tests; an explicit port always disables fallback. */
+  portBase?: number;
 }
 export interface BatonServer {
   home: string; port: number; token: string; url: string; server: Server; store: Store; kernel: Kernel; background: BackgroundRegistry; pullRequests: PullRequests;
@@ -64,15 +71,18 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
     if (options.fake) { const path = join(home, "demo-project"); await mkdir(path, { recursive: true }); await projects.create({ path, name: "Demo project" }); }
   } catch (error) { store.close(); await registry.shutdown(); throw error; }
   const settings = new Settings(home), titles = new Titles(settings, options.titleGenerator);
-  let desktop = process.platform === "darwin";
-  try { const config = await settings.config(), notifications = config.notifications; if (notifications && typeof notifications === "object" && "desktop" in notifications && typeof notifications.desktop === "boolean") desktop = notifications.desktop; }
+  const platform = options.platform ?? process.platform;
+  let hub: NotificationHub;
+  try { hub = new NotificationHub(notificationMode(await settings.config(), options.notifications, platform), options.osNotifier ?? (options.notifier ? () => {} : desktopNotifier), platform); }
   catch (error) { store.close(); throw error; }
-  const notify = options.notifier ?? (desktop ? desktopNotifier : () => {});
+  // Test/application injected notifiers still observe notifications independently of the OS mode.
+  const notify: Notifier = options.notifier ? async (event) => { await hub.notify(event); await options.notifier!(event); } : hub.notify;
   const notifications = new Notifications(store, notify, options.notificationCoalesceMs);
   let kernel: Kernel, background: BackgroundRegistry, pullRequests: PullRequests, port = 0;
   const streams = new Set<ServerResponse>();
   const webDist = resolve(options.webDist ?? fileURLToPath(new URL("../../../web/dist", import.meta.url)));
   const server = createServer((request, response) => {
+    if (shuttingDown) { json(response, 503, { error: { code: "SHUTTING_DOWN", message: "Daemon is shutting down" } }); return; }
     void route(request, response).catch((error: unknown) => {
       if (response.headersSent) { response.end(); return; }
       const message = error instanceof Error ? error.message : String(error);
@@ -80,6 +90,13 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
       json(response, status, { error: { code: `HTTP_${status}`, message } });
     });
   });
+  let shuttingDown = false;
+  function notificationStream(response: ServerResponse): void {
+    response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache, no-transform", connection: "keep-alive" }); response.flushHeaders(); streams.add(response);
+    const unsubscribe = hub.subscribe((event) => response.write(`event: notification\ndata: ${JSON.stringify(event)}\n\n`));
+    const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), 15000); heartbeat.unref();
+    response.once("close", () => { clearInterval(heartbeat); unsubscribe(); streams.delete(response); });
+  }
   function inboxStream(response: ServerResponse): void {
     response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache, no-transform", connection: "keep-alive" }); response.flushHeaders(); streams.add(response);
     let previous = JSON.stringify(store.inbox()), timer: NodeJS.Timeout | undefined;
@@ -138,6 +155,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
       }
       if (method === "GET" && path === "/api/inbox") { json(response, 200, store.inbox()); return; }
       if (method === "GET" && path === "/api/inbox/events") { inboxStream(response); return; }
+      if (method === "GET" && path === "/api/notifications/events") { notificationStream(response); return; }
       if (path === "/api/permission-rules") {
         if (method === "GET") { json(response, 200, store.rules()); return; }
         if (method === "POST") { json(response, 201, kernel.rules.create(record(await body(request)) as unknown as CreatePermissionRuleRequest)); return; }
@@ -148,7 +166,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
       if (method === "POST" && question) { const input = record(await body(request)); json(response, 200, await kernel.human.answer(question[1]!, input)); return; }
       const escalation = /^\/api\/escalations\/([^/]+)\/resolve$/.exec(path);
       if (method === "POST" && escalation) { json(response, 200, await kernel.human.resolve(escalation[1]!, record(await body(request)) as unknown as ResolveEscalationRequest)); return; }
-      if (method === "GET" && path === "/api/info") { json(response, 200, { name: "baton", version: "0.1.0", home, port, defaults: DEFAULT_POLICY }); return; }
+      if (method === "GET" && path === "/api/info") { json(response, 200, { name: "baton", version: "0.1.0", home, port, platform, features: { backgroundProcesses: platform !== "win32", notificationStream: true }, defaults: DEFAULT_POLICY }); return; }
       if (method === "GET" && path === "/api/agents") { json(response, 200, await kernel.agents()); return; }
       if (method === "POST" && path === "/api/agents/refresh") { await body(request); json(response, 200, await kernel.agents(true)); return; }
       if (path === "/api/runs") {
@@ -273,16 +291,32 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
     } catch { json(response, 404, { error: { code: "WEB_NOT_BUILT", message: "Console not built. Build packages/web or use the REST API." } }); }
   }
   try {
-    await new Promise<void>((resolveListening, reject) => { server.once("error", reject); server.listen(options.port ?? 7433, "127.0.0.1", () => { server.off("error", reject); resolveListening(); }); });
+    const base = options.port ?? options.portBase ?? 7433;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await new Promise<void>((resolveListening, reject) => {
+          const error = (err: Error): void => { server.off("listening", listening); reject(err); };
+          const listening = (): void => { server.off("error", error); resolveListening(); };
+          server.once("error", error); server.once("listening", listening); server.listen(base + attempt, "127.0.0.1");
+        }); break;
+      } catch (error) { if (options.port !== undefined || attempt >= 20 || !error || typeof error !== "object" || !("code" in error) || error.code !== "EADDRINUSE") throw error; }
+    }
   } catch (error) { notifications.close(); store.close(); await registry.shutdown(); throw error; }
   const address = server.address(); if (!address || typeof address === "string") throw new Error("Invalid server address"); port = address.port;
   const url = `http://127.0.0.1:${port}`;
   kernel = new Kernel(store, registry, { ...options, baseUrl: url, titles }); kernel.recover();
-  background = new BackgroundRegistry(store, () => kernel.processSources(), options.background);
+  background = new BackgroundRegistry(store, () => kernel.processSources(), { platform, ...options.background });
   pullRequests = new PullRequests(store, settings, { queue: (id, text) => kernel.queueFeedback(id, text), notify }, options.pullRequests);
-  await writeFile(join(home, "daemon.json"), JSON.stringify({ url, port, pid: process.pid }), { mode: 0o600 });
+  await writeFile(join(home, "daemon.json"), JSON.stringify({ url, port, pid: process.pid, startedAt: new Date().toISOString(), version: "0.1.0", spawnedBy: process.env.BATON_SPAWNED_BY === "desktop" ? "desktop" : "cli" }), { mode: 0o600 });
   let closing: Promise<void> | undefined;
   return { home, token, port, url, server, store, kernel, background, pullRequests, close() {
-    closing ??= (async () => { notifications.close(); await pullRequests.close(); await background.close(); await kernel.shutdown(); for (const stream of streams) stream.end(); const closed = new Promise<void>((resolveClosed, reject) => server.close((error) => error ? reject(error) : resolveClosed())); server.closeAllConnections(); await closed; store.close(); })(); return closing;
+    closing ??= (async () => {
+      shuttingDown = true; notifications.close(); hub.close();
+      for (const stream of streams) stream.end();
+      const closed = new Promise<void>((resolveClosed, reject) => server.close((error) => error ? reject(error) : resolveClosed())); server.closeAllConnections();
+      const results = await Promise.allSettled([pullRequests.close(), background.close(), kernel.shutdown()]);
+      await closed; store.close();
+      const failed = results.find((result) => result.status === "rejected"); if (failed?.status === "rejected") throw failed.reason;
+    })(); return closing;
   } };
 }

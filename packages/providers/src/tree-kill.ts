@@ -45,6 +45,9 @@ export function signalProcessTree(child: TreeKillTarget, signal: NodeJS.Signals)
         signalDirectChild(child, signal);
         return Promise.resolve();
     }
+    // Provider sessions are their own POSIX process group. Signaling the group also
+    // catches children that were reparented after their launcher exited.
+    if (process.platform !== "win32") { try { process.kill(-pid, signal); } catch { /* non-group fixture or already exited */ } }
     return new Promise((resolve) => {
         treeKill(pid, signal, (error) => {
             if (error) {
@@ -53,6 +56,12 @@ export function signalProcessTree(child: TreeKillTarget, signal: NodeJS.Signals)
             resolve();
         });
     });
+}
+/** Force-close captured session roots even if their control channel is unresponsive. */
+export async function terminateProcessIds(pids: number[]): Promise<void> {
+    await Promise.all([...new Set(pids)].filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid).map(async (pid) => {
+        await signalProcessTree({ pid, kill(signal) { try { process.kill(pid, signal ?? "SIGKILL"); return true; } catch { return false; } } }, "SIGKILL");
+    }));
 }
 function signalDirectChild(child: TreeKillTarget, signal: NodeJS.Signals): void {
     try {

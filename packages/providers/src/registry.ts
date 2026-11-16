@@ -2,7 +2,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
-import which from "which";
 import pLimit from "p-limit";
 import { z } from "zod";
 import type { Logger } from "pino";
@@ -13,6 +12,8 @@ import { CodexAppServerAgentClient } from "./providers/codex-agent.js";
 import { PiRpcAgentClient } from "./providers/pi-agent.js";
 import { errorText, record } from "./session.js";
 import { externalEnv } from "./process.js";
+import { findExecutable } from "./executable-resolution.js";
+import { processLaunch } from "./windows-command.js";
 export interface DetectedAgent extends ProviderCatalog {
     id: string;
     label: string;
@@ -116,7 +117,8 @@ export class ProviderRegistry {
                     return entry;
                 }
                 const env = externalEnv(definition.env);
-                const executable = await which(definition.command[0]!, { path: env.PATH });
+                const executable = await findExecutable(definition.command[0]!, env);
+                if (!executable) throw new Error(`Executable not found: ${definition.command[0]}`);
                 const command = [executable, ...definition.command.slice(1)];
                 entry.command = command;
                 entry.version = await probeVersion(command, env, this.options.timeoutMs ?? 5000);
@@ -143,7 +145,7 @@ export class ProviderRegistry {
 // Preserve package-runner prefixes for custom commands (Paseo generic ACP diagnostic behavior).
 export function versionProbeCommand(command: string[]): string[] {
     const executable = command[0]!;
-    const name = executable.split(/[\\/]/).at(-1);
+    const name = executable.split(/[\\/]/).at(-1)?.replace(/\.(?:exe|cmd|bat)$/i, "");
     if (!["npx", "bunx", "pnpm", "uvx"].includes(name ?? ""))
         return [executable, "--version"];
     const prefix: string[] = [];
@@ -164,7 +166,8 @@ export function versionProbeCommand(command: string[]): string[] {
 }
 export async function probeVersion(command: string[], env: NodeJS.ProcessEnv, timeoutMs: number): Promise<string> {
     const [executable, ...args] = versionProbeCommand(command);
-    return new Promise((resolve, reject) => execFile(executable!, args, { env, timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
+    const launch = processLaunch(executable!, args, env);
+    return new Promise((resolve, reject) => execFile(launch.command, launch.args, { env, windowsVerbatimArguments: launch.windowsVerbatimArguments, timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
         if (error)
             reject(new Error(`Version probe failed: ${error.message}\n${stderr.trim()}`));
         else

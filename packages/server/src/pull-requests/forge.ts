@@ -4,15 +4,18 @@ import { access } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { GithubSettings, PullRequestRecord } from "@baton/protocol";
+import { findExecutable, processLaunch } from "@baton/providers";
 
 export interface ForgeCommand { file: string; args: string[]; env: NodeJS.ProcessEnv; timeout: number; signal?: AbortSignal }
 export type ForgeRunner = (command: ForgeCommand) => Promise<string>;
 export const runForge: ForgeRunner = ({ file, args, env, timeout, signal }) => new Promise((resolve, reject) => {
-  execFile(file, args, { env, timeout, signal, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
+  const launch = processLaunch(file, args, env);
+  execFile(launch.command, launch.args, { env, windowsVerbatimArguments: launch.windowsVerbatimArguments, timeout, signal, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
     if (error) reject(new Error((stderr.trim() || error.message).slice(0, 2000))); else resolve(stdout);
   });
 });
 export async function executable(name: string, env: NodeJS.ProcessEnv, configured?: string): Promise<string | undefined> {
+  if (process.platform === "win32") return findExecutable(configured ?? name, env);
   const candidates = configured ? [configured.startsWith("~/") ? join(homedir(), configured.slice(2)) : configured] : [...(env.PATH ?? "").split(":").filter(Boolean).map((p) => join(p, name)), join(homedir(), ".local", "bin", name)];
   for (const file of candidates) {
     if (!isAbsolute(file)) continue;

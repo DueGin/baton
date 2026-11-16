@@ -5,23 +5,23 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { AgentEntry, CreateRunRequest, ProjectRecord, ProjectSummary, RunSnapshot, RunSummary } from "@baton/protocol";
 import { startServer } from "../index.js";
+import { installShutdown } from "./shutdown.js";
 const { values, positionals } = parseArgs({ allowPositionals: true, options: {
-  home: { type: "string" }, port: { type: "string" }, fake: { type: "boolean" }, refresh: { type: "boolean" }, project: { type: "string" }, cwd: { type: "string" }, model: { type: "string" }, mode: { type: "string" }, "auto-approve": { type: "boolean" }, follow: { type: "boolean" }, format: { type: "string" }, output: { type: "string", short: "o" }, help: { type: "boolean", short: "h" },
+  home: { type: "string" }, port: { type: "string" }, fake: { type: "boolean" }, notifications: { type: "string" }, "exit-on-stdin-close": { type: "boolean" }, refresh: { type: "boolean" }, project: { type: "string" }, cwd: { type: "string" }, model: { type: "string" }, mode: { type: "string" }, "auto-approve": { type: "boolean" }, follow: { type: "boolean" }, format: { type: "string" }, output: { type: "string", short: "o" }, help: { type: "boolean", short: "h" },
 } });
 const home = resolve(values.home ?? process.env.BATON_HOME ?? join(homedir(), ".baton"));
 async function main(): Promise<void> {
   const command = positionals[0];
   if (values.help || !command) {
-    console.log("baton serve [--port 7433] [--home DIR] [--fake]\nbaton agents [--refresh]\nbaton projects\nbaton projects add <path>\nbaton runs [--project ID|PATH]\nbaton run <agent> <prompt> --project ID|PATH [--cwd DIR] [--model ID] [--mode ID] [--auto-approve] [--follow]\nbaton export <runId> --format json|md|otlp [-o FILE]"); return;
+    console.log("baton serve [--port 7433] [--home DIR] [--fake] [--notifications client|os|off] [--exit-on-stdin-close]\nbaton agents [--refresh]\nbaton projects\nbaton projects add <path>\nbaton runs [--project ID|PATH]\nbaton run <agent> <prompt> --project ID|PATH [--cwd DIR] [--model ID] [--mode ID] [--auto-approve] [--follow]\nbaton export <runId> --format json|md|otlp [-o FILE]"); return;
   }
   if (command === "serve") {
-    const port = values.port === undefined ? 7433 : Number(values.port);
-    if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("Invalid port");
-    const daemon = await startServer({ home, port, fake: values.fake });
+    const port = values.port === undefined ? undefined : Number(values.port);
+    if (port !== undefined && (!Number.isInteger(port) || port < 0 || port > 65535)) throw new Error("Invalid port");
+    if (values.notifications !== undefined && !["client", "os", "off"].includes(values.notifications)) throw new Error("Invalid notifications mode");
+    const daemon = await startServer({ home, port, fake: values.fake, notifications: values.notifications as "client" | "os" | "off" | undefined });
     console.log(`baton listening at ${daemon.url}/#token=${daemon.token}`);
-    let closing = false;
-    const close = (): void => { if (!closing) { closing = true; void daemon.close().then(() => { process.exitCode = 0; }).catch((error: unknown) => { console.error(error); process.exitCode = 1; }); } };
-    process.once("SIGINT", close); process.once("SIGTERM", close); return;
+    installShutdown(daemon, { exitOnStdinClose: values["exit-on-stdin-close"] }); return;
   }
   const token = (await readFile(join(home, "token"), "utf8")).trim();
   let url = `http://127.0.0.1:${values.port ?? "7433"}`;

@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { lstat, readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import type { CreateProjectRequest, ListDirsResponse, PatchProjectRequest, ProjectRecord, ProjectSummary } from "@baton/protocol";
 import type { Store } from "../store/index.js";
+import { containsPath, directoryParent, pathKey, windowsRoots } from "./platform.js";
 
 export class ProjectError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 export type ProjectGit = (path: string, args: string[]) => Promise<string | undefined>;
@@ -31,17 +32,18 @@ function name(value: unknown): string {
 }
 export class Projects {
   private branches = new Map<string, { until: number; value: Promise<string | undefined> }>();
-  constructor(readonly store: Store, readonly runGit: ProjectGit = git, readonly clock: () => number = Date.now) {}
+  constructor(readonly store: Store, readonly runGit: ProjectGit = git, readonly clock: () => number = Date.now, readonly platform: NodeJS.Platform = process.platform) {}
+  private projectAt(path: string): ProjectRecord | undefined { return this.store.projects().find((p) => pathKey(p.path, this.platform) === pathKey(path, this.platform)); }
   async create(input: CreateProjectRequest): Promise<ProjectRecord> {
     if (input.name !== undefined) name(input.name);
-    const path = await directory(input.path), previous = this.store.projectAt(path);
+    const path = await directory(input.path), previous = this.projectAt(path);
     if (previous) {
       if (!previous.archived) return previous;
       const restored = { ...previous, archived: false, updatedAt: new Date().toISOString() }; this.store.saveProject(restored); return restored;
     }
     const gitRoot = await this.runGit(path, ["rev-parse", "--show-toplevel"]);
     // No await between the final lookup and write: concurrent aliases return one project.
-    const old = this.store.projectAt(path), ts = new Date().toISOString();
+    const old = this.projectAt(path), ts = new Date().toISOString();
     if (old) {
       if (!old.archived) return old;
       const next = { ...old, archived: false, updatedAt: ts }; this.store.saveProject(next); return next;
@@ -62,8 +64,8 @@ export class Projects {
     if (value !== undefined && typeof value !== "string") throw new ProjectError(400, "cwd must be a directory path");
     const project = this.store.project(projectId);
     if (project.archived) throw new ProjectError(400, "Project is archived");
-    const path = await directory(value ?? project.path), base = await directory(project.path), child = relative(base, path);
-    if (child === ".." || child.startsWith(`..${sep}`) || isAbsolute(child)) throw new ProjectError(400, "cwd must be inside the project directory");
+    const path = await directory(value ?? project.path), base = await directory(project.path);
+    if (!containsPath(base, path, this.platform)) throw new ProjectError(400, "cwd must be inside the project directory");
     if (this.store.project(projectId).archived) throw new ProjectError(400, "Project is archived");
     return path;
   }
@@ -83,18 +85,19 @@ export class Projects {
     for (const run of legacy) { const group = grouped.get(run.cwd) ?? []; group.push(run); grouped.set(run.cwd, group); }
     for (const [cwd, runs] of grouped) {
       let path = expandPath(cwd); try { path = await realpath(path); } catch { /* missing legacy projects stay registered */ }
-      let project = this.store.projectAt(path);
+      let project = this.projectAt(path);
       if (!project) {
         const gitRoot = await exists(path) ? await this.runGit(path, ["rev-parse", "--show-toplevel"]) : undefined;
         const ts = new Date().toISOString();
-        project = this.store.projectAt(path) ?? { id: randomUUID(), path, name: basename(path) || path, ...(gitRoot ? { gitRoot } : {}), createdAt: ts, updatedAt: ts };
+        project = this.projectAt(path) ?? { id: randomUUID(), path, name: basename(path) || path, ...(gitRoot ? { gitRoot } : {}), createdAt: ts, updatedAt: ts };
         this.store.saveProject(project);
       }
       for (const run of runs) if (!this.store.snapshot(run.id).run.projectId) this.store.append(run.id, { type: "run.updated", patch: { projectId: project.id } });
     }
   }
-  async dirs(value = homedir(), hidden = false): Promise<ListDirsResponse> {
-    const path = await directory(value), registered = new Set(this.store.projects().map((p) => p.path));
+  async dirs(value?: string, hidden = false): Promise<ListDirsResponse> {
+    if (this.platform === "win32" && (value === undefined || value === "")) return windowsRoots(homedir(), exists, this.store.projects().map((p) => p.path));
+    const path = await directory(value ?? homedir()), registered = new Set(this.store.projects().map((p) => pathKey(p.path, this.platform)));
     const entries = (await readdir(path, { withFileTypes: true })).filter((e) => (hidden || !e.name.startsWith(".")) && (e.isDirectory() || e.isSymbolicLink())).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
     const dirs: ListDirsResponse["dirs"] = [];
     for (let i = 0; i < entries.length && dirs.length < 500; i += 50) {
@@ -104,12 +107,12 @@ export class Projects {
           if (!(await stat(child)).isDirectory()) return undefined;
           const canonical = await realpath(child);
           let isGitRepo = false; try { await lstat(join(child, ".git")); isGitRepo = true; } catch { /* no git marker */ }
-          return { name: entry.name, path: canonical, isGitRepo, isProject: registered.has(canonical) };
+          return { name: entry.name, path: canonical, isGitRepo, isProject: registered.has(pathKey(canonical, this.platform)) };
         } catch { return undefined; }
       }));
       dirs.push(...batch.filter((d) => d !== undefined).slice(0, 500 - dirs.length));
     }
-    const parent = dirname(path);
-    return { path, ...(parent !== path ? { parent } : {}), home: homedir(), dirs };
+    const parent = directoryParent(path, this.platform);
+    return { path, ...(parent !== undefined ? { parent } : {}), home: homedir(), dirs };
   }
 }
