@@ -1,15 +1,17 @@
 import type { CSSProperties, ReactNode } from "react";
 import type { PermissionRecord, PermissionResponse } from "@baton/protocol";
-import { agentColors, statusLabels } from "../lib/derive.js";
+import { statusLabels } from "../lib/derive.js";
+import { AgentIcon, agentVendor, vendorColors } from "./AgentIcon.js";
 
 export function AgentMark({ agent, small = false }: { agent: string; small?: boolean }) {
-  return <span className={`agent-mark ${small ? "small" : ""}`} style={{ "--agent-color": agentColors[agent] ?? "#758799" } as CSSProperties}>{agent.slice(0, 1).toUpperCase()}</span>;
+  return <span className={`agent-mark ${small ? "small" : ""}`} title={agent} style={{ "--agent-color": vendorColors[agentVendor(agent)] } as CSSProperties}><AgentIcon agent={agent} size={small ? 16 : 24} /></span>;
 }
 export function Status({ status, dot = true }: { status: string; dot?: boolean }) {
   return <span className={`status status-${status}`}>{dot && <i className="status-dot" />}{statusLabels[status] ?? status}</span>;
 }
-export function Icon({ name, size = 18 }: { name: "pause" | "play" | "trash" | "clock" | "steer" | "lightning" | "undo" | "grip" | "up" | "down" | "warning" | "folder" | "server" | "edit" | "panel" | "inbox" | "graph" | "timeline" | "chat" | "agents" | "settings" | "plus" | "close" | "sun" | "moon" | "arrow" | "stop" | "chevron" | "refresh" | "check"; size?: number }) {
+export function Icon({ name, size = 18 }: { name: "copy" | "pause" | "play" | "trash" | "clock" | "steer" | "lightning" | "undo" | "grip" | "up" | "down" | "warning" | "folder" | "server" | "edit" | "panel" | "inbox" | "graph" | "timeline" | "chat" | "agents" | "settings" | "plus" | "close" | "sun" | "moon" | "arrow" | "stop" | "chevron" | "refresh" | "check"; size?: number }) {
   const paths: Record<typeof name, ReactNode> = {
+    copy: <><rect x="8" y="8" width="13" height="13" rx="2" /><path d="M16 8V3H3v13h5" /></>,
     folder: <path d="M3 6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v10H3V6Z" />,
     server: <><rect x="3" y="3" width="18" height="7" rx="2" /><rect x="3" y="14" width="18" height="7" rx="2" /><path d="M7 6.5h.01M7 17.5h.01M16 6.5h2M16 17.5h2" /></>,
     edit: <><path d="m15 4 5 5-11 11H4v-5L15 4Z" /><path d="m12 7 5 5" /></>,

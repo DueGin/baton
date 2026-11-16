@@ -106,7 +106,7 @@ describe("RunStore and protocol integration", () => {
     for (let round = 0; round < 2; round++) {
       await store.open(before.run.id); await store.loadItems(before.run.rootNodeId);
       const rows = store.getSnapshot().items[before.run.rootNodeId]!;
-      expect(rows.some(row => row.item.type === "user_message" && row.item.text.includes("<baton-notice>") && row.item.text.includes("独立审查后再交付"))).toBe(true);
+      expect(rows.some(row => row.item.type === "user_message" && row.item.text.includes('<baton-notice kind="team">') && row.item.text.includes("独立审查后再交付"))).toBe(true);
       store.close();
     }
   });

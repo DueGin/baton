@@ -20,7 +20,7 @@ describe("shared question cards", () => {
   });
   it("collapses answered cards to the saved answer and explains cancellation safely", () => {
     const answered = render({ ...question, status: "answered", answer: "当前项目；中文与权限", answers: { scope: ["当前项目"], checks: ["中文", "权限"] } });
-    expect(answered).toContain('<details class="question-answered"><summary>你的回答：当前项目；中文与权限</summary>'); expect(answered).not.toContain('open=""'); expect(answered).not.toContain("提交回答");
+    expect(answered).toContain('<details class="question-answered"><summary>你的回答：当前项目；中文与权限</summary>'); expect(answered).not.toContain('open=""'); expect(answered).not.toContain("提交回答"); expect(answered).toContain("已继续"); expect(answered).not.toContain("等待本轮继续");
     const canceled = render({ ...question, status: "canceled", cancelReason: "会话已暂停 <script>" });
     expect(canceled).toContain("提问已取消"); expect(canceled).toContain("会话已暂停 &lt;script&gt;"); expect(canceled).not.toContain("<script>"); expect(canceled).not.toContain("提交回答");
   });

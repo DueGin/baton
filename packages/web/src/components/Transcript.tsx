@@ -5,6 +5,8 @@ import { composerHeight } from "../lib/run-layout.js";
 import { clock, displayStatus, duration, tokens, treeOrder } from "../lib/derive.js";
 import { AgentMark, Empty, Icon, Status } from "./common.js";
 import type { RunStore } from "../store.js";
+import { AgentMessageCard } from "./AgentMessageCard.js";
+import { partAgentCards, toolAgentCard } from "../lib/agent-messages.js";
 import { parseBatonMessage, type BatonMessagePart } from "../lib/baton-messages.js";
 
 import { Markdown } from "./Markdown.js";
@@ -33,7 +35,12 @@ export function ToolDetail({ detail }: { detail: ToolCallDetail }) {
   }
 }
 
-function toolSummary(detail: ToolCallDetail): string {
+export function toolSummary(detail: ToolCallDetail, name = "tool"): string {
+  if (detail.type === "unknown") {
+    const input = detail.input;
+    const summary = typeof input === "string" ? input : input === undefined || input === null ? "" : JSON.stringify(input);
+    return `${name}${summary && summary !== "{}" ? ` · ${summary.replace(/\s+/g, " ").slice(0, 100)}` : ""}`;
+  }
   if (detail.type === "shell") return detail.command;
   if ("filePath" in detail) return detail.filePath;
   if (detail.type === "search") return detail.query;
@@ -41,24 +48,11 @@ function toolSummary(detail: ToolCallDetail): string {
   if (detail.type === "baton") return detail.tool;
   return detail.type;
 }
-function BatonMessage({ parts, snapshot, inspect }: { parts: BatonMessagePart[]; snapshot?: RunSnapshot; inspect?: (id: string) => void }) {
-  const openNode = (delegationId: string): string | undefined => {
-    const nodeId = snapshot?.delegations.find(edge => edge.id === delegationId)?.toNodeId;
-    return snapshot?.nodes.some(node => node.id === nodeId) ? nodeId : undefined;
-  };
-  return <div className="baton-message">{parts.map((part, index) => {
-    if (part.type === "answer") return <article key={index} className="protocol-card baton-answer-card"><div className="protocol-card-type">✓ 你的回答 <code>{part.questionId}</code></div><div className="protocol-card-body"><Markdown text={part.text} /></div></article>;
-    if (part.type === "notice") return <article key={index} className="protocol-card baton-notice-card"><div className="protocol-card-type">↪ 团队通知</div><div className="protocol-card-body"><Markdown text={part.text} /></div></article>;
-    if (part.type === "text") return <Markdown text={part.text} key={index} />;
-    if (part.type === "assignment") {
-      const nodeId = openNode(part.delegationId);
-      return <article key={index} className="protocol-card assignment-card"><div className="protocol-card-type"><span>↗ 任务书</span>{part.role && <span className="role-badge">{part.role}</span>}{part.readonly && <span className="tag">只读委派</span>}</div><button className="protocol-card-heading" disabled={!nodeId || !inspect} onClick={() => { if (nodeId) inspect?.(nodeId); }} title={nodeId ? "查看委派节点" : "委派节点不可用"}><strong>{part.title}</strong><span>↗</span></button><div className="protocol-card-body"><h4>任务</h4><Markdown text={part.task} />{part.context && <><h4>Context</h4><Markdown text={part.context} /></>}{part.acceptance.length > 0 && <><h4>验收标准</h4><ul>{part.acceptance.map((criterion, i) => <li key={i}><Markdown text={criterion} /></li>)}</ul></>}</div></article>;
-    }
-    return <Fragment key={index}>{part.results.map((result, i) => {
-      const nodeId = openNode(result.delegationId);
-      const badge = { success: "✓ 完成", partial: "◐ 部分完成", failed: "✗ 失败" }[result.outcome];
-      return <article key={`${result.delegationId}:${i}`} className={`protocol-card delivered-card outcome-${result.outcome}`}><div className="protocol-card-type"><span>↙ 结果送达</span><span className="result-outcome">{badge}</span></div><button className="protocol-card-heading" disabled={!nodeId || !inspect} onClick={() => { if (nodeId) inspect?.(nodeId); }} title={nodeId ? "查看子节点" : "委派节点不可用"}><strong>{result.title}</strong><span>↗</span></button><div className="protocol-card-body"><Markdown text={result.summary} />{result.resultText !== undefined && <details className="detail-disclosure"><summary>Result JSON</summary><pre>{result.resultText}</pre></details>}{result.artifactsText && <details className="detail-disclosure"><summary>Artifacts</summary><pre>{result.artifactsText}</pre></details>}{result.note && <Markdown text={result.note} />}</div></article>;
-    })}</Fragment>;
+function BatonMessage({ parts, row, node, snapshot, inspect }: { parts: BatonMessagePart[]; row: ItemRecord; node: NodeRecord; snapshot?: RunSnapshot; inspect?: (id: string) => void }) {
+  return <div className="baton-message agent-message-stack">{parts.map((part, index) => {
+    if (part.type === "text") return <Markdown key={index} text={part.text} />;
+    if (part.type === "answer") return <article key={index} className="message message-user_message human-answer"><div className="message-meta"><span className="user-avatar">U</span><strong>你的回答</strong><time dateTime={row.ts}>{clock(row.ts)}</time><code>{part.questionId}</code></div><Markdown text={part.text} /></article>;
+    return <Fragment key={index}>{partAgentCards(part, row, node, snapshot, index).map(card => <AgentMessageCard key={card.id} card={card} inspect={inspect} />)}</Fragment>;
   })}</div>;
 }
 
@@ -72,10 +66,12 @@ export function TranscriptRow({ row, node, snapshot, inspect, streaming = false,
   if (item.type === "user_message" && ["queued", "retracted"].includes(item.delivery ?? "")) return null;
   if (item.type === "user_message") {
     const parts = parseBatonMessage(item.text);
-    if (parts && !item.delivery && !outgoing) return <BatonMessage parts={parts} snapshot={snapshot} inspect={inspect} />;
+    if (parts && !item.delivery && !outgoing) return <BatonMessage parts={parts} row={row} node={node} snapshot={snapshot} inspect={inspect} />;
   }
+  const card = toolAgentCard(row, node, snapshot);
+  if (card) return <div className="agent-message-stack"><AgentMessageCard card={card} inspect={inspect} /></div>;
   if (item.type === "reasoning") return <ReasoningRow id={reasoningBlockId(row.nodeId, row.seq)} text={item.text} streaming={streaming} />;
-  if (item.type === "tool_call") return <details className={`tool-row tool-${item.status}`}><summary><span className="tool-type">{item.detail.type}</span><span className="tool-summary">{toolSummary(item.detail)}</span><span className="tool-state">{item.status === "completed" ? "✓" : item.status === "running" ? "◌" : "✗"}</span></summary><div className="tool-body"><ToolDetail detail={item.detail} />{item.error && <Markdown text={item.error} />}</div></details>;
+  if (item.type === "tool_call") return <details className={`tool-row tool-${item.status}`}><summary><span className="tool-type">{item.detail.type === "unknown" ? "tool" : item.detail.type}</span><span className="tool-summary">{toolSummary(item.detail, item.name)}</span><span className="tool-state">{item.status === "completed" ? "✓" : item.status === "running" ? "◌" : "✗"}</span></summary><div className="tool-body"><ToolDetail detail={item.detail} />{item.error && <Markdown text={item.error} />}</div></details>;
   if (item.type === "notice" || item.type === "error") return <div className={`notice-row ${item.type === "error" ? "error" : item.level}`}>{item.type === "error" ? "✗ " : "↳ "}<Markdown text={item.message} /></div>;
   if (item.type === "todo") return <div className="todo-row">{item.items.map((todo, index) => <div key={index}><span>{todo.status === "completed" ? "✓" : todo.status === "in_progress" ? "◉" : "○"}</span><Markdown text={todo.text} /></div>)}</div>;
   const delivery = item.type === "user_message" ? item.delivery ?? outgoing?.delivery : undefined;
