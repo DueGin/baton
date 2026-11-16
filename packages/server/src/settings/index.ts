@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { chmod, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { SettingsResponse, UpdateSettingsRequest } from "@baton/protocol";
+import type { GithubSettings, SettingsResponse, UpdateSettingsRequest } from "@baton/protocol";
 
 export interface StoredTitleModel {
   enabled: boolean;
@@ -32,6 +32,21 @@ function titleModel(value: unknown): StoredTitleModel {
   return { enabled, baseUrl, model, ...(input.apiKey ? { apiKey: input.apiKey as string } : {}), ...(apiKeyEnv ? { apiKeyEnv } : {}) };
 }
 
+function github(value: unknown): GithubSettings {
+  const input = object(value, "github");
+  if (input.ghPath !== undefined && (typeof input.ghPath !== "string" || !input.ghPath.trim() || input.ghPath.includes("\0"))) throw new Error("github.ghPath must be a nonempty path");
+  if (input.trackMentioned !== undefined && typeof input.trackMentioned !== "boolean") throw new Error("github.trackMentioned must be a boolean");
+  let env: Record<string, string> | undefined;
+  if (input.env !== undefined) {
+    const entries = object(input.env, "github.env"); env = {};
+    for (const [key, value] of Object.entries(entries)) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof value !== "string" || value.includes("\0")) throw new Error("github.env must contain valid environment names and string values");
+      env[key] = value;
+    }
+  }
+  return { ...(typeof input.ghPath === "string" ? { ghPath: input.ghPath.trim() } : {}), ...(env ? { env } : {}), ...(typeof input.trackMentioned === "boolean" ? { trackMentioned: input.trackMentioned } : {}) };
+}
+
 /** Read on each operation so edits by other daemon features survive a settings update. */
 export class Settings {
   readonly path: string;
@@ -56,16 +71,20 @@ export class Settings {
       const valid = titleModel(merged);
       next.titleModel = { ...merged, ...valid };
     }
+    if (input.github === null) delete next.github;
+    else if (input.github !== undefined) next.github = github({ ...(config.github ? object(config.github, "github") : {}), ...object(input.github, "github") });
     return next;
   }
+  async github(): Promise<GithubSettings> { const config = await this.config(); return config.github === undefined ? {} : github(config.github); }
   async model(update?: UpdateSettingsRequest["titleModel"]): Promise<StoredTitleModel | undefined> {
     const config = this.merge(await this.config(), { titleModel: update });
     return config.titleModel === undefined ? undefined : titleModel(config.titleModel);
   }
   private response(config: Record<string, unknown>): SettingsResponse {
-    if (config.titleModel === undefined) return {};
-    const { apiKey, ...model } = titleModel(config.titleModel);
-    return { titleModel: { ...model, hasApiKey: !!apiKey } };
+    const response: SettingsResponse = {};
+    if (config.titleModel !== undefined) { const { apiKey, ...model } = titleModel(config.titleModel); response.titleModel = { ...model, hasApiKey: !!apiKey }; }
+    if (config.github !== undefined) response.github = { ...github(config.github), ghFound: false };
+    return response;
   }
   async get(): Promise<SettingsResponse> { return this.response(await this.config()); }
   update(update: UpdateSettingsRequest): Promise<SettingsResponse> {

@@ -32,6 +32,15 @@ export function exportRun(store: Store, id: string, format: ExportFormat): strin
     lines.push("", "## Background processes", "", "| PID | Node | Status | Attribution | Ports | Command |", "| --- | --- | --- | --- | --- | --- |");
     for (const p of s.backgroundProcesses) lines.push(`| ${p.pid} | ${p.nodeId ?? ""} | ${p.status}${p.dismissed ? " (dismissed)" : ""} | ${p.attribution} | ${p.ports.join(", ")} | ${p.command.replaceAll("|", "\\|").replaceAll("\n", " ")} |`);
   }
+  if (s.pullRequests?.length) {
+    lines.push("", "## Pull requests", "", "| PR | State | Source / Node | Checks | Review | Branches |", "| --- | --- | --- | --- | --- | --- |");
+    const cell = (value: string): string => value.replaceAll("|", "\\|").replaceAll("\n", " ");
+    for (const p of s.pullRequests) {
+      lines.push(`| [${cell(p.repo)}#${p.number}](${p.url})${p.title ? ` ${cell(p.title)}` : ""} | ${p.state}${p.unlinkedAt ? " (unlinked)" : ""} | ${p.source} / ${p.nodeId ?? ""} | ${p.checks.state}: ${p.checks.passed} passed, ${p.checks.failed} failed, ${p.checks.pending} pending | ${p.reviewDecision ?? ""} | ${cell(p.headRef ?? "")} → ${cell(p.baseRef ?? "")} |`);
+      if (p.error) lines.push(`\nFetch error: ${p.error}`);
+      for (const c of p.checks.failedChecks) lines.push(`\n- Failed: ${c.name}${c.url ? ` (${c.url})` : ""}`);
+    }
+  }
   for (const d of s.delegations) {
     lines.push("", `## ${d.brief.title}`, "", d.brief.task);
     if (d.brief.context) lines.push("", `Context: ${d.brief.context}`);
@@ -55,5 +64,5 @@ function otlp(s: RunSnapshot, project?: { name: string; path: string }): unknown
     ...s.turns.map((t) => span(t.id, t.nodeId, `turn ${t.trigger}`, t.startedAt, t.endedAt, { "baton.turn.trigger": t.trigger, "gen_ai.usage.input_tokens": t.usage?.inputTokens, "gen_ai.usage.output_tokens": t.usage?.outputTokens, "baton.status": t.status }, t.status === "failed")),
     ...s.toolSpans.map((t) => span(t.id, t.turnId ?? t.nodeId, `execute_tool ${t.name}`, t.startedAt, t.endedAt, { "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": t.name, "gen_ai.tool.call.id": t.callId, "baton.status": t.status }, t.status === "failed")),
   ];
-  return { resourceSpans: [{ resource: { attributes: attributes({ "service.name": "baton", "service.version": "0.1.0", "baton.project.id": s.run.projectId, "baton.project.name": project?.name, "baton.project.path": project?.path, "baton.questions": JSON.stringify(s.questions), "baton.escalations": JSON.stringify(s.escalations), "baton.team": s.run.team ? JSON.stringify(s.run.team) : undefined, "baton.collaboration.mode": s.run.policy.mode ?? "dynamic" }) }, scopeSpans: [{ scope: { name: "baton", version: "0.1.0" }, spans }] }] };
+  return { resourceSpans: [{ resource: { attributes: attributes({ "service.name": "baton", "service.version": "0.1.0", "baton.project.id": s.run.projectId, "baton.project.name": project?.name, "baton.project.path": project?.path, "baton.pull_requests": JSON.stringify(s.pullRequests ?? []), "baton.questions": JSON.stringify(s.questions), "baton.escalations": JSON.stringify(s.escalations), "baton.team": s.run.team ? JSON.stringify(s.run.team) : undefined, "baton.collaboration.mode": s.run.policy.mode ?? "dynamic" }) }, scopeSpans: [{ scope: { name: "baton", version: "0.1.0" }, spans }] }] };
 }

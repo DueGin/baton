@@ -74,7 +74,7 @@ export class Projects {
       cached = { until: this.clock() + 10000, value: this.runGit(project.path, ["branch", "--show-current"]) }; this.branches.set(project.path, cached);
     }
     const gitBranch = present ? await cached?.value : undefined;
-    return { ...project, runCount: runs.length, activeRunCount: runs.filter((r) => r.status === "active").length, pendingTotal: runs.reduce((sum, r) => sum + r.pendingTotal, 0), backgroundCount: runs.reduce((sum, r) => sum + (r.backgroundCount ?? 0), 0), ...(runs.length ? { lastRunAt: runs.map((r) => r.createdAt).sort().at(-1)! } : {}), ...(gitBranch ? { gitBranch } : {}), exists: present };
+    return { ...project, runCount: runs.length, activeRunCount: runs.filter((r) => r.status === "active").length, pendingTotal: runs.reduce((sum, r) => sum + r.pendingTotal, 0), backgroundCount: runs.reduce((sum, r) => sum + (r.backgroundCount ?? 0), 0), openPrCount: runs.reduce((sum, r) => sum + (r.openPrCount ?? 0), 0), ...(runs.length ? { lastRunAt: runs.map((r) => r.createdAt).sort().at(-1)! } : {}), ...(gitBranch ? { gitBranch } : {}), exists: present };
   }
   async list(archived = false): Promise<ProjectSummary[]> { return Promise.all(this.store.projects().filter((p) => archived || !p.archived).map((p) => this.summary(p.id))); }
   async migrate(): Promise<void> {
