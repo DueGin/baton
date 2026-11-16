@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { terminateProcessIds } from "@baton/providers";
 import { BATON_TOOLS, LEAD_ONLY_TOOLS, emptyUsage, type AgentEntry, type AskHumanInput, type PermissionDecision, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionRequest, type PermissionResponse, type ReportResultInput, type FormTeamInput, type ReplaceMemberInput, type ReassignInput, type ReorderQueueResponse, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type SendMessageResponse, type SendMode, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
 import type { DriverEvent, DriverRegistry, DriverSession, OpenSessionSpec } from "../driver/types.js";
 import { Store } from "../store/index.js";
@@ -44,7 +45,7 @@ interface Runtime {
   interruptReason?: string;
   starting?: Promise<{ turnId: string }>;
 }
-export interface KernelOptions { baseUrl: string; maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; askTimeoutMinutes?: number; titles?: TitleNaming }
+export interface KernelOptions { baseUrl: string; maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; askTimeoutMinutes?: number; titles?: TitleNaming; platform?: NodeJS.Platform }
 export class Kernel {
   private runtimes = new Map<string, Runtime>();
   private identities = new Map<string, string>();
@@ -65,7 +66,7 @@ export class Kernel {
   readonly rules: PermissionRules;
   readonly projects: Projects;
   constructor(readonly store: Store, readonly registry: DriverRegistry, readonly options: KernelOptions) {
-    this.projects = new Projects(store);
+    this.projects = new Projects(store, undefined, undefined, options.platform);
     this.rules = new PermissionRules(store);
     this.human = new HumanInteraction(store, {
       activity: (id, activity) => { this.patchNode(id, { activity }); this.armStall(id); },
@@ -1026,7 +1027,14 @@ export class Kernel {
     this.human.shutdown();
     for (const waits of this.waits.values()) for (const finish of waits) finish(); this.waits.clear();
     for (const timer of this.deliveryTimers.values()) clearTimeout(timer); this.deliveryTimers.clear();
-    for (const [id, rt] of this.runtimes) { this.flushItem(id); rt.unsubscribe?.(); clearTimeout(rt.idleTimer); await rt.session?.interrupt(); await this.closeSession(id, this.paused(this.store.node(id).runId)); }
+    await Promise.all([...this.runtimes].map(async ([id, rt]) => {
+      this.flushItem(id); rt.unsubscribe?.(); clearTimeout(rt.idleTimer);
+      const pids = rt.session?.processIds?.() ?? [];
+      let timer: NodeJS.Timeout | undefined;
+      const force = new Promise<void>((resolve) => { timer = setTimeout(() => { void terminateProcessIds(pids).finally(resolve); }, 5000); });
+      const closing = (async () => { try { await rt.session?.interrupt(); } finally { await this.closeSession(id, this.paused(this.store.node(id).runId)); } })();
+      try { await Promise.race([closing, force]); } finally { clearTimeout(timer); }
+    }));
     await this.registry.shutdown();
     await Promise.all([...this.runtimes.values()].map((rt) => rt.chain));
   }

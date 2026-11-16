@@ -135,7 +135,7 @@ export class PullRequests {
     const run = this.store.snapshot(next.runId).run, attention = previous.checks.state !== "failure" && next.checks.state === "failure" || previous.reviewDecision !== "changes_requested" && next.reviewDecision === "changes_requested";
     const terminal = previous.state !== next.state && ["merged", "closed"].includes(next.state);
     if (terminal || attention && run.policy.prFeedback !== "off") {
-      await Promise.resolve(this.hooks.notify({ runId: run.id, title: `baton · ${run.title}`, body: `PR ${next.repo}#${next.number}: ${terminal ? next.state : next.checks.state === "failure" ? "CI checks failed" : "changes requested"}.` })).catch(() => {});
+      await Promise.resolve(this.hooks.notify({ runId: run.id, title: `baton · ${run.title}`, body: `PR ${next.repo}#${next.number}: ${terminal ? next.state : next.checks.state === "failure" ? "CI checks failed" : "changes requested"}.`, kind: "pr", route: `/runs/${run.id}` })).catch(() => {});
     }
     if (attention && run.policy.prFeedback === "auto" && (!next.lastFeedbackAt || this.clock() - Date.parse(next.lastFeedbackAt) >= 600000)) {
       try { await this.feedback(next.id, { include: ["checks", "reviews"] }); }

@@ -5,3 +5,6 @@ export { CodexAppServerAgentClient } from "./providers/codex-agent.js";
 export { PiRpcAgentClient } from "./providers/pi-agent.js";
 export { ProviderRegistry, probeVersion, versionProbeCommand } from "./registry.js";
 export type { DetectedAgent, ProviderRegistryOptions } from "./registry.js";
+export { findExecutable } from "./executable-resolution.js";
+export { processLaunch } from "./windows-command.js";
+export { terminateProcessIds } from "./tree-kill.js";
