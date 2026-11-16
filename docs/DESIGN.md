@@ -573,6 +573,11 @@ interface BatonDesktopBridge {
      - 代码块：语法高亮、语言标签、复制按钮。
      - 安全：不渲染原始 HTML；链接只允许 http、https、mailto，并在新窗口打开。
      - 流式中途 Markdown 没写完（比如代码围栏未闭合）时，也要能正常显示。
+     - **中文适配**：
+       - 强调符号紧挨中文全角标点时也要生效（remark-cjk-friendly）。
+       - 裸 URL 遇到 `**`、`~~` 或中文字符就截止，比如 "**http://x/create**。"。
+       - 单个换行按换行显示（remark-breaks）。
+       - 原始 HTML 里只把 `<br>` 当作换行，其余一律当文本显示。
      - 所有展示 agent 文本的地方都用同一个渲染器：消息、推理、任务书、结果卡片、详情抽屉、提问、通知、计划。
    - **Mermaid**：` ```mermaid ` 代码块渲染成图。
      - mermaid 按需懒加载，打成单独的 chunk。配置 `securityLevel:"strict"`，主题跟随明暗模式。

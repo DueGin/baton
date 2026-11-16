@@ -12,8 +12,14 @@ files:
   - '!dist/**/*.d.ts'
   - '!dist/.tsbuildinfo'
 extraResources:
+  # electron-builder drops node_modules from extraResources unless they are matched explicitly; the
+  # daemon runs from this tree with plain Node resolution, so ship its dependencies on their own.
   - from: staging/runtime
     to: runtime
+    filter: ['**/*', '!node_modules/**']
+  - from: staging/runtime/node_modules
+    to: runtime/node_modules
+    filter: ['**/*']
   - from: assets
     to: assets
     filter: ['icon.png']
