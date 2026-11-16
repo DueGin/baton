@@ -113,6 +113,28 @@ describe("RunStore and protocol integration", () => {
 });
 
 describe("optimistic sending", () => {
+  it("reconciles an item received before HTTP by the response itemSeq even without clientId", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(base);
+    const client = new DemoClient(() => base); let accept: ((value: { accepted: true; delivery: "turn"; itemSeq: number }) => void) | undefined;
+    vi.spyOn(client, "send").mockImplementation(() => new Promise(resolve => { accept = resolve; }));
+    const store = new RunStore(client); await store.open("run-conversation"); const snapshot = store.getSnapshot().snapshot!; const nodeId = snapshot.run.rootNodeId; await store.loadItems(nodeId);
+    const sending = store.sendMessage(nodeId, "client text");
+    store.apply({ type: "item", nodeId, itemSeq: 99, runId: snapshot.run.id, seq: snapshot.lastSeq + 1, ts: new Date(base).toISOString(), itemTs: new Date(base).toISOString(), item: { type: "user_message", text: "server normalized text", delivery: "turn" } });
+    accept!({ accepted: true, delivery: "turn", itemSeq: 99 }); await sending;
+    expect(store.getSnapshot().outgoing[0]).toMatchObject({ state: "accepted", acknowledged: true, itemSeq: 99, text: "server normalized text" });
+    await store.loadItems(nodeId, true); expect(store.getSnapshot().outgoing).toEqual([]); store.close();
+  });
+  it("prunes matched and >2 minute outgoing records on lazy reload without resurrecting a completed turn", async () => {
+    vi.useFakeTimers(); vi.setSystemTime("2026-11-16T08:14:38Z"); const sentAt = Date.now();
+    const client = new DemoClient(() => sentAt); vi.spyOn(client, "send").mockResolvedValue({ accepted: true, delivery: "turn", itemSeq: 99 });
+    const store = new RunStore(client); await store.open("run-conversation"); const snapshot = store.getSnapshot().snapshot!; const nodeId = snapshot.run.rootNodeId;
+    await store.sendMessage(nodeId, "优化创作页底部与计费展示");
+    vi.setSystemTime("2026-11-16T08:17:10Z");
+    await store.loadItems(nodeId, true); expect(store.getSnapshot().outgoing).toEqual([]);
+    vi.setSystemTime(sentAt); await store.sendMessage(nodeId, "legacy response");
+    vi.spyOn(client, "items").mockResolvedValue({ items: [{ seq: 99, nodeId, ts: new Date(sentAt).toISOString(), item: { type: "user_message", text: "legacy response", delivery: "turn" } }], lastSeq: 99 });
+    await store.loadItems(nodeId, true); expect(store.getSnapshot().outgoing).toEqual([]); store.close();
+  });
   it("shows an immediate row, accepts SSE before HTTP and does not regress an acknowledged send on HTTP failure", async () => {
     const client = new DemoClient(() => base); let rejectSend: (error: Error) => void = () => undefined;
     vi.spyOn(client, "send").mockImplementation(() => new Promise((_resolve, reject) => { rejectSend = reject; }));
@@ -202,7 +224,7 @@ describe("message actions", () => {
     await store.actOnMessage(nodeId, itemSeq, "steer");
     expect(store.getSnapshot().messageActions[key]).toMatchObject({ error: "消息状态已变化，已刷新。" });
     expect(store.getSnapshot().items[nodeId]!.find(row => row.seq === itemSeq)).toEqual(fresh);
-    expect(store.getSnapshot().outgoing.at(-1)?.delivery).toBe("turn");
+    expect(store.getSnapshot().outgoing).toEqual([]);
     store.close();
   });
   it("handles HTTP before SSE without creating a second message", async () => {
