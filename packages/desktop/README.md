@@ -39,7 +39,7 @@ Outputs are in `packages/desktop/release/`: macOS DMG and ZIP for arm64 and x64;
 
 `scripts/stage.mjs` traverses the installed production dependencies, including required peers, preserving nested npm resolution paths. It copies built server, protocol, providers, web, licenses, and a dependency manifest into `staging/runtime`. Workspace dependencies become portable directory copies rather than OS-specific symlinks. Electron copies this tree outside `app.asar`, so the daemon's ESM, worker files, SDK resources, and web assets work with Node APIs. No npm install is required on the end user's machine. The Claude Agent SDK is included; its optional bundled CLI binaries (about 220 MB per architecture) are omitted because the adapter explicitly supplies the user's CLI executable. No other runtime dependency is added for the desktop app.
 
-Simple placeholder SVG, PNG, ICO and ICNS assets are checked in. `scripts/icons.mjs` regenerates them deterministically without external image tools.
+The app icon comes from `assets/logo.png` (macOS-style tile, 1024 px) plus `assets/logo-small.png` (a tighter crop for the 16–48 px slots); see `docs/branding/`. `npm run icons:render -w @baton/desktop` rasterises them into `assets/icon-source/` (macOS only: QuickLook + sips) and packs `icon.png` / `icon.ico` / `icon.icns`. The rendered ladder is committed, so `npm run build` (and CI) only packs it with `scripts/icons.mjs` and needs no image tools; without `icon-source/` it falls back to a generated placeholder.
 
 On macOS, drag baton.app from the DMG into Applications. For a trusted unsigned build downloaded from the internet, remove quarantine if Gatekeeper blocks it:
 

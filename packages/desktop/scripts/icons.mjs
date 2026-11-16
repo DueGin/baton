@@ -1,6 +1,9 @@
-// Deterministic placeholder icon: three white baton strokes on a violet rounded tile.
-// Pure PNG/ICO/ICNS encoders keep dev/CI independent of ImageMagick and platform tools.
-import { mkdir, writeFile } from 'node:fs/promises';
+// Packs the app icon into icon.png / icon.ico / icon.icns. When assets/icon-source/<size>.png exist
+// (rendered from assets/logo.svg by scripts/render-icon.mjs) they are packed as-is; otherwise a
+// deterministic placeholder is drawn. Pure PNG/ICO/ICNS encoders keep dev/CI independent of
+// ImageMagick and platform tools.
+import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 const assets = fileURLToPath(new URL('../assets/', import.meta.url));
@@ -19,12 +22,18 @@ function png(size) {
   }
   return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), chunk('IHDR', header), chunk('IDAT', deflateSync(bytes)), chunk('IEND', Buffer.alloc(0))]);
 }
-await writeFile(`${assets}/icon.svg`, '<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 100 100"><rect x="4" y="4" width="92" height="92" rx="14" fill="#6550e0"/><path d="M23 27h11v44H23zM44.5 18h11v64h-11zM66 36h11v37H66z" fill="#f8f9ff"/></svg>\n');
-await writeFile(`${assets}/icon.png`, png(512));
-const icoImages = [16,32,48,64,128,256].map(size => ({ size, image: png(size) }));
+const sourceDir = `${assets}/icon-source`;
+const fromSource = existsSync(`${sourceDir}/1024.png`);
+const image = fromSource ? (size) => readFile(`${sourceDir}/${size}.png`) : async (size) => png(size);
+if (fromSource && existsSync(`${assets}/logo.svg`)) await copyFile(`${assets}/logo.svg`, `${assets}/icon.svg`);
+else if (fromSource) await rm(`${assets}/icon.svg`, { force: true }); // raster master: a stale placeholder SVG would only mislead
+else if (!fromSource) await writeFile(`${assets}/icon.svg`, '<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 100 100"><rect x="4" y="4" width="92" height="92" rx="14" fill="#6550e0"/><path d="M23 27h11v44H23zM44.5 18h11v64h-11zM66 36h11v37H66z" fill="#f8f9ff"/></svg>\n');
+await writeFile(`${assets}/icon.png`, await image(512));
+const icoImages = await Promise.all([16,32,48,64,128,256].map(async size => ({ size, image: await image(size) })));
 const ico = Buffer.alloc(6 + 16 * icoImages.length); ico.writeUInt16LE(1, 2); ico.writeUInt16LE(icoImages.length, 4); let offset = ico.length;
 for (const [index, { size, image }] of icoImages.entries()) { const start = 6 + index * 16; ico[start] = ico[start + 1] = size === 256 ? 0 : size; ico.writeUInt16LE(1, start + 4); ico.writeUInt16LE(32, start + 6); ico.writeUInt32LE(image.length, start + 8); ico.writeUInt32LE(offset, start + 12); offset += image.length; }
 await writeFile(`${assets}/icon.ico`, Buffer.concat([ico, ...icoImages.map(({ image }) => image)]));
-const icnsImages = [[128,'ic07'],[256,'ic08'],[512,'ic09'],[1024,'ic10']].map(([size,type]) => { const image = png(size), header = Buffer.alloc(8); header.write(type); header.writeUInt32BE(image.length + 8, 4); return Buffer.concat([header,image]); });
+const icnsImages = await Promise.all([[128,'ic07'],[256,'ic08'],[512,'ic09'],[1024,'ic10']].map(async ([size,type]) => { const data = await image(size), header = Buffer.alloc(8); header.write(type); header.writeUInt32BE(data.length + 8, 4); return Buffer.concat([header,data]); }));
 const icns = Buffer.alloc(8); icns.write('icns'); icns.writeUInt32BE(8 + icnsImages.reduce((sum,image) => sum + image.length, 0), 4);
 await writeFile(`${assets}/icon.icns`, Buffer.concat([icns,...icnsImages]));
+console.log(`icons: ${fromSource ? 'packed assets/icon-source' : 'placeholder'} → icon.png/.ico/.icns`);

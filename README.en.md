@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/branding/baton-icon.png" width="128" alt="baton"></p>
+
 # baton
 
 [中文](README.md) | **English**

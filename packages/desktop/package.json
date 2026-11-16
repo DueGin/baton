@@ -15,7 +15,8 @@
     "dist:mac": "npm run build && npm run stage && electron-builder --mac --arm64 --x64",
     "dist:win": "npm run build && npm run stage && electron-builder --win --x64",
     "smoke": "node scripts/smoke.mjs",
-    "test": "vitest run src"
+    "test": "vitest run src",
+    "icons:render": "node scripts/render-icon.mjs && node scripts/icons.mjs"
   },
   "devDependencies": {
     "electron": "45.3.2",
