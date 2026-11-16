@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { AgentEntry, CollaborationMode, CreateRunRequest, ProjectSummary, RunPolicy, TeamMemberSpec, TeamPreset } from "@baton/protocol";
+import { agentReady, unavailableMembers } from "../lib/agents.js";
 import { AdvancedPolicy } from "./AdvancedPolicy.js";
 import { AgentMark, Icon, Toggle } from "./common.js";
 import { AgentFields, MembersEditor, Modal } from "./TeamForms.js";
@@ -21,12 +22,12 @@ export function NewRun({ agents, presets, defaults, close, create, busy, demo, e
   const preset = presets.find(entry => entry.id === presetId);
   const chosenLead = mode === "preset" ? preset?.lead : lead;
   const available = agents.find(agent => agent.id === chosenLead?.agentId);
-  const issues = mode === "dynamic" ? validateMembers(members) : [];
+  const issues = mode === "dynamic" ? [...validateMembers(members), ...unavailableMembers(agents, members)] : mode === "preset" ? unavailableMembers(agents, preset?.members ?? []) : [];
   const subdirError = project ? subdirectoryPath(project.path, subdir).error : undefined;
   if (subdirError) issues.push(subdirError);
   if (!project?.exists) issues.push(project ? "项目目录不存在" : "请选择项目");
   if ((mode === "preset" ? preset?.members.length ?? 0 : members.length) > (advanced.maxTeamSize ?? defaults.maxTeamSize ?? 5)) issues.push("成员数超过最大团队成员数，请调整高级策略或名单");
-  return <Modal title="新建 Run" close={close} wide><form onSubmit={event => { event.preventDefault(); if (issues.length || !project) return; const payload = projectRunPayload(project, subdir, { ...(mode === "preset" ? { teamPresetId: presetId } : { agent: lead.agentId, model: lead.model, modeId: lead.modeId, thinking: lead.thinking }), ...(mode === "dynamic" && members.length ? { team: members.map(cleanMember) } : {}), prompt: prompt.trim(), policy: { ...defaults, ...advanced, autoApprove, mode, teamApproval } }); void create(payload).then(ok => { if (ok && chosenLead) saveProjectAgent(localStorage, projectId, chosenLead); }); }}>
+  return <Modal title="新建 Run" close={close} wide><form onSubmit={event => { event.preventDefault(); if (busy || issues.length || !project || !agentReady(available) || !prompt.trim()) return; const payload = projectRunPayload(project, subdir, { ...(mode === "preset" ? { teamPresetId: presetId } : { agent: lead.agentId, model: lead.model, modeId: lead.modeId, thinking: lead.thinking }), ...(mode === "dynamic" && members.length ? { team: members.map(cleanMember) } : {}), prompt: prompt.trim(), policy: { ...defaults, ...advanced, autoApprove, mode, teamApproval } }); void create(payload).then(ok => { if (ok && chosenLead) saveProjectAgent(localStorage, projectId, chosenLead); }); }}>
     <fieldset className="new-run-project-picker"><legend>项目（工作目录）</legend><input type="search" aria-label="搜索项目" placeholder="搜索项目名称或路径…" value={search} onChange={event => setSearch(event.target.value)} /><div className="project-picker-list" role="listbox" aria-label="选择项目">{availableProjects.filter(entry => `${entry.name} ${entry.path} ${entry.gitBranch ?? ""}`.toLowerCase().includes(search.toLowerCase()) || entry.id === projectId).map(entry => <button type="button" key={entry.id} role="option" aria-selected={entry.id === projectId} onClick={() => { setProjectId(entry.id); selectProject(entry.id); setLead(readProjectAgent(localStorage, entry.id) ?? defaultAgentSpec(agents)); setSubdir(""); }}><Icon name="folder" size={14} /><span><strong>{entry.name}{entry.gitBranch && <code>{entry.gitBranch}</code>}</strong><small>{entry.path}{!entry.exists ? " · 目录不存在" : ""}</small></span>{entry.id === projectId && <Icon name="check" size={13} />}</button>)}<button type="button" className="add-project-option" onClick={addProject}><Icon name="plus" size={14} />添加项目…</button></div></fieldset>
     <p className="muted">选择协作方式，让主导者按任务组队，或使用固定配置。</p>
     <fieldset className="collaboration-picker"><legend>协作方式</legend>{(["dynamic", "preset", "solo"] as const).map(value => <button type="button" key={value} className={mode === value ? "selected" : ""} onClick={() => setMode(value)}><strong>{collaborationLabels[value]}</strong><span>{value === "dynamic" ? "主导者按需求组队与调整" : value === "preset" ? "使用已保存的 lead 与角色" : "根节点独立处理，不委派"}</span></button>)}</fieldset>

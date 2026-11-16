@@ -1,0 +1,21 @@
+import { useState } from "react";
+import type { AgentEntry } from "@baton/protocol";
+import { agentGroup, agentGroupLabels, agentHomepage, agentReady, groupAgents } from "../lib/agents.js";
+import { AgentMark, Icon } from "./common.js";
+import { CopyButton } from "./CopyButton.js";
+
+export function AgentCatalogRow({ agent }: { agent: AgentEntry }) {
+  return <article className={`agent-catalog-row catalog-${agentGroup(agent)}`} data-agent-id={agent.id}>
+    <div className="agent-catalog-main"><AgentMark agent={agent.id} /><div className="agent-catalog-identity"><div><h3>{agent.label}</h3><span className="agent-kind-badge">{agent.kind === "native" ? "Native" : "ACP"}</span>{agent.source === "config" && <span className="tag custom-agent-badge">自定义</span>}</div><code>{agent.id}</code></div><span className="catalog-version">{agent.version ?? "未检测到版本"}{agent.minVersion && <small>要求 ≥{agent.minVersion}</small>}</span><span className={`catalog-availability availability-${agentGroup(agent)}`}>{agentGroupLabels[agentGroup(agent)]}</span></div>
+    <div className="agent-catalog-body"><div className="agent-catalog-meta"><span>{agent.models.length} models · {agent.modes.length} modes</span><div className="catalog-capabilities">{(["steer", "resume", "mcp", "reasoning"] as const).map(key => <span key={key} className={agent.capabilities[key] ? "enabled" : "unsupported"} title={`${key}: ${agent.capabilities[key] ? "支持" : "未报告支持"}`}>{agent.capabilities[key] ? "✓" : "−"} {key}</span>)}</div></div>
+      {agent.diagnostic && <p className={`catalog-diagnostic${agent.status === "error" ? " error-text" : ""}`}>{agent.diagnostic}</p>}{agent.notes && <p className="catalog-notes">{agent.notes}</p>}
+      <div className="catalog-install-row">{agent.installHint && <div className="catalog-install-command"><code title={agent.installHint}>{agent.installHint}</code><CopyButton text={agent.installHint} label={`复制 ${agent.label} 安装命令`} /></div>}{agentHomepage(agent.homepage) && <a href={agentHomepage(agent.homepage)} target="_blank" rel="noopener noreferrer">主页 ↗</a>}</div>
+      {(agent.models.length > 0 || agent.modes.length > 0) && <details className="catalog-model-disclosure"><summary>模型与模式</summary><div className="catalog-model-list">{agent.models.map(model => <div key={model.id}><strong>{model.label}</strong><code>{model.id}</code>{model.description && <small>{model.description}</small>}</div>)}</div><div className="catalog-tags">{agent.modes.map(mode => <span className="tag" key={mode.id}>{mode.label}{mode.isReadOnly ? " · readonly" : mode.isUnattended ? " · unattended" : ""}</span>)}</div></details>}
+      <div className="agent-catalog-checked">最近检测 {new Date(agent.checkedAt).toLocaleString("zh-CN", { hour12: false })}</div>
+    </div>
+  </article>;
+}
+export function AgentsPage({ agents, refresh, refreshing }: { agents: AgentEntry[]; refresh: () => void; refreshing: boolean }) {
+  const [query, setQuery] = useState(""); const groups = groupAgents(agents, query); const count = groups.reduce((sum, group) => sum + group.agents.length, 0);
+  return <div className="page-content agents-page"><div className="page-heading"><div><span className="eyebrow">LOCAL RUNTIME</span><h1>Agents</h1><p>检测本机 Native 与 ACP agent，安装或升级后重新检测即可使用。</p></div><button type="button" className="button" disabled={refreshing} onClick={refresh}><Icon name="refresh" size={16} />{refreshing ? "检测中…" : "重新检测"}</button></div><div className="agents-catalog-toolbar"><div className="agents-summary"><span className="green-text">● {agents.filter(agentReady).length} 已就绪</span><span>{agents.length} 个 agent</span></div><input type="search" aria-label="搜索 Agents" placeholder="搜索名称、模型、模式或诊断…" value={query} onChange={event => setQuery(event.target.value)} /></div><div className="agent-catalog-groups" aria-busy={refreshing}>{groups.filter(group => group.agents.length).map(group => <section key={group.key} className={`agent-catalog-group group-${group.key}`} aria-label={group.label}><h2>{group.label}<span>{group.agents.length}</span></h2><div>{group.agents.map(agent => <AgentCatalogRow key={agent.id} agent={agent} />)}</div></section>)}{!count && <div className="empty-state">{query ? "没有匹配的 agent，请尝试其他关键词。" : "尚未获得 agent 目录，点击重新检测。"}</div>}</div></div>;
+}

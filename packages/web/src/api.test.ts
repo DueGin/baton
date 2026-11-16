@@ -4,6 +4,11 @@ import type { RunEventEnvelope } from "@baton/protocol";
 
 afterEach(() => vi.unstubAllGlobals());
 describe("API transport", () => {
+  it("lists the catalog and redetects agents through the refresh endpoint", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => Response.json([])); vi.stubGlobal("fetch", fetchMock); const client = new ApiClient("token");
+    expect(await client.agents()).toEqual([]); expect(await client.agents(true)).toEqual([]);
+    expect(fetchMock.mock.calls.map(call => [call[0], (call[1] as RequestInit).method])).toEqual([["/api/agents", "GET"], ["/api/agents/refresh", "POST"]]);
+  });
   it("lists, links, refreshes, feeds back and unlinks PRs using globally unique encoded IDs", async () => {
     const fetchMock = vi.fn().mockImplementation(async () => Response.json({})); vi.stubGlobal("fetch", fetchMock); const client = new ApiClient("token"); const id = "run:github:org/repo#12";
     await client.pullRequests("project/1", "all"); await client.linkPullRequest("run/1", { url: "https://github.com/org/repo/pull/12", nodeId: "n1" }); await client.refreshPullRequest(id); await client.feedbackPullRequest(id, { include: ["checks", "reviews"], nodeId: "n1", note: "修复回归" }); await client.unlinkPullRequest(id);
