@@ -34,7 +34,9 @@ function titleModel(value: unknown): StoredTitleModel {
 
 function github(value: unknown): GithubSettings {
   const input = object(value, "github");
-  if (input.ghPath !== undefined && (typeof input.ghPath !== "string" || !input.ghPath.trim() || input.ghPath.includes("\0"))) throw new Error("github.ghPath must be a nonempty path");
+  // "" or null clears a previously configured path (automatic PATH lookup).
+  if (input.ghPath === null || (typeof input.ghPath === "string" && !input.ghPath.trim())) delete input.ghPath;
+  if (input.ghPath !== undefined && (typeof input.ghPath !== "string" || input.ghPath.includes("\0"))) throw new Error("github.ghPath must be a path");
   if (input.trackMentioned !== undefined && typeof input.trackMentioned !== "boolean") throw new Error("github.trackMentioned must be a boolean");
   let env: Record<string, string> | undefined;
   if (input.env !== undefined) {
