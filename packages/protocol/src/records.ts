@@ -48,6 +48,13 @@ export interface AgentEntry {
   defaultModeId?: string | null;
   /** From config profiles: when the orchestrating agent should pick this agent. */
   notes?: string;
+  /** How to install it when unavailable (shown on the Agents page), e.g. "npm i -g opencode-ai". */
+  installHint?: string;
+  homepage?: string;
+  /** Minimum supported CLI version; older installs are reported as error with a diagnostic. */
+  minVersion?: string;
+  /** "builtin" = shipped spec; "config" = user-defined in config.json agents. */
+  source?: "builtin" | "config";
   capabilities: {
     steer: boolean;
     resume: boolean;
