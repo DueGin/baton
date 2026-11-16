@@ -5,7 +5,7 @@ export { Store } from "./store/index.js";
 export { Kernel, DEFAULT_POLICY } from "./kernel/index.js";
 export { exportRun } from "./telemetry/index.js";
 
-export type { Notifier, DesktopNotification } from "./notifications/index.js";
+export type { Notifier, DesktopNotification, NotificationMode } from "./notifications/index.js";
 export { Settings, type StoredTitleModel } from "./settings/index.js";
 export { Titles, createTitleGenerator, sanitizeTitle, type TitleGenerator } from "./titles/index.js";
 export { BackgroundRegistry, type BackgroundOptions } from "./background/index.js";
