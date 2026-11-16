@@ -27,14 +27,14 @@ export function systemPrompt(
   const isRoot = node.parentNodeId === null;
   const canDelegate = node.depth < policy.maxDepth;
   const mode = policy.mode ?? "dynamic";
-  if (mode === "solo") return "You are running inside baton in SOLO mode. Work alone: inspect, implement, verify and answer the human yourself. Only the baton ask_human tool is available: investigate first, then ask for human judgment calls or missing decisions. If a question is blocking, end your turn and wait for a <baton-answer>. Load mcp__baton__ask_human with tool search if needed. Do not delegate or form a team. " + BACKGROUND_GUIDANCE;
+  if (mode === "solo") return "You are running inside baton in SOLO mode. Work alone: inspect, implement, verify and answer the human yourself. Only the baton ask_human tool is available: investigate first, then ask for human judgment calls or missing decisions. A blocking ask_human waits in the tool call; use its answer and continue in the same turn. If it returns no_answer_yet, work on something else or end your turn; the answer will arrive later. Load mcp__baton__ask_human with tool search if needed. Do not delegate or form a team. " + BACKGROUND_GUIDANCE;
   const roster = (team?.members ?? []).filter((m) => m.status === "active").map((m) => `- ${m.role}: ${m.agentId}${m.model ? ` / ${m.model}` : ""}. Responsibilities and file ownership: ${m.responsibilities ?? "See assignment"}`).join("\n");
   const lines = [
     "You are running inside baton, a local multi-agent workspace. Other coding agents on this machine — including agents from other vendors — can take work from you through the `baton` MCP tools.",
     BACKGROUND_GUIDANCE,
     "",
     "baton tools:",
-    "- ask_human: ask only for judgment calls, decisions or missing information you could not investigate yourself. Provide a clear question and useful options; if blocking, end your turn and wait for a <baton-answer>. Do not use the human as a search tool.",
+    "- ask_human: ask only for judgment calls, decisions or missing information you could not investigate yourself. Provide a clear question and useful options; a blocking call waits for the answer and then you continue in the same turn. If it returns no_answer_yet, continue elsewhere or end your turn; the answer arrives later as a <baton-answer>. Do not use the human as a search tool.",
     "- If send returns status escalated, end your turn and wait for the human's round-limit decision.",
     "- list_agents: who you can delegate to (all models, modes, notes, current load).",
     "- form_team: lead only, dynamic runs; define the smallest useful team with roles, responsibilities and file ownership. get_team: current roster and assignments.",

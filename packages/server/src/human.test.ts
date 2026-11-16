@@ -25,31 +25,35 @@ async function api<T>(s: BatonServer, path: string, method = "GET", body?: unkno
 async function create(s: BatonServer, policy: Partial<RunPolicy> = {}): Promise<RunSnapshot> { return s.kernel.createRun({ projectId: (await s.kernel.projects.create({ path: tmpdir() })).id, agent: "root", cwd: tmpdir(), prompt: "test", policy: { teamApproval: false, ...policy } }); }
 
 describe("human questions", () => {
-  it("asks a blocking question over MCP, suspends a child assignment and resumes on answer", async () => {
+  it("asks a blocking question over MCP and continues below the card in the same turn", async () => {
+    let received: unknown;
     const s = await setup({ root: idle, child: async (c) => {
-      if (c.turn === 1) { await c.call("ask_human", { question: "Which output format?", options: ["JSON", "Markdown"], blocking: true }); return; }
-      expect(c.prompt).toContain("<baton-answer question="); expect(c.prompt).toContain("Markdown");
+      received = await c.call("ask_human", { question: "Which output format?", options: ["JSON", "Markdown"], blocking: true });
+      c.text("Continued after answer");
       await c.call("report_result", { status: "success", summary: "Used Markdown" });
     } });
     const run = await create(s), d = await s.kernel.delegate(run.run.rootNodeId, { agent: "child", title: "Question", task: "x" });
-    await until(() => s.store.snapshot(run.run.id).questions.length === 1 && s.store.node(d.nodeId!).status === "idle");
+    await until(() => s.store.snapshot(run.run.id).questions.length === 1);
     const q = s.store.snapshot(run.run.id).questions[0]!;
-    expect(s.store.node(d.nodeId!).activity).toBe("等你回答: Which output format?"); expect(s.store.delegation(d.delegationId).status).toBe("running");
+    expect(s.store.node(d.nodeId!).activity).toBe("等你回答: Which output format?");
+    expect(q).toMatchObject({ source: "ask_human", delivery: "inline", anchor: { itemSeq: expect.any(Number), callId: expect.any(String), turnId: expect.any(String) } });
+    expect(received).toBeUndefined();
     await api(s, `/api/questions/${q.id}/answer`, "POST", { answer: "Markdown" });
     await until(() => s.store.delegation(d.delegationId).status === "completed");
-    expect(s.store.question(q.id).status).toBe("answered"); expect(s.store.snapshot(run.run.id).turns.some((t) => t.nodeId === d.nodeId && t.trigger === "user")).toBe(true);
+    expect(received).toMatchObject({ status: "answered", answer: "Markdown", answers: { q1: ["Markdown"] } });
+    expect(s.store.snapshot(run.run.id).turns.filter((t) => t.nodeId === d.nodeId)).toHaveLength(1);
     expect(exportRun(s.store, run.run.id, "md")).toContain("## Questions"); expect(exportRun(s.store, run.run.id, "otlp")).toContain("baton.questions");
     const snap = s.store.snapshot(run.run.id); expect(s.store.events(run.run.id).reduce(applyEvent, { ...snap, nodes: [], delegations: [], turns: [], toolSpans: [], permissions: [], questions: [], escalations: [], lastSeq: 0 })).toEqual(snap);
   });
-  it("delivers a nonblocking answer by steer while working, cancels pending questions on terminal", async () => {
+  it("delivers a nonblocking answer by steer while working, keeps asynchronous questions on completion", async () => {
     const s = await setup({ root: async (c) => { if (c.turn === 1) { await c.call("ask_human", { question: "Preference?", blocking: false }); await c.sleep(500); } }, child: async (c) => { await c.call("ask_human", { question: "Optional?", blocking: false }); c.text("Done anyway"); } });
     const run = await create(s); await until(() => s.store.snapshot(run.run.id).questions.length === 1);
     const q = s.store.snapshot(run.run.id).questions[0]!; await api(s, `/api/questions/${q.id}/answer`, "POST", { answer: "Blue" });
     await until(() => (s.kernel.registry as FakeDriverRegistry).get("root")!.sessions[0]!.steered.some((m) => m.includes("Blue")));
     const child = await s.kernel.delegate(run.run.rootNodeId, { agent: "child", title: "optional", task: "x" });
     await until(() => s.store.delegation(child.delegationId).status === "completed");
-    expect(s.store.snapshot(run.run.id).questions.find((q) => q.nodeId === child.nodeId)?.status).toBe("canceled");
-    await s.kernel.tool(run.run.rootNodeId, "ask_human", { question: "Still needed?", blocking: true }); await s.kernel.cancelRun(run.run.id);
+    expect(s.store.snapshot(run.run.id).questions.find((q) => q.nodeId === child.nodeId)?.status).toBe("pending");
+    await s.kernel.tool(run.run.rootNodeId, "ask_human", { question: "Still needed?", blocking: false }); await s.kernel.cancelRun(run.run.id);
     expect(s.store.snapshot(run.run.id).questions.filter((q) => q.status === "pending")).toHaveLength(0);
   });
   it("solo advertises only ask_human and calls it through real MCP", async () => {
@@ -180,7 +184,7 @@ describe("inbox, notifications and team cap", () => {
   });
   it("coalesces pending notifications per run and notifies completion with injected notifier", async () => {
     const sent: Array<{ runId: string; body: string }> = [];
-    const s = await setup({ root: async (c) => { await c.call("ask_human", { question: "One?", blocking: true }); await c.call("ask_human", { question: "Two?", blocking: true }); } }, { notifier: (n) => { sent.push(n); }, notificationCoalesceMs: 60 });
+    const s = await setup({ root: async (c) => { void c.call("ask_human", { question: "One?", blocking: true }).catch(() => {}); await c.call("ask_human", { question: "Two?", blocking: true }); } }, { notifier: (n) => { sent.push(n); }, notificationCoalesceMs: 60 });
     const run = await create(s); await until(() => sent.length === 1); expect(sent[0]?.body).toContain("2 item(s)");
     await delay(90); expect(sent).toHaveLength(1);
     const other = await setup({ root: idle }, { notifier: (n) => { sent.push(n); }, notificationCoalesceMs: 15 });

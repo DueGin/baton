@@ -37,6 +37,8 @@ export class PiRpcAgentClient implements AgentClient {
     }
 }
 class PiSession extends ProviderSession {
+    private longToolCalls = false;
+    supportsLongToolCalls(): boolean { return this.longToolCalls; }
     processIds(): number[] { return this.process?.processIds() ?? []; }
     private process!: JsonlRpcProcess;
     private sessionFile?: string;
@@ -81,11 +83,12 @@ class PiSession extends ProviderSession {
                 const builtin = commands.some(command => command.name === "mcp" && record(command.sourceInfo).path === "builtin:mcp");
                 const adapter = commands.some(command => /^mcp(?::\d+)?$/.test(text(command.name)) && command.source === "extension" && (!command.sourceInfo || JSON.stringify(command.sourceInfo).includes("pi-mcp-adapter")));
                 if (builtin) {
+                    session.longToolCalls = !!mcpServers.baton;
                     for (const [name, server] of Object.entries(mcpServers)) {
                         if (!/^[A-Za-z0-9_-]+$/.test(name) || server.type === "sse")
                             throw new Error("Pi builtin MCP requires simple server names and HTTP or stdio transport");
                     }
-                    builtinServers = Object.fromEntries(Object.entries(mcpServers).map(([name, server]) => [name, server.type === "stdio" ? { command: server.command, args: server.args, env: server.env } : { url: server.url, headers: server.headers }]));
+                    builtinServers = Object.fromEntries(Object.entries(mcpServers).map(([name, server]) => [name, { ...(server.type === "stdio" ? { command: server.command, args: server.args, env: server.env } : { url: server.url, headers: server.headers }), ...(name === "baton" ? { timeout: Math.ceil(Number(config.env?.MCP_TOOL_TIMEOUT ?? 3660000) / 1000) } : {}) }]));
                 }
                 else if (adapter) {
                     const env = { ...process.env, ...options.env, ...config.env };

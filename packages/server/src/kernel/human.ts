@@ -1,40 +1,77 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import type { AskHumanInput, EscalationRecord, NodeRecord, QuestionRecord, ResolveEscalationRequest } from "@baton/protocol";
+import type { AnswerQuestionRequest, AskHumanInput, EscalationRecord, NodeRecord, QuestionRecord, ResolveEscalationRequest } from "@baton/protocol";
 import type { Store } from "../store/index.js";
+import { questionAnswers } from "./questions.js";
 interface HumanHooks {
   activity(id: string, text: string): void;
   enqueue(id: string, text: string): void;
   cancel(id: string, reason: string): Promise<void>;
   followup(delegationId: string, message: string): Promise<void>;
+  nativeAnswer(question: QuestionRecord): Promise<void>;
 }
 export class HumanInteraction {
+  private waiting = new Map<string, (question: QuestionRecord) => void>();
+  private answering = new Set<string>();
   constructor(readonly store: Store, readonly hooks: HumanHooks) {}
-  ask(node: NodeRecord, input: AskHumanInput): { questionId: string; status: "pending" } {
-    const question: QuestionRecord = { ...input, id: randomUUID(), runId: node.runId, nodeId: node.id, status: "pending", askedAt: new Date().toISOString() };
+  async ask(node: NodeRecord, input: AskHumanInput, anchor: QuestionRecord["anchor"], timeoutMs: number, forceAsync = false): Promise<unknown> {
+    const inline = input.blocking && !forceAsync;
+    const question: QuestionRecord = { ...input, id: randomUUID(), runId: node.runId, nodeId: node.id, source: "ask_human", delivery: inline ? "inline" : "async", prompts: [{ id: "q1", question: input.question, options: (input.options ?? []).map((label) => ({ label })), multiSelect: input.multiSelect, allowFreeText: true }], anchor, status: "pending", askedAt: new Date().toISOString() };
     this.store.append(node.runId, { type: "question", question });
     if (question.blocking) this.hooks.activity(node.id, `等你回答: ${question.question}`);
-    return { questionId: question.id, status: "pending" };
+    if (!inline) return { questionId: question.id, status: "pending" };
+    return new Promise((resolve) => {
+      const finish = (q: QuestionRecord): void => {
+        clearTimeout(timer); this.waiting.delete(q.id);
+        resolve(q.status === "answered" ? { questionId: q.id, status: "answered", answer: q.answer, answers: q.answers } : { questionId: q.id, status: q.status === "canceled" ? "canceled" : "no_answer_yet" });
+      };
+      const timer = setTimeout(() => {
+        const current = this.store.question(question.id);
+        const asyncQuestion = { ...current, delivery: "async" as const };
+        this.store.append(node.runId, { type: "question", question: asyncQuestion }); finish(asyncQuestion);
+      }, timeoutMs); timer.unref();
+      this.waiting.set(question.id, finish);
+    });
   }
-  answer(id: string, answer: string): QuestionRecord {
-    z.string().trim().min(1).parse(answer);
+  async answer(id: string, input: string | AnswerQuestionRequest): Promise<QuestionRecord> {
     const q = this.store.question(id), node = this.store.node(q.nodeId);
     if (q.status !== "pending") throw new Error("Question is not pending");
-    if (["completed", "failed", "canceled", "replaced"].includes(node.status)) throw new Error("Question node is terminal");
-    const answered: QuestionRecord = { ...q, answer, status: "answered", answeredAt: new Date().toISOString() };
-    this.store.append(q.runId, { type: "question", question: answered });
-    this.hooks.enqueue(q.nodeId, `<baton-answer question="${q.id}">\n${answer}\n</baton-answer>`);
-    this.refreshActivity(q.nodeId); return answered;
+    if (q.source === "native" && ["canceled", "replaced"].includes(node.status)) throw new Error("Question node is terminal");
+    if (this.answering.has(id)) throw new Error("Question answer is already in progress");
+    const prompts = q.prompts ?? [{ id: "q1", question: q.question, options: (q.options ?? []).map((label) => ({ label })), allowFreeText: true }];
+    const result = questionAnswers(prompts, typeof input === "string" ? { answer: input } : input);
+    const answered: QuestionRecord = { ...q, ...result, status: "answered", answeredAt: new Date().toISOString() };
+    this.answering.add(id);
+    try {
+      this.store.append(q.runId, { type: "question", question: answered });
+      if (q.source === "native") await this.hooks.nativeAnswer(answered);
+      const waiting = this.waiting.get(id);
+      if (q.delivery === "inline" && waiting) waiting(answered);
+      else if (q.source !== "native") this.hooks.enqueue(q.nodeId, `<baton-answer question="${q.id}">\n${result.answer}\n${JSON.stringify(result.answers)}\n</baton-answer>`);
+      this.refreshActivity(q.nodeId); return answered;
+    } catch (error) {
+      if (q.source === "native") {
+        const ended = this.store.snapshot(q.runId).turns.some((turn) => turn.id === q.anchor?.turnId && turn.status !== "running");
+        this.store.append(q.runId, { type: "question", question: ended ? { ...q, status: "canceled", cancelReason: "Question turn ended while answering" } : q });
+      }
+      throw error;
+    }
+    finally { this.answering.delete(id); }
   }
   refreshActivity(id: string): void {
     const node = this.store.node(id), q = this.store.snapshot(node.runId).questions.find((q) => q.nodeId === id && q.blocking && q.status === "pending");
     if (q) this.hooks.activity(id, `等你回答: ${q.question}`);
     else if (node.activity?.startsWith("等你回答:")) this.hooks.activity(id, node.status === "running" ? "Thinking…" : "Idle");
   }
-  cancelQuestions(id: string): void {
+  endQuestions(id: string, reason: string, cancelAll = false, turnId?: string): void {
     const node = this.store.node(id);
-    for (const q of this.store.snapshot(node.runId).questions) if (q.nodeId === id && q.status === "pending") this.store.append(q.runId, { type: "question", question: { ...q, status: "canceled" } });
+    for (const q of this.store.snapshot(node.runId).questions) if (q.nodeId === id && q.status === "pending" && (!turnId || !q.anchor?.turnId || q.anchor.turnId === turnId)) {
+      const next: QuestionRecord = cancelAll || q.source === "native" ? { ...q, status: "canceled", cancelReason: reason } : { ...q, delivery: "async" };
+      if (next.status !== q.status || next.delivery !== q.delivery) this.store.append(q.runId, { type: "question", question: next });
+      this.waiting.get(q.id)?.(next);
+    }
   }
+  shutdown(): void { for (const run of this.store.list()) for (const node of this.store.snapshot(run.id).nodes) this.endQuestions(node.id, "Daemon restarted"); }
   stall(node: NodeRecord, milliseconds: number): EscalationRecord {
     const record = this.escalate({ nodeId: node.id, runId: node.runId, delegationId: node.delegationId ?? undefined, kind: "stall", detail: `${node.title} (${node.agentId}) has sent no driver events for ${(milliseconds / 60000).toFixed(2)} minutes. Last activity: ${node.activity ?? "unknown"}.` });
     if (node.parentNodeId) this.hooks.enqueue(node.parentNodeId, `<baton-notice>\nDelegation ${node.delegationId} appears stalled (${record.id}). Consider send, reassign or cancel.\n${record.detail}\n</baton-notice>`);

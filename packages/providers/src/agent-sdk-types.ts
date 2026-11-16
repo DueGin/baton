@@ -283,6 +283,8 @@ export type AgentStreamEvent = {
     error?: string;
 };
 export interface AgentSession {
+    /** Whether this session applied a long MCP tool timeout for inline human questions. */
+    supportsLongToolCalls?(): boolean;
     /** Agent runtime processes, for baton background-process attribution. */
     processIds?(): number[];
     readonly sessionId: string | null;

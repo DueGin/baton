@@ -18,7 +18,7 @@ import { BackgroundRegistry, type BackgroundOptions } from "../background/index.
 import { Projects, ProjectError } from "../projects/index.js";
 export interface StartServerOptions {
   home?: string; port?: number; registry?: DriverRegistry; fake?: boolean; webDist?: string;
-  maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; notifier?: Notifier; notificationCoalesceMs?: number;
+  maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; askTimeoutMinutes?: number; notifier?: Notifier; notificationCoalesceMs?: number;
   titleGenerator?: TitleGenerator;
   background?: BackgroundOptions;
 }
@@ -132,7 +132,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
       const permissionRule = /^\/api\/permission-rules\/([^/]+)$/.exec(path);
       if (method === "DELETE" && permissionRule) { store.deleteRule(permissionRule[1]!); json(response, 200, { deleted: true }); return; }
       const question = /^\/api\/questions\/([^/]+)\/answer$/.exec(path);
-      if (method === "POST" && question) { const input = record(await body(request)); json(response, 200, kernel.human.answer(question[1]!, input.answer as string)); return; }
+      if (method === "POST" && question) { const input = record(await body(request)); json(response, 200, await kernel.human.answer(question[1]!, input)); return; }
       const escalation = /^\/api\/escalations\/([^/]+)\/resolve$/.exec(path);
       if (method === "POST" && escalation) { json(response, 200, await kernel.human.resolve(escalation[1]!, record(await body(request)) as unknown as ResolveEscalationRequest)); return; }
       if (method === "GET" && path === "/api/info") { json(response, 200, { name: "baton", version: "0.1.0", home, port, defaults: DEFAULT_POLICY }); return; }
@@ -175,10 +175,11 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
         catch (error) { throw new HttpError(502, error instanceof Error ? error.message : String(error)); }
         return;
       }
-      const run = /^\/api\/runs\/([^/]+)(?:\/(events|cancel|export))?$/.exec(path);
+      const run = /^\/api\/runs\/([^/]+)(?:\/(events|cancel|export|pause|resume))?$/.exec(path);
       if (run) {
         const id = run[1]!, action = run[2]; store.snapshot(id);
         if (method === "GET" && !action) { json(response, 200, store.snapshot(id)); return; }
+        if (method === "POST" && (action === "pause" || action === "resume")) { json(response, 200, action === "pause" ? await kernel.pauseRun(id) : await kernel.resumeRun(id)); return; }
         if (method === "PATCH" && !action) { json(response, 200, kernel.patchRun(id, record(await body(request)) as PatchRunRequest)); return; }
         if (method === "POST" && action === "cancel") {
           const input = request.headers["content-length"] === "0" || !request.headers["content-length"] && !request.headers["transfer-encoding"] ? {} : record(await body(request));
