@@ -95,7 +95,7 @@ describe("teams over actual HTTP MCP", () => {
     expect(delegates(s, run.run.id).find((d) => d.brief.title === "Nested")?.status).toBe("canceled");
     await until(() => s.store.delegation(successor.id).status === "completed"); await delay(150);
     const messages = s.store.items(run.run.rootNodeId).filter((r) => r.item.type === "user_message").map((r) => r.item.type === "user_message" ? r.item.text : "");
-    expect(messages.some((text) => text.includes("<baton-notice>"))).toBe(false);
+    expect(messages.some((text) => text.includes('<baton-notice kind="team">'))).toBe(false);
     expect(messages.some((text) => text.includes(`<result delegation="${old.delegationId}"`))).toBe(false);
     expect(s.store.delegation(old.delegationId).deliveredAt).toBeUndefined();
   });
@@ -105,7 +105,7 @@ describe("teams over actual HTTP MCP", () => {
     const old = await s.kernel.delegate(run.run.rootNodeId, { role: "builder", title: "Build", task: "x" });
     const reviewer = s.store.snapshot(run.run.id).run.team!.members.find((m) => m.role === "reviewer")!;
     const successor = await api<{ delegationId: string }>(s, `/api/delegations/${old.delegationId}/reassign`, "POST", { memberId: reviewer.id, reason: "Human changed owner" });
-    await until(() => s.store.items(run.run.rootNodeId).some((r) => r.item.type === "user_message" && r.item.text.includes("<baton-notice>")));
+    await until(() => s.store.items(run.run.rootNodeId).some((r) => r.item.type === "user_message" && r.item.text.includes('<baton-notice kind="team">')));
     expect(s.store.delegation(successor.delegationId).replaces).toBe(old.delegationId);
     const added = await api<TeamMember>(s, `/api/runs/${run.run.id}/team/members`, "POST", { role: "extra", agentId: "worker" });
     const task = await s.kernel.delegate(run.run.rootNodeId, { role: "extra", title: "Keep working", task: "x" });
@@ -170,7 +170,7 @@ describe("team approval gate", () => {
     await api(s, `/api/runs/${runId}/team/proposals/${proposalId}/reject`, "POST", { feedback: "Use a single specialist" });
     expect(delegates(s, runId).every((d) => d.status === "canceled")).toBe(true);
     expect(s.store.snapshot(runId).run.team!.members).toHaveLength(0);
-    await until(() => s.store.items(root).some((r) => r.item.type === "user_message" && r.item.text.includes("Use a single specialist")));
+    await until(() => s.store.items(root).some((r) => r.item.type === "user_message" && r.item.text.includes('<baton-notice kind="team">') && r.item.text.includes("Use a single specialist")));
     expect((s.kernel.registry as FakeDriverRegistry).get("worker")!.sessions).toHaveLength(0);
   });
   it("proposes ad-hoc additions and replacement; human changes bypass approval", async () => {
@@ -214,7 +214,7 @@ describe("team recovery and reassignment approval", () => {
     expect(s.store.notices()).toHaveLength(1);
     await s.close(); servers.splice(servers.indexOf(s), 1);
     const restored = await startServer({ home: s.home, port: 0, registry: new FakeDriverRegistry({ lead: idle, worker: idle }), deliveryDebounceMs: 10 }); servers.push(restored);
-    await until(() => restored.store.items(run.run.rootNodeId).some((r) => r.item.type === "user_message" && r.item.text.includes("Approved before restart")));
+    await until(() => restored.store.items(run.run.rootNodeId).some((r) => r.item.type === "user_message" && r.item.text.startsWith('<baton-notice kind="team">') && r.item.text.includes("Approved before restart")));
     expect(restored.store.notices()).toHaveLength(0);
   });
   it("keeps the predecessor running during an agent reassign proposal; rejection retains it", async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentEntry, RunPolicy, TeamRecord } from "@baton/protocol";
-import { systemPrompt } from "./prompts.js";
+import { correctionPrompt, followupPrompt, noticePrompt, systemPrompt } from "./prompts.js";
 
 const policy: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "dynamic" };
 const agent = (id: string, model: string): AgentEntry => ({
@@ -29,11 +29,13 @@ describe("systemPrompt", () => {
     const delegate = systemPrompt(child, policy);
     expect(delegate).not.toContain("You are the lead");
     expect(delegate).toContain("report_result exactly once");
+    expect(delegate).toContain("A <baton-followup> message comes from the agent that delegated to you");
   });
   it("explains approval, preset roles and member file ownership", () => {
     const team: TeamRecord = { source: "preset", members: [{ id: "member", status: "active", addedBy: "preset", addedAt: "2026-11-10T00:00:00.000Z", role: "builder", agentId: "codex", responsibilities: "Own src/builder.ts" }, { id: "reviewer", status: "active", addedBy: "preset", addedAt: "2026-11-10T00:00:00.000Z", role: "reviewer", agentId: "claude", responsibilities: "Own tests" }], changes: [], proposals: [], updatedAt: "2026-11-10T00:00:00.000Z" };
     const lead = systemPrompt(root, { ...policy, mode: "preset" }, [], team);
     expect(lead).toContain("Delegate only by role"); expect(lead).toContain("After proposing, end your turn");
+    expect(lead).toContain('<baton-notice kind="team">');
     const delegate = systemPrompt({ ...child, role: "builder", memberId: "member" }, policy, [], team);
     expect(delegate).toContain("Your team role: builder"); expect(delegate).toContain("Own src/builder.ts"); expect(delegate).toContain("reviewer: claude");
     expect(systemPrompt(root, { ...policy, teamApproval: false })).not.toContain("Roster approval is required");
@@ -42,6 +44,24 @@ describe("systemPrompt", () => {
     const text = systemPrompt({ ...child, depth: 3 }, policy);
     expect(text).toContain("maximum delegation depth (3)");
     expect(text).not.toContain("Delegate when part of your work");
+  });
+});
+
+describe("agent message tags", () => {
+  it("identifies follow-ups by delegation, escapes attributes and preserves the plain-text body", () => {
+    expect(followupPrompt('id&"<tag>', 'Check src/a.ts\nKeep "quotes" & <examples> as written.')).toBe(
+      '<baton-followup delegation="id&amp;&quot;&lt;tag>">\nCheck src/a.ts\nKeep "quotes" & <examples> as written.\n</baton-followup>',
+    );
+  });
+
+  it("wraps schema corrections in a correction notice", () => {
+    expect(correctionPrompt(["$.value is required", "$.count must be an integer"])).toBe(
+      '<baton-notice kind="correction">\nYour report_result `result` does not match the required JSON Schema:\n- $.value is required\n- $.count must be an integer\nFix it and call report_result again with a valid result, then end your turn.\n</baton-notice>',
+    );
+  });
+
+  it.each(["team", "system"] as const)("keeps %s notices distinct from follow-ups", (kind) => {
+    expect(noticePrompt(kind, "First line\nSecond line")).toBe(`<baton-notice kind="${kind}">\nFirst line\nSecond line\n</baton-notice>`);
   });
 });
 

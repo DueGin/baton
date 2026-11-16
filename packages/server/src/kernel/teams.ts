@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { AddMemberRequest, ApproveTeamProposalRequest, TeamProposal, DelegateInput, DelegationRecord, ReplaceMemberRequest, ReassignRequest, TeamActor, TeamChange, TeamMember, TeamMemberSpec, TeamPreset, TeamPresetInput, TeamRecord } from "@baton/protocol";
 import type { DriverRegistry } from "../driver/types.js";
 import type { Store } from "../store/index.js";
+import { noticePrompt } from "./prompts.js";
 const specSchema = z.object({ role: z.string().trim().min(1).max(40), agentId: z.string().min(1), model: z.string().optional(), modeId: z.string().optional(), thinking: z.string().optional(), responsibilities: z.string().optional() });
 const presetSchema = z.object({ name: z.string().trim().min(1).max(120), description: z.string().optional(), lead: specSchema.omit({ role: true, responsibilities: true }), members: z.array(specSchema).max(12) });
 const replacementSchema = specSchema.omit({ role: true }).extend({ reason: z.string().optional(), reassignActive: z.boolean().optional() });
@@ -174,7 +175,7 @@ export class Teams {
     if (!old.blockedByProposal) await this.hooks.cancelForReplacement(old.toNodeId, reason);
     const created = await this.hooks.create(old.fromNodeId, { ...old.brief, context, role: target.member.role, model: input.model, mode: input.modeId }, target, old.id);
     this.hooks.patchOld(old, created.delegationId, reason);
-    if (initiator !== old.fromNodeId) this.hooks.notify(old.fromNodeId, `<baton-notice>\nDelegation ${old.id} → ${created.delegationId} was reassigned to role "${target.member.role}" (${target.member.agentId}).\nReason: ${reason}\nThe predecessor is replaced; use the new delegation id for follow-ups and results.\n</baton-notice>`);
+    if (initiator !== old.fromNodeId) this.hooks.notify(old.fromNodeId, noticePrompt("team", `Delegation ${old.id} → ${created.delegationId} was reassigned to role "${target.member.role}" (${target.member.agentId}).\nReason: ${reason}\nThe predecessor is replaced; use the new delegation id for follow-ups and results.`));
     return { ...created, replaces: old.id };
   }
   private needsApproval(runId: string): boolean { return this.store.snapshot(runId).run.policy.teamApproval !== false; }
@@ -208,7 +209,7 @@ export class Teams {
         for (const spec of approved ?? []) this.addReady(runId, spec, proposal.by);
       }
       await this.hooks.release(runId, proposalId);
-      this.hooks.notify(proposal.nodeId, `<baton-notice>\nTeam proposal ${proposalId} approved.\nProposed: ${JSON.stringify(proposal.members ?? proposal.replace?.with)}\nApproved: ${JSON.stringify(approved ?? replacement)}\nFeedback: ${request.note ?? "(none)"}\nUse get_team for the current roster.\n</baton-notice>`);
+      this.hooks.notify(proposal.nodeId, noticePrompt("team", `Team proposal ${proposalId} approved.\nProposed: ${JSON.stringify(proposal.members ?? proposal.replace?.with)}\nApproved: ${JSON.stringify(approved ?? replacement)}\nFeedback: ${request.note ?? "(none)"}\nUse get_team for the current roster.`));
       return this.team(runId);
     });
   }
@@ -219,7 +220,7 @@ export class Teams {
       if (!proposal) throw new Error("Pending team proposal not found");
       this.change(runId, { ...team, proposals: team.proposals.map((p) => p.id === proposalId ? { ...p, status: "rejected", feedback, decidedAt: new Date().toISOString() } : p) }, { kind: "rejected", by: "human", proposalId, reason: feedback });
       await this.hooks.release(runId, proposalId);
-      this.hooks.notify(proposal.nodeId, `<baton-notice>\nTeam proposal ${proposalId} rejected. No proposed roster changes were applied; queued tasks for it were canceled.\nProposed: ${JSON.stringify(proposal.members ?? proposal.replace?.with)}\nFeedback: ${feedback}\nRevise the plan before proposing another team.\n</baton-notice>`);
+      this.hooks.notify(proposal.nodeId, noticePrompt("team", `Team proposal ${proposalId} rejected. No proposed roster changes were applied; queued tasks for it were canceled.\nProposed: ${JSON.stringify(proposal.members ?? proposal.replace?.with)}\nFeedback: ${feedback}\nRevise the plan before proposing another team.`));
       return this.team(runId);
     });
   }

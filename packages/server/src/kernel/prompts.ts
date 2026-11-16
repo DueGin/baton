@@ -3,6 +3,7 @@ import type { AgentEntry, DelegationRecord, NodeRecord, RunPolicy, TeamRecord } 
 /** Machine-readable tags the console parses (see packages/web transcript rendering). */
 export const ASSIGNMENT_TAG = "baton-assignment";
 export const RESULTS_TAG = "baton-results";
+export const FOLLOWUP_TAG = "baton-followup";
 
 const BATON_TOOL_NAMES = [
   "ask_human", "list_agents", "form_team", "get_team", "replace_member", "reassign", "delegate", "wait", "get_result", "send", "cancel", "status", "report_result",
@@ -77,7 +78,7 @@ export function systemPrompt(
       "Delegate when part of your work is separable and benefits from parallel work, a second opinion, or a different agent's strengths. Do it yourself when it is small or tightly coupled to what you are doing.",
     );
   }
-  if (policy.teamApproval !== false) lines.push("", "Roster approval is required: agent-proposed formation, additions and replacements return pending_approval plus proposalId. After proposing, end your turn and wait for the human's decision in a <baton-notice>; do not submit a second proposal. Any tasks assigned to pending roles remain queued until approval. The human can edit or reject your roster; use the approved specs and feedback.");
+  if (policy.teamApproval !== false) lines.push("", 'Roster approval is required: agent-proposed formation, additions and replacements return pending_approval plus proposalId. After proposing, end your turn and wait for the human\'s decision in a <baton-notice kind="team">; do not submit a second proposal. Any tasks assigned to pending roles remain queued until approval. The human can edit or reject your roster; use the approved specs and feedback.');
   if (roster) lines.push("", "Current team roster (respect file ownership):", roster);
   if (mode === "preset") lines.push("Preset rule: all delegation at every depth requires a team role. Use get_team for the current roster.");
   if (!isRoot && node.role) lines.push("", `Your team role: ${node.role}.`, `Your responsibilities: ${team?.members.find((m) => m.id === node.memberId)?.responsibilities ?? "Follow your assignment."}`, "Other roles own the files and responsibilities in the roster above; avoid file clashes.");
@@ -87,6 +88,7 @@ export function systemPrompt(
     lines.push(
       "",
       "You are a delegate. Your assignment arrives in a <baton-assignment> message. Stay within its scope and the files it gives you.",
+      "A <baton-followup> message comes from the agent that delegated to you and contains its follow-up instructions or answers.",
       "When done, call report_result exactly once (status success / partial / failed, a plain-text summary of what you did, what you found and what is left, plus `result` and `artifacts` when useful), then end your turn.",
       "If the assignment is read-only, do not modify files.",
       "Modify only the files assigned to you. Do not run git commit, push, merge, rebase, checkout, reset or stash; the lead handles integration.",
@@ -114,6 +116,14 @@ const INLINE_LIMIT = 8000;
 
 function escapeAttr(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+export function followupPrompt(delegationId: string, message: string): string {
+  return `<${FOLLOWUP_TAG} delegation="${escapeAttr(delegationId)}">\n${message}\n</${FOLLOWUP_TAG}>`;
+}
+
+export function noticePrompt(kind: "correction" | "team" | "system", message: string): string {
+  return `<baton-notice kind="${kind}">\n${message}\n</baton-notice>`;
 }
 
 /** One <result> block per delegation; the console keys its cards on the `delegation` attribute. */
@@ -144,9 +154,9 @@ export function resultsPrompt(delegations: DelegationRecord[]): string {
 }
 
 export function correctionPrompt(errors: string[]): string {
-  return [
+  return noticePrompt("correction", [
     "Your report_result `result` does not match the required JSON Schema:",
     ...errors.map((e) => `- ${e}`),
     "Fix it and call report_result again with a valid result, then end your turn.",
-  ].join("\n");
+  ].join("\n"));
 }

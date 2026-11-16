@@ -66,6 +66,7 @@ describe("kernel over real HTTP MCP", () => {
     await server.kernel.tool(run.run.rootNodeId, "send", { delegationId: a.delegationId, message: "again" });
     await until(() => server.store.delegation(a.delegationId).result?.summary === "report 2");
     expect(server.store.delegation(a.delegationId).round).toBe(2);
+    expect((server.kernel.registry as FakeDriverRegistry).get("reported")!.sessions[0]!.prompts[1]).toBe(`<baton-followup delegation="${a.delegationId}">\nagain\n</baton-followup>`);
     expect(server.store.snapshot(run.run.id).run.usage.inputTokens).toBeGreaterThan(0);
   });
   it("corrects outputSchema then fails after two corrections", async () => {
@@ -76,6 +77,11 @@ describe("kernel over real HTTP MCP", () => {
     await until(() => server.store.delegation(a.delegationId).status === "completed" && server.store.delegation(b.delegationId).status === "failed");
     expect(server.store.node(a.nodeId).turns).toBe(2); expect(server.store.node(b.nodeId).turns).toBe(3);
     expect(server.store.delegation(b.delegationId).result?.error).toContain("after 2 corrections");
+    for (const nodeId of [a.nodeId, b.nodeId]) {
+      const corrections = server.store.items(nodeId).filter((row) => row.item.type === "user_message").slice(1);
+      expect(corrections).toHaveLength(nodeId === a.nodeId ? 1 : 2);
+      for (const row of corrections) expect(row.item).toMatchObject({ text: expect.stringMatching(/^<baton-notice kind="correction">\n[\s\S]*\n<\/baton-notice>$/) });
+    }
   });
   it("wait any/all/timeout consumes results without duplicate delivery; get_result also consumes", async () => {
     const server = await setup({ root: idle, fast: async (c) => { await c.sleep(80); c.text("fast"); }, slow: async (c) => { await c.sleep(250); c.text("slow"); }, never: async (c) => { await c.sleep(10000); } }, { deliveryDebounceMs: 3000 });
