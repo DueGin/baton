@@ -14,6 +14,7 @@ import { errorText, record } from "./session.js";
 import { externalEnv } from "./process.js";
 import { findExecutable } from "./executable-resolution.js";
 import { processLaunch } from "./windows-command.js";
+import { ACP_AGENT_SPECS, AcpSpecFields, AcpAgentSpecSchema, scrubAcpEnv, versionDiagnostic, type AcpAgentSpec } from "./acp-spec.js";
 export interface DetectedAgent extends ProviderCatalog {
     id: string;
     label: string;
@@ -24,6 +25,10 @@ export interface DetectedAgent extends ProviderCatalog {
     version?: string;
     diagnostic?: string;
     notes?: string;
+    installHint?: string;
+    homepage?: string;
+    minVersion?: string;
+    source?: "builtin" | "config";
     capabilities: AgentCapabilities;
     checkedAt: string;
 }
@@ -37,23 +42,17 @@ interface Definition {
     notes?: string;
     models?: ProviderCatalog["models"];
     configError?: string;
+    spec?: AcpAgentSpec;
+    source?: "builtin" | "config";
 }
-// ACP command choices also reference acpx/src/agent-registry.ts (MIT, OpenClaw Team).
-const BUILTINS: Array<[
-    string,
-    string,
-    AgentProvider,
-    string[]
-]> = [
-    ["claude", "Claude Code", "claude", ["claude"]], ["codex", "Codex", "codex", ["codex"]], ["pi", "Pi", "pi", ["pi"]],
-    ["gemini", "Gemini CLI", "acp", ["gemini", "--acp"]], ["qwen", "Qwen Code", "acp", ["qwen", "--acp"]],
-    ["kimi", "Kimi Code", "acp", ["kimi", "acp"]], ["opencode", "OpenCode", "acp", ["opencode", "acp"]],
-    ["copilot", "GitHub Copilot", "acp", ["copilot", "--acp", "--stdio"]], ["cursor", "Cursor", "acp", ["cursor-agent", "acp"]],
-    ["goose", "Goose", "acp", ["goose", "acp"]], ["droid", "Factory Droid", "acp", ["droid", "exec", "--output-format", "acp"]],
-    ["hermes", "Hermes", "acp", ["hermes", "acp"]], ["openclaw", "OpenClaw", "acp", ["openclaw", "acp"]], ["kiro", "Kiro", "acp", ["kiro-cli-chat", "acp"]],
+const BUILTINS: Definition[] = [
+    { id: "claude", label: "Claude Code", provider: "claude", command: ["claude"], enabled: true, source: "builtin" },
+    { id: "codex", label: "Codex", provider: "codex", command: ["codex"], enabled: true, source: "builtin" },
+    { id: "pi", label: "Pi", provider: "pi", command: ["pi"], enabled: true, source: "builtin" },
+    ...ACP_AGENT_SPECS.map(spec => ({ id: spec.id, label: spec.label, provider: "acp" as const, command: spec.command, env: spec.env, notes: spec.notes, enabled: true, source: "builtin" as const, spec })),
 ];
 const ModelSchema = z.object({ id: z.string(), label: z.string(), description: z.string().optional(), isDefault: z.boolean().optional(), thinkingOptions: z.array(z.object({ id: z.string(), label: z.string(), isDefault: z.boolean().optional() })).optional() });
-const ProfileSchema = z.object({ extends: z.enum(["acp", "claude", "codex", "pi"]).optional(), command: z.array(z.string().min(1)).min(1).optional(), env: z.record(z.string(), z.string()).optional(), label: z.string().optional(), enabled: z.boolean().optional(), notes: z.string().optional(), models: z.array(ModelSchema).optional() });
+const ProfileSchema = z.object({ ...Object.fromEntries(Object.entries(AcpSpecFields).map(([key, schema]) => [key, schema.optional()])), extends: z.enum(["acp", "claude", "codex", "pi"]).optional(), command: z.array(z.string().min(1)).min(1).optional(), env: z.record(z.string(), z.string()).optional(), label: z.string().optional(), enabled: z.boolean().optional(), notes: z.string().optional(), models: z.array(ModelSchema).optional() }).strict();
 export interface ProviderRegistryOptions {
     home: string;
     logger?: Logger;
@@ -69,18 +68,18 @@ export class ProviderRegistry {
         force?: boolean;
     }): Promise<DetectedAgent[]> {
         if (!this.cache || options?.force)
-            this.cache = this.refresh(++this.generation).catch(error => BUILTINS.map(([id, label, provider, command]) => this.entry({ id, label, provider, command, enabled: true }, errorText(error))));
+            this.cache = this.refresh(++this.generation).catch(error => BUILTINS.map(definition => this.entry(definition, errorText(error))));
         return this.cache;
     }
     private entry(definition: Definition, diagnostic?: string): DetectedAgent {
         return {
             id: definition.id, label: definition.label, kind: definition.provider === "acp" ? "acp" : "native", status: "unavailable", enabled: definition.enabled,
-            command: definition.command, models: definition.models ?? [], modes: [], notes: definition.notes, checkedAt: new Date().toISOString(),
-            capabilities: { steer: definition.provider !== "acp", resume: true, reasoning: true, mcp: true }, ...(diagnostic ? { diagnostic } : {}),
+            command: definition.command, installHint: definition.spec?.installHint ?? `Install ${definition.label} and put ${definition.command[0]} on PATH.`, homepage: definition.spec?.homepage, minVersion: definition.spec?.minVersion, source: definition.source ?? "builtin", models: definition.models ?? [], modes: [], notes: definition.notes, checkedAt: new Date().toISOString(),
+            capabilities: { steer: definition.provider !== "acp", resume: true, reasoning: true, mcp: definition.spec?.mcp.http ?? true }, ...(diagnostic ? { diagnostic } : {}),
         };
     }
     private async definitions(): Promise<Definition[]> {
-        const definitions = new Map(BUILTINS.map(([id, label, provider, command]) => [id, { id, label, provider, command, enabled: true } as Definition]));
+        const definitions = new Map(BUILTINS.map(definition => [definition.id, { ...definition }]));
         let config: Record<string, unknown> = {};
         try {
             config = record(JSON.parse(await readFile(join(this.options.home, "config.json"), "utf8")));
@@ -99,7 +98,13 @@ export class ProviderRegistry {
             }
             const profile = parsed.data;
             const provider = profile.extends ?? previous?.provider ?? "acp";
-            definitions.set(id, { ...previous, ...profile, id, label: profile.label ?? previous?.label ?? id, provider, enabled: profile.enabled ?? previous?.enabled ?? true, command: profile.command ?? (previous && provider === previous.provider ? previous.command : undefined) ?? [provider === "acp" ? id : provider] });
+            const command = profile.command ?? (previous && provider === previous.provider ? previous.command : undefined) ?? [provider === "acp" ? id : provider];
+            const acpSpec = provider === "acp" ? AcpAgentSpecSchema.safeParse({
+                ...(previous?.spec ?? { homepage: "https://agentclientprotocol.com", installHint: `Install ${command[0]} and configure agents.${id}.command`, mcp: { supported: true, http: true, sse: true, stdio: true } }),
+                ...profile, id, label: profile.label ?? previous?.label ?? id, command,
+                env: { ...previous?.spec?.env, ...profile.env },
+            }) : undefined;
+            definitions.set(id, { ...previous, ...profile, id, label: profile.label ?? previous?.label ?? id, provider, enabled: profile.enabled ?? previous?.enabled ?? true, command, source: "config", ...(acpSpec ? acpSpec.success ? { spec: acpSpec.data } : { configError: `Invalid ACP spec: ${acpSpec.error.message}` } : {}) });
         }
         return [...definitions.values()];
     }
@@ -116,13 +121,15 @@ export class ProviderRegistry {
                     entry.diagnostic = "Disabled in config.json";
                     return entry;
                 }
-                const env = externalEnv(definition.env);
+                const env = scrubAcpEnv(externalEnv(definition.spec?.env, definition.env), definition.spec?.scrubEnv ?? []);
                 const executable = await findExecutable(definition.command[0]!, env);
                 if (!executable) throw new Error(`Executable not found: ${definition.command[0]}`);
                 const command = [executable, ...definition.command.slice(1)];
                 entry.command = command;
-                entry.version = await probeVersion(command, env, this.options.timeoutMs ?? 5000);
-                const options = { ...this.options, command, env: definition.env };
+                entry.version = await probeVersion(command, env, this.options.timeoutMs ?? 5000, definition.spec?.versionArgs);
+                const diagnostic = definition.spec ? versionDiagnostic(entry.version, definition.spec) : undefined;
+                if (diagnostic) { entry.status = "error"; entry.diagnostic = diagnostic; return entry; }
+                const options = { ...this.options, command, env: definition.env, spec: definition.spec };
                 const client = definition.provider === "claude" ? new ClaudeAgentClient(options) : definition.provider === "codex" ? new CodexAppServerAgentClient(options) : definition.provider === "pi" ? new PiRpcAgentClient(options) : new ACPAgentClient(options);
                 const catalog = await client.fetchCatalog();
                 entry.models = definition.models ?? catalog.models;
@@ -164,8 +171,8 @@ export function versionProbeCommand(command: string[]): string[] {
     }
     return [executable, ...prefix, "--version"];
 }
-export async function probeVersion(command: string[], env: NodeJS.ProcessEnv, timeoutMs: number): Promise<string> {
-    const [executable, ...args] = versionProbeCommand(command);
+export async function probeVersion(command: string[], env: NodeJS.ProcessEnv, timeoutMs: number, versionArgs?: string[]): Promise<string> {
+    const [executable, ...args] = versionArgs ? [...versionProbeCommand(command).slice(0, -1), ...versionArgs] : versionProbeCommand(command);
     const launch = processLaunch(executable!, args, env);
     return new Promise((resolve, reject) => execFile(launch.command, launch.args, { env, windowsVerbatimArguments: launch.windowsVerbatimArguments, timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
         if (error)

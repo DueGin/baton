@@ -2,6 +2,7 @@
 import { query, type Query, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { terminateWithTreeKill } from "../tree-kill.js";
 import type { AgentClient, AgentPersistenceHandle, AgentSessionConfig, AgentUsage, ClientOptions, ProviderCatalog } from "../agent-sdk-types.js";
@@ -17,8 +18,13 @@ class PromptQueue implements AsyncIterable<SDKUserMessage> {
     private values: SDKUserMessage[] = [];
     private wake?: () => void;
     private ended = false;
-    push(text: string, priority?: "next"): void { if (this.ended)
-        throw new Error("Claude input closed"); this.values.push({ type: "user", message: { role: "user", content: text }, parent_tool_use_id: null, ...(priority ? { priority } : {}) }); this.wake?.(); }
+    push(text: string, priority?: "next"): string { if (this.ended)
+        throw new Error("Claude input closed"); const uuid = randomUUID(); this.values.push({ type: "user", uuid, message: { role: "user", content: text }, parent_tool_use_id: null, ...(priority ? { priority } : {}) }); this.wake?.(); return uuid; }
+    withdraw(ids: Set<string>): Set<string> {
+        const removed = new Set(this.values.flatMap(value => value.uuid && ids.has(value.uuid) ? [value.uuid] : []));
+        this.values = this.values.filter(value => !value.uuid || !ids.has(value.uuid));
+        return removed;
+    }
     close(): void { this.ended = true; this.wake?.(); }
     async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage> {
         while (!this.ended) {
@@ -64,6 +70,7 @@ class ClaudeSession extends ProviderSession {
     private queue = new PromptQueue();
     private abort = new AbortController();
     private canceling = false;
+    private unstartedMessages = new Set<string>();
     private sawText = false;
     private streamedBlocks = new Set<string>();
     private cumulativeCost = 0;
@@ -85,7 +92,7 @@ class ClaudeSession extends ProviderSession {
             cwd: config.cwd, ...(config.model ? { model: config.model } : {}),
             pathToClaudeCodeExecutable: options.command[0],
             env: externalEnv(options.env, config.env), settingSources: ["user", "project", "local"],
-            abortController: this.abort, includePartialMessages: true,
+            abortController: this.abort, includePartialMessages: true, perTaskStopAffordance: true,
             permissionMode: permissionMode as Options["permissionMode"], allowDangerouslySkipPermissions: permissionMode === "bypassPermissions",
             ...(config.thinking === "off" ? { thinking: { type: "disabled" } } : {}),
             ...(config.thinking && ["low", "medium", "high", "xhigh", "max"].includes(config.thinking) ? { thinking: { type: "adaptive" }, effort: config.thinking as Options["effort"] } : {}),
@@ -115,9 +122,9 @@ class ClaudeSession extends ProviderSession {
             clearTimeout(timer);
         }
     }
-    protected async launchTurn(prompt: string): Promise<void> { this.canceling = false; this.sawText = false; this.streamedBlocks.clear(); this.queue.push(prompt); }
+    protected async launchTurn(prompt: string): Promise<void> { this.canceling = false; this.sawText = false; this.streamedBlocks.clear(); this.unstartedMessages.add(this.queue.push(prompt)); }
     async steerActiveTurn(prompt: string): Promise<boolean> { if (!this.activeTurn)
-        return false; this.queue.push(prompt, "next"); this.timeline({ type: "user_message", text: prompt }); return true; }
+        return false; if (this.canceling) return false; this.unstartedMessages.add(this.queue.push(prompt, "next")); this.timeline({ type: "user_message", text: prompt }); return true; }
     private async pump(): Promise<void> {
         try {
             for await (const raw of this.query)
@@ -133,6 +140,10 @@ class ClaudeSession extends ProviderSession {
     private message(message: Record<string, unknown>): void {
         if (this.closed)
             return;
+        if (message.type === "command_lifecycle" || (message.type === "system" && message.subtype === "command_lifecycle")) {
+            const lifecycle = record(message.lifecycle ?? message);
+            if (lifecycle.state !== "queued") this.unstartedMessages.delete(text(lifecycle.command_uuid ?? lifecycle.commandUuid ?? lifecycle.uuid));
+        }
         // Native subagents are not baton nodes; do not mix their tokens or turn boundaries into the main session.
         if (message.parent_tool_use_id)
             return;
@@ -233,6 +244,20 @@ class ClaudeSession extends ProviderSession {
         this.canceling = true;
         this.clearPermissions();
         try {
+            // Paseo's per-UUID withdrawal also covers input already consumed by the SDK
+            // but not started by Claude. Removing only our local queue is insufficient.
+            const ids = new Set(this.unstartedMessages);
+            this.unstartedMessages.clear();
+            const local = this.queue.withdraw(ids);
+            const cancel = (this.query as Query & { cancelAsyncMessage?: (uuid: string) => Promise<boolean> }).cancelAsyncMessage;
+            let safe = true;
+            for (const id of ids) if (!local.has(id)) {
+                try { if (!cancel || !await cancel.call(this.query, id)) safe = false; }
+                catch { safe = false; }
+            }
+            // Close before interrupt if recall is unavailable: the CLI could otherwise
+            // dequeue a surviving steer between its result and our close call.
+            if (!safe) { await this.close(); return; }
             await this.query.interrupt();
             await this.waitForTurn();
         }

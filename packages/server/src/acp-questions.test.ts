@@ -1,0 +1,28 @@
+import { afterEach, expect, it } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { ACP_AGENT_SPECS } from "@baton/providers";
+import { startServer, type BatonServer } from "./api/server.js";
+import { createPaseoDriverRegistry } from "./driver/paseo-adapter.js";
+let server: BatonServer | undefined, home: string | undefined;
+afterEach(async () => { await server?.close(); if (home) await rm(home, { recursive: true, force: true }); });
+it("routes real ACP form RPC through the native question card and back to the provider", async () => {
+  home = await mkdtemp(join(tmpdir(), "baton-acp-question-"));
+  const fixture = fileURLToPath(new URL("../../providers/src/test-utils/fake-agent.mjs", import.meta.url));
+  const disabled = Object.fromEntries(["claude", "codex", "pi", ...ACP_AGENT_SPECS.map(s => s.id)].map(id => [id, { enabled: false }]));
+  await writeFile(join(home, "config.json"), JSON.stringify({ agents: { ...disabled, "test-acp": { extends: "acp", command: [process.execPath, fixture, "acp"] } } }));
+  server = await startServer({ home, port: 0, registry: createPaseoDriverRegistry({ home }), notifier: () => {} });
+  const project = await server.kernel.projects.create({ path: home });
+  const snapshot = await server.kernel.createRun({ projectId: project.id, agent: "test-acp", prompt: "form-elicitation", policy: { autoApprove: true } });
+  const runId = snapshot.run.id;
+  await expect.poll(() => server!.store.snapshot(runId).questions.length).toBe(1);
+  const question = server.store.snapshot(runId).questions[0]!;
+  expect(question).toMatchObject({ status: "pending", source: "native", delivery: "inline", anchor: { itemSeq: expect.any(Number), callId: expect.any(String) }, prompts: [{ id: "flavor", options: [{ label: "Vanilla" }, { label: "Chocolate" }] }] });
+  expect(server.store.snapshot(runId).permissions).toHaveLength(0);
+  const response = await fetch(`${server.url}/api/questions/${question.id}/answer`, { method: "POST", headers: { authorization: `Bearer ${server.token}`, "content-type": "application/json" }, body: JSON.stringify({ answers: { flavor: ["Chocolate"] } }) });
+  expect(response.status).toBe(200);
+  await expect.poll(() => server!.store.snapshot(runId).questions[0]?.status).toBe("answered");
+  await expect.poll(() => server!.store.snapshot(runId).turns[0]?.status).toBe("completed");
+});

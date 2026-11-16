@@ -3,10 +3,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { ACP_AGENT_SPECS } from "./acp-spec.js";
 import { ProviderRegistry, versionProbeCommand, probeVersion } from "./registry.js";
 const fixture = fileURLToPath(new URL("./test-utils/fake-agent.mjs", import.meta.url));
 let home: string;
-const disabled = Object.fromEntries(["claude", "codex", "pi", "gemini", "qwen", "kimi", "opencode", "copilot", "cursor", "goose", "droid", "hermes", "openclaw", "kiro"].map(id => [id, { enabled: false }]));
+const disabled = Object.fromEntries(["claude", "codex", "pi", ...ACP_AGENT_SPECS.map(spec => spec.id)].map(id => [id, { enabled: false }]));
 beforeEach(async () => { home = await mkdtemp(join(tmpdir(), "baton-registry-test-")); });
 afterEach(async () => { await rm(home, { recursive: true, force: true }); });
 describe("provider detection", () => {
@@ -39,4 +40,19 @@ describe("provider detection", () => {
         await writeFile(script, "#!/bin/sh\nwhile :; do :; done\n", { mode: 0o700 });
         await expect(probeVersion([script], { ...process.env, BATON_HOME: home }, 30)).rejects.toThrow("Version probe failed");
     });
+    it("exposes missing install hints and gates old versions with error status", async () => {
+        await writeFile(join(home, "config.json"), JSON.stringify({ agents: { ...disabled, kimi: { enabled: true, command: [process.execPath, fixture, "acp"], env: { FAKE_VERSION: "2.4.0" }, versionArgs: [fixture, "acp", "--version"] }, missing: { extends: "acp", command: ["baton-not-installed"], installHint: "Install the test CLI", homepage: "https://example.test" } } }));
+        const entries = await new ProviderRegistry({ home }).detect();
+        expect(entries.find(entry => entry.id === "kimi")).toMatchObject({ status: "error", minVersion: "2.5.0", diagnostic: expect.stringContaining("below required") });
+        expect(entries.find(entry => entry.id === "missing")).toMatchObject({ status: "unavailable", installHint: "Install the test CLI", source: "config" });
+    });
+    it("overrides all ACP spec fields and probes without a session", async () => {
+        await writeFile(join(home, "config.json"), JSON.stringify({ agents: { ...disabled, custom: { extends: "acp", command: [process.execPath, fixture, "acp"], label: "Custom ACP", minVersion: "1.0.0", versionArgs: [fixture, "acp", "--version"], env: { FAKE_VERSION: "3.0.0", FAKE_CAPTURE: join(home, "frames.jsonl") }, scrubEnv: ["CUSTOM_DANGER"], modelDiscovery: "cursor", modelCatalogRpc: "cursor/list_available_models", modeMap: { unattended: ["auto"], readOnly: ["safe"] }, noScratchSession: true, elicitation: { form: true, url: false }, longToolCalls: true, toolTimeout: { env: "TOOL_TIMEOUT_MS", milliseconds: 3600000 }, dialect: "kimi", mcp: { supported: true, http: true, sse: false, stdio: true }, installHint: "npm install test", homepage: "https://example.test", models: [{ id: "manual", label: "Manual" }], notes: "customized", source: "local profile", verified: "source", npx: ["npx", "test"] } } }));
+        const registry = new ProviderRegistry({ home });
+        const entry = (await registry.detect()).find(entry => entry.id === "custom");
+        expect(entry).toMatchObject({ status: "ready", label: "Custom ACP", installHint: "npm install test", homepage: "https://example.test", minVersion: "1.0.0", models: [{ id: "manual" }], modes: [{ id: "auto", isUnattended: true }, { id: "safe", isReadOnly: true }] });
+        const { readFile } = await import("node:fs/promises");
+        expect(await readFile(join(home, "frames.jsonl"), "utf8")).not.toContain("session/new");
+    });
+
 });

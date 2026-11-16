@@ -1,4 +1,4 @@
-/** Opt-in real CLIs + network. Run: npx tsx packages/server/scripts/smoke-drivers.ts [claude codex pi] */
+/** Opt-in real CLIs + network. Run: npx tsx packages/server/scripts/smoke-drivers.ts [agent-id ...] */
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -11,7 +11,7 @@ import { createPaseoDriverRegistry } from "../src/driver/paseo-adapter.js";
 import type { DriverEvent, DriverSession } from "../src/driver/types.js";
 const requested = process.argv.slice(2);
 const agentIds = requested.length ? requested : ["claude", "codex", "pi"];
-assert(agentIds.every(id => ["claude", "codex", "pi"].includes(id)), "Supported smoke agents: claude codex pi");
+
 const home = await mkdtemp(join(tmpdir(), "baton-driver-smoke-"));
 const previousHome = process.env.BATON_HOME;
 process.env.BATON_HOME = home;
@@ -19,6 +19,7 @@ const registry = createPaseoDriverRegistry({ home });
 let failures = 0;
 try {
     const entries = await registry.detect();
+    assert(agentIds.every(id => entries.some(entry => entry.id === id)), `Unknown agent ID. Available IDs: ${entries.map(entry => entry.id).join(", ")}`);
     for (const id of agentIds) {
         const entry = entries.find(candidate => candidate.id === id);
         if (entry?.status !== "ready") {

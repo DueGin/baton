@@ -91,6 +91,11 @@ for (const kind of ["codex", "pi", "acp"] as const)
             expect(session.pendingPermissions()).toEqual([]);
             if (kind === "codex")
                 expect(JSON.stringify(await frames())).toContain("thread/backgroundTerminals/terminate");
+            if (kind === "pi") {
+                const calls = await frames();
+                expect(calls.findIndex(frame => frame.type === "clear_queue")).toBeGreaterThanOrEqual(0);
+                expect(calls.findIndex(frame => frame.type === "clear_queue")).toBeLessThan(calls.findIndex(frame => frame.type === "abort"));
+            }
         });
         it("fails the active turn and reports an unexpected process death", async () => {
             const session = await client(kind).createSession({ cwd: home });
@@ -141,5 +146,46 @@ describe("Pi MCP capabilities", () => {
         await provider.fetchCatalog();
         expect(provider.capabilities.mcp).toBe(false);
         await expect(provider.createSession({ cwd: home, mcpServers: { baton: { type: "http", url: "http://127.0.0.1:7433/test" } } })).rejects.toThrow("Pi has no MCP support");
+    });
+});
+
+describe("ACP session-free catalogs and elicitation", () => {
+    it("never creates a session while probing, and uses session-free model RPC", async () => {
+        const { ACP_AGENT_SPECS } = await import("../acp-spec.js");
+        const provider = new ACPAgentClient({ home, command: [process.execPath, fixture, "acp"], spec: ACP_AGENT_SPECS.find(s => s.id === "cursor"), env: { BATON_HOME: home, FAKE_CAPTURE: join(home, "frames.jsonl") } });
+        expect((await provider.fetchCatalog()).models[0]?.id).toBe("cursor-model");
+        const calls = await frames();
+        expect(calls.some(frame => frame.method === "initialize")).toBe(true);
+        expect(calls.some(frame => frame.method === "cursor/list_available_models")).toBe(true);
+        expect(calls.some(frame => frame.method === "session/new")).toBe(false);
+    });
+    it("scrubs inherited and configured Copilot allow-all settings from the real child", async () => {
+        const { ACP_AGENT_SPECS } = await import("../acp-spec.js");
+        const original = process.env.COPILOT_ALLOW_ALL;
+        process.env.COPILOT_ALLOW_ALL = "1";
+        try {
+            const base = ACP_AGENT_SPECS.find(s => s.id === "copilot")!;
+            const provider = new ACPAgentClient({ home, command: [process.execPath, fixture, "acp"], spec: { ...base, modelCatalogRpc: "fake/env" }, env: { BATON_HOME: home, COPILOT_ALLOW_ALL: "true" } });
+            expect((await provider.fetchCatalog()).models[0]?.id).toBe("scrubbed");
+        } finally { if (original === undefined) delete process.env.COPILOT_ALLOW_ALL; else process.env.COPILOT_ALLOW_ALL = original; }
+    });
+    it("routes form elicitation as a native question and returns schema content", async () => {
+        const session = await client("acp").createSession({ cwd: home }); sessions.push(session);
+        const events = eventsFor(session);
+        await session.startTurn("form-elicitation");
+        await until(events, "permission_requested");
+        const question = session.pendingPermissions()[0]!;
+        expect(question).toMatchObject({ kind: "question", name: "acp_elicitation", input: { questions: [{ id: "flavor" }] } });
+        await session.respondToPermission(question.id, { behavior: "allow", updatedInput: { answers: { flavor: ["Vanilla"] } } });
+        await until(events, "turn_completed");
+        expect(await frames()).toContainEqual(expect.objectContaining({ result: { action: "accept", content: { flavor: "Vanilla" } } }));
+    });
+    it("shows URL elicitation only as a link notice, without granting consent", async () => {
+        const session = await client("acp").createSession({ cwd: home }); sessions.push(session);
+        const events = eventsFor(session);
+        await session.startTurn("url-elicitation"); await until(events, "turn_completed");
+        expect(events.some(e => e.type === "permission_requested")).toBe(false);
+        expect(events.some(e => e.type === "timeline" && e.item.type === "notification" && e.item.message.includes("https://example.test/signin"))).toBe(true);
+        expect(await frames()).toContainEqual(expect.objectContaining({ result: { action: "cancel" } }));
     });
 });
