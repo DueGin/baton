@@ -63,6 +63,9 @@ export function applyEvent(snapshot: RunSnapshot, event: RunEventEnvelope): RunS
     case "escalation":
       next.escalations = upsert(next.escalations ?? [], event.escalation);
       break;
+    case "pr":
+      next.pullRequests = upsert(next.pullRequests ?? [], event.pr);
+      break;
     case "background":
       next.backgroundProcesses = upsert(next.backgroundProcesses ?? [], event.process);
       break;

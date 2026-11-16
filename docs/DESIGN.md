@@ -310,6 +310,46 @@ agent 常会启动长期运行的进程，比如 `npm run dev`、`nohup … &`�
   - 其他节点上暂存的送达内容和排队消息照常冲刷。排队中的委派开始第一轮。
 - 暂停中的 Run 不算"活跃"（`activeRunCount`），但会显示"已暂停"。重启 daemon 后仍保持暂停。时间线用浅灰斜纹画出暂停的时间段。
 
+### 4.11 Pull Request 跟踪
+
+agent 常会自己开 PR，比如 `gh pr create`。baton 要把这些 PR 记到对应的 Run 和节点下，持续拉取状态，在控制台里展示，并且能把 CI 失败或评审意见回推给 agent。闭环的思路参考 Orchestrator.inc。
+
+**发现方式**（按来源排序）：
+1. `created`：某次 shell 工具调用的命令包含 `gh pr create`、`gh pr new`、`glab mr create`、`hub pull-request`，并且输出里有 PR 或 MR 的 URL。记下节点和 `toolSpanId`。
+2. `artifact`：`report_result.artifacts` 中的 url 是 PR 链接。
+3. `mentioned`：agent 的回复或工具输出里提到了 PR URL，但不是它创建的。这类会登记，但界面上弱化显示。可以设置 `pr.trackMentioned=false` 关掉。
+4. `manual`：人在控制台手动关联（`POST /api/runs/:id/prs {url}`）。
+
+URL 识别规则：
+- GitHub：`https://github.com/<owner>/<repo>/pull/<n>`；
+- GitLab：`…/-/merge_requests/<n>`；
+- 其他托管平台一律记为 `forge:"other"`，只登记，不拉取状态。
+
+同一个 Run 里同一个 PR 只登记一次，优先级 created > artifact > manual > mentioned。
+
+**拉取状态（GitHub）**：
+- 命令：`gh pr view <url> --json number,title,state,isDraft,headRefName,baseRefName,author,mergeable,reviewDecision,statusCheckRollup,additions,deletions,changedFiles,comments,updatedAt,mergedAt,closedAt`。
+- gh 的路径和环境变量来自配置 `github.ghPath` 和 `github.env`，例如代理 `HTTPS_PROXY`。用 execFile 调用，超时 15 秒。
+- 字段归一化：
+  - `statusCheckRollup` 里的 CheckRun 看 `conclusion`，StatusContext 看 `state`，统计成通过、失败、进行中的数量，失败项最多记 10 个。
+  - `reviewDecision` 和 `mergeable` 转成小写。
+  - `state` 为 MERGED、CLOSED、OPEN 分别对应 merged、closed、open；open 且 `isDraft` 时记为 draft。
+- 频率：新登记的 PR 每 30 秒拉一次，持续 5 分钟；之后 open 的每 60 秒、draft 的每 120 秒。merged 或 closed 后再拉一次就停止。
+- 出错时指数退避，最长 10 分钟，`error` 写明原因，已有的状态字段保留上一次的值。
+- GitLab：有 `glab` 时用 `glab mr view --output json`，没有就标 `unknown`。
+- 只有字段确实变化时才发 `pr` 事件。
+
+**状态变化时的处理**（`RunPolicy.prFeedback`）：
+- 检查从非失败变成 `failure`，或评审结论变成 `changes_requested`：
+  - `notify`（默认）：发桌面通知，Run 和项目上显示红色或琥珀色标记。
+  - `auto`：在 `notify` 的基础上，给创建这个 PR 的节点排队一条消息，内容是失败的检查名称和链接（再用 `gh run view --log-failed` 取最后 80 行）以及评审意见（`gh pr view --json reviews,comments` 取最新的若干条）。每个 PR 每 10 分钟最多回推一次。
+  - `off`：只更新状态。
+- PR 合并或关闭时，发一次通知。
+
+**人工回推**：`POST /api/prs/:id/feedback {include:["checks","reviews"], note?}`，消息内容和 `auto` 相同，以排队消息的方式发给指定节点，默认发给创建者，没有创建者就发给根节点。
+
+**系统提示**：所有节点都会被告知："如果你创建了 PR，请让命令打印出 PR 的 URL（`gh pr create` 默认就会打印），并在 `report_result.artifacts` 里加上 `{kind:"url", value:<PR URL>}`。"
+
 ## 5. Driver 接口（server 和 providers 之间的边界）
 
 契约文件是 `packages/server/src/driver/types.ts`。内核只依赖这个接口：
@@ -367,6 +407,11 @@ agent 常会启动长期运行的进程，比如 `npm run dev`、`nohup … &`�
 | GET/PATCH | `/api/projects/:id` | 项目汇总 / `PatchProjectRequest`（改名、归档） |
 | GET | `/api/runs?projectId=…` | 只看某个项目的 Run |
 | GET | `/api/fs/dirs?path=…` | `ListDirsResponse`，目录浏览 |
+| GET | `/api/prs?projectId=&state=open｜all` | 跨 Run 的 PR（默认 open + draft） |
+| POST | `/api/runs/:runId/prs` | `LinkPullRequestRequest`，手动关联 |
+| POST | `/api/prs/:id/refresh` | 立即重新拉取状态 |
+| POST | `/api/prs/:id/feedback` | `PullRequestFeedbackRequest`，回推给 agent |
+| DELETE | `/api/prs/:id` | 取消关联 |
 | GET | `/api/background?status=running｜all` | 跨 Run 的后台进程（默认只返回运行中、未隐藏的） |
 | POST | `/api/background/:id/stop` | `StopBackgroundRequest` |
 | POST | `/api/background/:id/dismiss` | `DismissBackgroundRequest` |
@@ -498,6 +543,28 @@ agent 常会启动长期运行的进程，比如 `npm run dev`、`nohup … &`�
    - 被替换的节点置灰，标"已替换"，用虚线连到接手的节点。
    - 节点卡片和详情抽屉里有"改派"按钮。
    - 时间线根节点那一行标出团队变更。
+
+14. **PR 展示**：
+    - **输入框左上角**，紧挨着"后台 N"，有一个"PR N"标签，N 是本 Run 中 open 和 draft 的 PR 数，为 0 时不显示。标签颜色按最差状态取：
+      - 有检查失败或冲突：红；
+      - 评审要求修改：琥珀；
+      - 检查进行中：蓝；
+      - 全部通过：绿；
+      - 有已合并的：紫。
+    - 点开是一个列表，每一条包括：
+      - forge 图标、`repo#123` 和标题、状态标签（open、draft、merged、closed）；
+      - 分支 head → base；
+      - 检查汇总，如 ✓5 ✗1 ⏳2，并列出失败项和链接；
+      - 评审结论、能否合并或冲突、增删行数和改动文件数、更新时间；
+      - 创建者（agent 图标和角色），可点击打开节点；
+      - 操作：打开 ↗、刷新、"把 CI 失败发给 agent"、"把评审意见发给 agent"、取消关联。
+    - 底部可以"关联 PR"，粘贴 URL 即可。错误信息（gh 未安装、未登录、网络问题）显示在对应条目上。
+    - **对话流里**：创建 PR 的那次工具调用下面，插一张单行 PR 卡片，样式和 agent 消息卡片一致，内容是 forge 图标、"创建了 PR"、#123 标题、状态、检查图标；点开看详情。
+    - **其他位置**：
+      - 拓扑图节点卡片：显示 PR 小标记；
+      - Run 详情：增加"Pull Requests"一节；
+      - 侧栏项目分组：显示 open PR 数；
+      - 设置页：GitHub 一节，可以填 gh 路径和环境变量（如代理），显示"已找到 gh、已登录"之类的检测结果。
 
 13. **agent 之间消息卡片**（参考 Orca 的 `NativeChatAgentMessageCard`）：对话流里所有 agent 之间的消息，**默认折叠成单行小卡片**。卡片高约 32px，圆角、细边框。
     - **单行内容**：

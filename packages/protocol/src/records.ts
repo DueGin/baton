@@ -86,6 +86,12 @@ export interface RunPolicy {
    * always apply immediately.
    */
   teamApproval?: boolean;
+  /**
+   * What to do when a PR of the run gets failing checks or "changes requested":
+   * "notify" (default) = desktop notification + console badge; "auto" = also send the details to the
+   * node that created it (as a queued follow-up message); "off".
+   */
+  prFeedback?: "off" | "notify" | "auto";
   /** Max active members on a team (form_team / additions beyond it are rejected). Default 5. */
   maxTeamSize?: number;
   /** A node with an active turn and no events for this long raises a "stall" escalation. Default 10. */
@@ -126,6 +132,8 @@ export interface ProjectSummary extends ProjectRecord {
   activeRunCount: number;
   pendingTotal: number;
   backgroundCount: number;
+  /** Open/draft pull requests across the project's runs. */
+  openPrCount?: number;
   lastRunAt?: IsoTime;
   /** Current git branch (cheap `git branch --show-current`), if a git work tree. */
   gitBranch?: string;
@@ -527,6 +535,57 @@ export type InboxItem =
   | { kind: "question"; runId: string; runTitle: string; question: QuestionRecord }
   | { kind: "escalation"; runId: string; runTitle: string; escalation: EscalationRecord };
 
+// ───────────────────────────── pull requests ─────────────────────────────
+
+/** A pull/merge request an agent of the run created or the human linked (DESIGN §4.11). */
+export interface PullRequestRecord {
+  /** `${forge}:${repo}#${number}` — unique per run. */
+  id: string;
+  runId: string;
+  projectId?: string;
+  /** Node that created it (gh pr create / report_result artifact), when known. */
+  nodeId?: string;
+  /** Tool span (ToolSpanRecord.id) whose output contained the URL; the console anchors a card there. */
+  toolSpanId?: string;
+  source: "created" | "artifact" | "mentioned" | "manual";
+  url: string;
+  forge: "github" | "gitlab" | "other";
+  /** "owner/name". */
+  repo: string;
+  number: number;
+  title?: string;
+  state: "open" | "draft" | "merged" | "closed" | "unknown";
+  headRef?: string;
+  baseRef?: string;
+  author?: string;
+  checks: {
+    state: "pending" | "success" | "failure" | "neutral" | "none";
+    total: number;
+    passed: number;
+    failed: number;
+    pending: number;
+    /** Names (and links) of failed checks, at most 10. */
+    failedChecks: Array<{ name: string; url?: string }>;
+  };
+  reviewDecision?: "approved" | "changes_requested" | "review_required" | null;
+  mergeable?: "mergeable" | "conflicting" | "unknown";
+  additions?: number;
+  deletions?: number;
+  changedFiles?: number;
+  commentCount?: number;
+  /** Remote timestamps. */
+  remoteUpdatedAt?: IsoTime;
+  mergedAt?: IsoTime;
+  closedAt?: IsoTime;
+  /** Last successful or failed status fetch. */
+  lastCheckedAt?: IsoTime;
+  /** Last fetch error (gh missing, auth, network…); status fields keep their last known values. */
+  error?: string;
+  createdAt: IsoTime;
+  /** Feedback (CI failures / review comments) last sent to an agent, if any. */
+  lastFeedbackAt?: IsoTime;
+}
+
 // ───────────────────────────── background processes ─────────────────────────────
 
 /** A long-running process an agent of the run started (dev server, watcher, daemon…). DESIGN §4.8. */
@@ -572,6 +631,8 @@ export interface RunSnapshot {
   permissions: PermissionRecord[];
   questions: QuestionRecord[];
   escalations: EscalationRecord[];
+  /** Pull requests created by the run's agents or linked by the human. */
+  pullRequests?: PullRequestRecord[];
   /**
    * Background processes started by the run's agents. Snapshots omit entries that exited more than
    * 24 h ago (there is no deletion event — consumers replaying events should apply the same filter).
@@ -601,6 +662,8 @@ export interface RunSummary {
   pendingTotal: number;
   /** Background processes that are not exited (running or stopping) and not dismissed. */
   backgroundCount?: number;
+  /** Pull requests of the run that are open or draft. */
+  openPrCount?: number;
   usage: UsageTotals;
   createdAt: IsoTime;
   updatedAt: IsoTime;

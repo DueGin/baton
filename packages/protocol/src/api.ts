@@ -1,6 +1,6 @@
 /** REST request/response bodies (DESIGN §7). */
 import type { PermissionResponse } from "./timeline.js";
-import type { AgentEntry, BackgroundProcess, ProjectRecord, ProjectSummary, DelegationRecord, InboxItem, ItemRecord, PermissionRule, RunPolicy, RunSnapshot, RunSummary, TeamMemberSpec, TeamPreset } from "./records.js";
+import type { AgentEntry, BackgroundProcess, PullRequestRecord, ProjectRecord, ProjectSummary, DelegationRecord, InboxItem, ItemRecord, PermissionRule, RunPolicy, RunSnapshot, RunSummary, TeamMemberSpec, TeamPreset } from "./records.js";
 
 export interface CreateRunRequest {
   /** Root agent. Optional when `teamPresetId` is given (the preset's lead is used). */
@@ -207,6 +207,7 @@ export interface TitleModelSettings {
 export interface SettingsResponse {
   /** Absent until configured. */
   titleModel?: TitleModelSettings;
+  github?: GithubSettings & { ghFound: boolean; authenticated?: boolean };
 }
 
 /** PUT /api/settings — partial update; persisted to $BATON_HOME/config.json (0600). */
@@ -219,6 +220,7 @@ export interface UpdateSettingsRequest {
     apiKey?: string;
     apiKeyEnv?: string | null;
   } | null;
+  github?: GithubSettings | null;
 }
 
 /** POST /api/settings/title-model/test — try the (saved or given) settings on a sample prompt. */
@@ -282,4 +284,33 @@ export interface ListDirsResponse {
   parent?: string;
   home: string;
   dirs: Array<{ name: string; path: string; isGitRepo: boolean; isProject: boolean }>;
+}
+
+// ───────────────────────────── pull requests ─────────────────────────────
+
+/** GET /api/prs?projectId=&state=open|all — across runs (default: open + draft). */
+export type ListPullRequestsResponse = Array<PullRequestRecord & { runTitle: string }>;
+
+/** POST /api/runs/:runId/prs — the human links a PR URL to the run. */
+export interface LinkPullRequestRequest {
+  url: string;
+  /** Optional node to attribute it to. */
+  nodeId?: string;
+}
+
+/** POST /api/prs/:id/feedback — send CI failures and/or review comments to an agent as a queued message. */
+export interface PullRequestFeedbackRequest {
+  include: Array<"checks" | "reviews">;
+  /** Default: the node that created the PR, else the run root. */
+  nodeId?: string;
+  /** Extra instruction appended to the message. */
+  note?: string;
+}
+
+/** Config `github` section (PUT /api/settings): gh binary and env for status polling. */
+export interface GithubSettings {
+  /** Path to gh (default: resolved from PATH, then ~/.local/bin/gh). */
+  ghPath?: string;
+  /** Extra env for gh, e.g. { "HTTPS_PROXY": "http://127.0.0.1:7890" }. */
+  env?: Record<string, string>;
 }
