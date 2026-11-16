@@ -14,7 +14,7 @@ describe("human inbox rendering", () => {
     const question = items.find(item => item.kind === "question")!; if (question.kind !== "question") throw new Error("question");
     const node = snapshots[question.runId]!.nodes.find(row => row.id === question.question.nodeId)!;
     const answer = renderToStaticMarkup(<TranscriptRow row={{ seq: 1, nodeId: node.id, ts: question.question.askedAt, item: { type: "user_message", text: '<baton-answer question="q1">保持只读 <script>bad()</script></baton-answer>' } }} node={node} />);
-    expect(answer).toContain("你的回答"); expect(answer).toContain("baton-answer-card"); expect(answer).not.toContain("<script>");
+    expect(answer).toContain("你的回答"); expect(answer).toContain("human-answer"); expect(answer).not.toContain("data-agent-card"); expect(answer).not.toContain("<script>");
   });
   it("renders permission detail without executing HTML", async () => {
     const client = new DemoClient(() => 0); const item = (await client.inbox()).find(row => row.kind === "permission")!;

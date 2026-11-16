@@ -11,6 +11,12 @@ export function demoBriefPrompt(d: DelegationRecord): string {
   return parts.join("\n");
 }
 const escapeAttr = (value: string): string => value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+export function demoFollowupPrompt(delegationId: string, message: string): string {
+  return `<baton-followup delegation="${escapeAttr(delegationId)}">\n${message}\n</baton-followup>`;
+}
+export function demoNoticePrompt(kind: "team" | "system" | "correction", message: string): string {
+  return `<baton-notice kind="${kind}">\n${message}\n</baton-notice>`;
+}
 export function demoResultsPrompt(delegations: DelegationRecord[]): string {
   const blocks = delegations.map(d => {
     const result = d.result;

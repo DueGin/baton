@@ -12,7 +12,8 @@ import { HttpError } from "../api.js";
 import type { BatonClient, TeamPresetResult } from "../api.js";
 import { summarize, terminal } from "../lib/derive.js";
 import { createScenario, demoAgents } from "./scenario.js";
-import { demoBriefPrompt, demoResultsPrompt } from "./prompts.js";
+import { agentMessageDemo } from "./messages.js";
+import { demoNoticePrompt, demoBriefPrompt, demoResultsPrompt } from "./prompts.js";
 import { snapshotInbox, sortInbox, permissionPattern } from "../lib/inbox.js";
 import { matchPermissionRule } from "../lib/permission-rules.js";
 import { activeMembers, cleanMember, defaultAgentSpec, pendingProposals, validateMembers, validatePreset } from "../lib/teams.js";
@@ -65,6 +66,10 @@ export class DemoClient implements BatonClient {
     this.setupHumanDemo();
     this.setupConversationDemo();
     this.setupQuestionDemo();
+    const gallery = agentMessageDemo(now());
+    const galleryData: DemoRun = { snapshot: { ...gallery.snapshot, lastSeq: 0 }, log: [], remaining: [] };
+    this.data.set(gallery.snapshot.run.id, galleryData);
+    gallery.items.forEach(row => this.emit(galleryData, { type: "item", nodeId: row.nodeId, itemSeq: row.seq, itemTs: row.ts, item: row.item }));
     const background = createScenario(now() - 600000, "run-background");
     const backgroundLog = background.events.filter(event => Date.parse(event.ts) <= now());
     const backgroundRun = { snapshot: backgroundLog.reduce(applyEvent, background.initial), log: backgroundLog, remaining: [] };
@@ -342,7 +347,7 @@ export class DemoClient implements BatonClient {
     this.emit(data, { type: "delegation.created", delegation: { ...edge, status: "canceled", endedAt: new Date(this.now()).toISOString() } });
   }
   private notice(data: DemoRun, nodeId: string, text: string): void {
-    const message = `<baton-notice>\n${text}\n</baton-notice>`;
+    const message = demoNoticePrompt("team", text);
     if (data.snapshot.run.status === "paused") this.heldMessages.set(nodeId, [...this.heldMessages.get(nodeId) ?? [], message]);
     else this.append(data, nodeId, { type: "user_message", text: message });
   }
@@ -553,7 +558,7 @@ export class DemoClient implements BatonClient {
       if (terminal(node.status)) continue;
       const queued = this.queuedMessages(data, node.id); const held = this.heldMessages.get(node.id) ?? []; this.heldMessages.delete(node.id);
       if (nodes.includes(node.id)) {
-        const notice = "<baton-notice>The human paused this run and has now resumed it. Continue where you left off.</baton-notice>";
+        const notice = demoNoticePrompt("system", "The human paused this run and has now resumed it. Continue where you left off.");
         this.append(data, node.id, { type: "user_message", text: [notice, ...held].join("\n\n") });
         this.startReply(data, node.id, [notice, ...held, ...queued.map(row => row.item.type === "user_message" ? row.item.text : "")].join("\n\n"), "resume");
         const turnId = data.snapshot.turns.findLast(turn => turn.nodeId === node.id && turn.status === "running")!.id;

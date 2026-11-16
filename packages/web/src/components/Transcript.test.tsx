@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Markdown, ToolDetail, Transcript, TranscriptRow } from "./Transcript.js";
+import { agentCardPreferences } from "../lib/agent-card-preferences.js";
+import { Markdown, ToolDetail, Transcript, TranscriptRow, toolSummary } from "./Transcript.js";
 import { DemoClient } from "../demo/client.js";
 import { RunStore } from "../store.js";
 import { createScenario, replay } from "../demo/scenario.js";
@@ -46,29 +47,39 @@ describe("safe agent content rendering", () => {
     expect(pending).toContain("pending_approval");
     expect(pending).toContain("p1");
   });
+  it("shows the actual tool name and concise input summary for unknown details", () => {
+    const snapshot = replay(createScenario(0), 86000); const node = snapshot.nodes[0]!;
+    const detail = { type: "unknown" as const, input: { query: "+baton send" }, output: null };
+    const html = renderToStaticMarkup(<TranscriptRow row={{ seq: 99, nodeId: node.id, ts: node.createdAt, item: { type: "tool_call", callId: "search", name: "ToolSearch", status: "completed", detail } }} node={node} />);
+    expect(html).toContain("ToolSearch ·"); expect(html).toContain("+baton send"); expect(html).not.toContain("unknown unknown"); expect(html).not.toContain('class="tool-type">unknown');
+    expect(toolSummary({ type: "unknown", input: null, output: null }, "ToolSearch")).toBe("ToolSearch");
+    expect(toolSummary({ type: "unknown", input: "x".repeat(500), output: null }, "ToolSearch").length).toBeLessThan(120);
+  });
   it("renders baton assignments/results as linked cards and falls back to escaped text", () => {
     const snapshot = replay(createScenario(0), 86000);
     const edge = snapshot.delegations.find(delegation => delegation.result?.status === "success")!;
     const node = snapshot.nodes[0]!;
     const render = (text: string) => renderToStaticMarkup(<TranscriptRow row={{ seq: 1, nodeId: node.id, ts: snapshot.run.createdAt, item: { type: "user_message", text } }} node={node} snapshot={snapshot} inspect={() => undefined} />);
+    agentCardPreferences.setDefault(true);
     const assignment = render(demoBriefPrompt(edge));
-    expect(assignment).toContain("任务书");
-    expect(assignment).toContain('title="查看委派节点"');
+    expect(assignment).toContain("来自 Lead 的任务");
+    expect(assignment).toContain('aria-label="查看 Lead 节点"');
     expect(assignment).not.toContain("baton-assignment");
-    expect(assignment).toContain(edge.role!);
+    expect(assignment).toContain("验收标准");
     const delivered = render(demoResultsPrompt([{ ...edge, brief: { ...edge.brief, title: '<script>alert("x")</script>' }, result: { ...edge.result!, summary: '<img src=x onerror="bad()">' } }]));
-    expect(delivered).toContain("结果送达");
-    expect(delivered).toContain("✓ 完成");
+    expect(delivered).toContain("收到结果");
+    expect(delivered).toContain('aria-label="结果：success"');
     expect(delivered).toContain("Result JSON");
     expect(delivered).toContain("Artifacts");
-    expect(delivered).toContain('title="查看子节点"');
+    expect(delivered).toContain(`aria-label="查看 ${snapshot.nodes.find(node => node.id === edge.toNodeId)!.role} 节点"`);
     expect(delivered).not.toContain("<script");
     expect(delivered).not.toContain("<img");
     const malformed = render('<baton-assignment delegation="x">broken <img src=x></baton-assignment>');
     expect(malformed).toContain("&lt;baton-assignment");
     expect(malformed).not.toContain("protocol-card");
     const notice = render('<baton-notice>任务已改派 <img src=x onerror="bad()"></baton-notice>');
-    expect(notice).toContain("团队通知"); expect(notice).toContain("baton-notice-card"); expect(notice).not.toContain("<img");
+    expect(notice).toContain("团队通知"); expect(notice).toContain('data-agent-card="notice"'); expect(notice).not.toContain("<img");
+    agentCardPreferences.setDefault(false);
   });
   it("defaults live reasoning to collapsed, follows the selected preference and shows streaming reply carets", () => {
     const snapshot = replay(createScenario(0), 86000); const node = snapshot.nodes[0]!;
