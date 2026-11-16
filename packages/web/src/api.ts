@@ -5,6 +5,7 @@ import type {
   SettingsResponse, UpdateSettingsRequest, TestTitleModelRequest, TestTitleModelResponse,
   ListBackgroundResponse, StopBackgroundRequest, DismissBackgroundRequest, CancelRunRequest,
   ProjectRecord, ProjectSummary, CreateProjectRequest, PatchProjectRequest, ListDirsResponse,
+  PullRequestRecord, ListPullRequestsResponse, LinkPullRequestRequest, PullRequestFeedbackRequest,
   SendMessageResponse, SendMode, DeliverMessageRequest, EditMessageRequest, ReorderQueueRequest, ReorderQueueResponse, InboxItem, AnswerQuestionRequest, ResolveEscalationRequest, PermissionRule, CreatePermissionRuleRequest,
 } from "@baton/protocol";
 
@@ -30,6 +31,11 @@ export interface BatonClient {
   cancelRun(id: string, request?: CancelRunRequest): Promise<void>;
   pauseRun(id: string): Promise<RunRecord>;
   resumeRun(id: string): Promise<RunRecord>;
+  pullRequests(projectId?: string, state?: "open" | "all"): Promise<ListPullRequestsResponse>;
+  linkPullRequest(runId: string, request: LinkPullRequestRequest): Promise<PullRequestRecord>;
+  refreshPullRequest(id: string): Promise<void>;
+  feedbackPullRequest(id: string, request: PullRequestFeedbackRequest): Promise<void>;
+  unlinkPullRequest(id: string): Promise<void>;
   background(status?: "running" | "all"): Promise<ListBackgroundResponse>;
   stopBackground(id: string, request?: StopBackgroundRequest): Promise<void>;
   dismissBackground(id: string, request: DismissBackgroundRequest): Promise<void>;
@@ -110,6 +116,11 @@ export class ApiClient implements BatonClient {
   cancelRun = (id: string, body: CancelRunRequest = {}) => this.request<void>(`/runs/${encodeURIComponent(id)}/cancel`, "POST", body);
   pauseRun = (id: string) => this.request<RunRecord>(`/runs/${encodeURIComponent(id)}/pause`, "POST");
   resumeRun = (id: string) => this.request<RunRecord>(`/runs/${encodeURIComponent(id)}/resume`, "POST");
+  pullRequests = (projectId?: string, state: "open" | "all" = "open") => this.request<ListPullRequestsResponse>(`/prs?${new URLSearchParams({ state, ...(projectId ? { projectId } : {}) })}`);
+  linkPullRequest = (id: string, body: LinkPullRequestRequest) => this.request<PullRequestRecord>(`/runs/${encodeURIComponent(id)}/prs`, "POST", body);
+  refreshPullRequest = (id: string) => this.request<void>(`/prs/${encodeURIComponent(id)}/refresh`, "POST");
+  feedbackPullRequest = (id: string, body: PullRequestFeedbackRequest) => this.request<void>(`/prs/${encodeURIComponent(id)}/feedback`, "POST", body);
+  unlinkPullRequest = (id: string) => this.request<void>(`/prs/${encodeURIComponent(id)}`, "DELETE");
   background = (status: "running" | "all" = "running") => this.request<ListBackgroundResponse>(`/background?status=${status}`);
   stopBackground = (id: string, body: StopBackgroundRequest = {}) => this.request<void>(`/background/${encodeURIComponent(id)}/stop`, "POST", body);
   dismissBackground = (id: string, body: DismissBackgroundRequest) => this.request<void>(`/background/${encodeURIComponent(id)}/dismiss`, "POST", body);

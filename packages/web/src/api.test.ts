@@ -4,6 +4,13 @@ import type { RunEventEnvelope } from "@baton/protocol";
 
 afterEach(() => vi.unstubAllGlobals());
 describe("API transport", () => {
+  it("lists, links, refreshes, feeds back and unlinks PRs using globally unique encoded IDs", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => Response.json({})); vi.stubGlobal("fetch", fetchMock); const client = new ApiClient("token"); const id = "run:github:org/repo#12";
+    await client.pullRequests("project/1", "all"); await client.linkPullRequest("run/1", { url: "https://github.com/org/repo/pull/12", nodeId: "n1" }); await client.refreshPullRequest(id); await client.feedbackPullRequest(id, { include: ["checks", "reviews"], nodeId: "n1", note: "修复回归" }); await client.unlinkPullRequest(id);
+    expect(fetchMock.mock.calls.map(call => [call[0], (call[1] as RequestInit).method])).toEqual([["/api/prs?state=all&projectId=project%2F1", "GET"], ["/api/runs/run%2F1/prs", "POST"], ["/api/prs/run%3Agithub%3Aorg%2Frepo%2312/refresh", "POST"], ["/api/prs/run%3Agithub%3Aorg%2Frepo%2312/feedback", "POST"], ["/api/prs/run%3Agithub%3Aorg%2Frepo%2312", "DELETE"]]);
+    expect(JSON.parse((fetchMock.mock.calls[1]![1] as RequestInit).body as string)).toEqual({ url: "https://github.com/org/repo/pull/12", nodeId: "n1" }); expect(JSON.parse((fetchMock.mock.calls[3]![1] as RequestInit).body as string)).toEqual({ include: ["checks", "reviews"], nodeId: "n1", note: "修复回归" });
+    const github = { ghPath: "/usr/local/bin/gh", env: { HTTPS_PROXY: "http://localhost:7890" }, trackMentioned: false }; await client.updateSettings({ github }); expect(JSON.parse((fetchMock.mock.calls[5]![1] as RequestInit).body as string)).toEqual({ github });
+  });
   it("extracts the URL token, saves it per session and removes it from the address", () => {
     const values = new Map<string, string>();
     const storage: Storage = { get length() { return values.size; }, clear: () => values.clear(), getItem: key => values.get(key) ?? null, key: index => [...values.keys()][index] ?? null, removeItem: key => { values.delete(key); }, setItem: (key, value) => { values.set(key, value); } };

@@ -42,7 +42,7 @@ describe("title and idle-session demo", () => {
     expect((await client.updateSettings({ titleModel: { apiKey: "", apiKeyEnv: "TITLE_MODEL_KEY" } })).titleModel).toMatchObject({ hasApiKey: false, apiKeyEnv: "TITLE_MODEL_KEY" });
     expect(await client.testTitleModel({ sample: "测试" })).toMatchObject({ ok: true, title: "全局搜索与独立审查", latencyMs: 180 });
     expect(await client.testTitleModel({ titleModel: { model: "" } })).toMatchObject({ ok: false, latencyMs: 120 });
-    await client.updateSettings({ titleModel: null }); expect(await client.settings()).toEqual({});
+    await client.updateSettings({ titleModel: null }); expect((await client.settings()).titleModel).toBeUndefined();
   });
   it("includes valid completed turns separated by 2h and 15m without drifting with the clock", async () => {
     let now = base; const client = new DemoClient(() => now); const snapshot = await client.run("run-idle-gaps");

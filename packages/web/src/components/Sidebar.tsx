@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import type { ProjectSummary, RunSummary } from "@baton/protocol";
+import type { PullRequestRecord, ProjectSummary, RunSummary } from "@baton/protocol";
 import { ProjectGroups } from "./Projects.js";
 import { clampSidebarWidth, readSidebar, saveSidebar, sidebarDefaultWidth, sidebarKeyWidth } from "../lib/sidebar.js";
 import { Icon } from "./common.js";
 export type Page = "inbox" | "runs" | "agents" | "teams" | "settings";
-export function Sidebar({ runs, runId, page, navigate, selectRun, newRun, canCreate, pendingCount, agentCount, presetCount, theme, toggleTheme, demo, loading, projects, currentProjectId, reveal, selectProject, addProject, mutateProject }: {
-  runs: RunSummary[]; runId: string | null; page: Page; navigate: (page: Page) => void; selectRun: (id: string) => void;
+export function Sidebar({ pullRequests, runs, runId, page, navigate, selectRun, newRun, canCreate, pendingCount, agentCount, presetCount, theme, toggleTheme, demo, loading, projects, currentProjectId, reveal, selectProject, addProject, mutateProject }: {
+  pullRequests?: PullRequestRecord[]; runs: RunSummary[]; runId: string | null; page: Page; navigate: (page: Page) => void; selectRun: (id: string) => void;
   newRun: (projectId?: string) => void; canCreate: boolean; pendingCount: number; agentCount: number; presetCount: number;
   projects: ProjectSummary[]; currentProjectId: string | null; reveal: { id: string; serial: number } | null; selectProject: (id: string) => void; addProject: () => void; mutateProject: (id: string, request: { name?: string; archived?: boolean }) => Promise<void>;
   theme: string; toggleTheme: () => void; demo: boolean; loading: boolean;
@@ -32,7 +32,7 @@ export function Sidebar({ runs, runId, page, navigate, selectRun, newRun, canCre
   }, [narrow]);
   const go = (target: Page) => { navigate(target); setRunsOpen(false); if (narrow) setPreference(current => ({ ...current, collapsed: true })); };
   const choose = (id: string) => { selectRun(id); setRunsOpen(false); if (narrow) setPreference(current => ({ ...current, collapsed: true })); };
-  const list = <ProjectGroups projects={projects} runs={runs} runId={runId} currentId={currentProjectId} page={page} reveal={reveal} choose={choose} selectProject={selectProject} newRun={newRun} add={addProject} canCreate={canCreate} mutate={mutateProject} loading={loading} />;
+  const list = <ProjectGroups pullRequests={pullRequests} projects={projects} runs={runs} runId={runId} currentId={currentProjectId} page={page} reveal={reveal} choose={choose} selectProject={selectProject} newRun={newRun} add={addProject} canCreate={canCreate} mutate={mutateProject} loading={loading} />;
   return <>
     {narrow && !collapsed && <button className="sidebar-overlay-backdrop" aria-label="收起导航栏" onClick={toggle} />}
     <aside ref={aside} className={`sidebar navigation-sidebar${collapsed ? " is-collapsed" : ""}${narrow ? " is-narrow" : ""}`} style={{ width: collapsed ? 48 : preference.width, minWidth: collapsed || narrow ? 48 : preference.width }} aria-label="工作区导航">
