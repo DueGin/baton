@@ -20,6 +20,15 @@ describe("safe agent content rendering", () => {
     expect(html.indexOf("先确认两个产品选择")).toBeLessThan(html.indexOf("question-card")); expect(html.indexOf("question-card")).toBeLessThan(html.indexOf("已收到回答，继续执行"));
     expect(html).not.toContain("tool-row"); expect(html).toContain("你的回答："); expect(html).not.toContain("baton-answer-card");
   });
+  it("docks a pending question above the composer and leaves a slim marker in the transcript", async () => {
+    const now = Date.parse("2026-11-10T07:00:00Z"); const client = new DemoClient(() => now); const store = new RunStore(client);
+    const snapshot = await client.run("run-questions"); const question = snapshot.questions[0]!; const items = (await client.items(question.nodeId)).items;
+    const html = renderToStaticMarkup(<Transcript snapshot={snapshot} store={store} items={{ [question.nodeId]: items }} itemStatus={{ [question.nodeId]: "ready" }} nodeId={question.nodeId} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} />);
+    const transcript = html.slice(0, html.indexOf('class="composer-stack"')); const stack = html.slice(html.indexOf('class="composer-stack"'));
+    expect(transcript).toContain("question-marker"); expect(transcript).toContain("在输入框上方作答"); expect(transcript).not.toContain("question-card");
+    expect(stack.indexOf('class="question-dock"')).toBeLessThan(stack.indexOf('class="composer"')); expect(stack).toContain("question-card question-pending is-compact"); expect(stack).toContain("提交回答"); expect(stack).toContain('aria-label="收起问题"');
+    expect(html.match(new RegExp(`id="question-${encodeURIComponent(question.id)}"`, "g"))).toHaveLength(1);
+  });
   it("keeps queued/retracted rows out of the transcript and places icon actions on steered messages", () => {
     const snapshot = replay(createScenario(0), 86000); const node = snapshot.nodes[0]!;
     const render = (delivery: Extract<TimelineItem, { type: "user_message" }>["delivery"], actionState?: MessageActionState, interrupted = false) => renderToStaticMarkup(<TranscriptRow row={{ seq: 12, nodeId: node.id, ts: snapshot.run.createdAt, item: { type: "user_message", text: "请先验证", delivery, interrupted } }} node={node} actionState={actionState} act={() => undefined} />);

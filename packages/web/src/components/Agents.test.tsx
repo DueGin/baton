@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AgentCatalogRow, AgentsPage } from "./Agents.js";
-import { AgentNavigation, AgentOptions, AgentPicker } from "./AgentPicker.js";
+import { AgentOptions, AgentPicker } from "./AgentPicker.js";
 import { AgentFields, MembersEditor } from "./TeamForms.js";
 import { AgentIcon, agentVendor } from "./AgentIcon.js";
 import { demoAgents } from "../demo/agents.js";
@@ -24,11 +24,11 @@ describe("expanded Agents UI", () => {
     expect(renderToStaticMarkup(<AgentOptions agents={demoAgents} value="" query="GPT-5.3" choose={() => undefined} />)).toContain("Codex");
     expect(renderToStaticMarkup(<AgentOptions agents={demoAgents} value="" query="GPT-5.3" choose={() => undefined} />)).not.toContain("Claude Code");
   });
-  it("uses shared searchable pickers in agent and member fields and provides a catalog navigation action", () => {
-    const picker = renderToStaticMarkup(<AgentNavigation.Provider value={() => undefined}><AgentPicker agents={demoAgents} value="codex" change={() => undefined} /></AgentNavigation.Provider>);
-    expect(picker).toContain('aria-haspopup="listbox"'); expect(picker).toContain('aria-expanded="false"'); expect(picker).toContain("更多 agent…"); expect(picker).not.toContain('disabled=""');
+  it("uses shared searchable pickers in agent and member fields without an extra catalog link", () => {
+    const picker = renderToStaticMarkup(<AgentPicker agents={demoAgents} value="codex" change={() => undefined} />);
+    expect(picker).toContain('aria-haspopup="listbox"'); expect(picker).toContain('aria-expanded="false"'); expect(picker).not.toContain("更多 agent"); expect(picker).not.toContain('disabled=""');
     const fields = renderToStaticMarkup(<AgentFields agents={demoAgents} value={{ agentId: "codex" }} onChange={() => undefined} />); expect(fields).toContain("searchable-agent-picker"); expect(fields).toContain('aria-label="Model"'); expect(fields).toContain('aria-label="Mode"'); expect(fields).toContain('aria-label="Thinking"');
-    const members = renderToStaticMarkup(<MembersEditor agents={demoAgents} members={[{ role: "review", agentId: "pi" }]} onChange={() => undefined} />); expect(members).toContain("searchable-agent-picker"); expect(members).toContain("更多 agent…");
+    const members = renderToStaticMarkup(<MembersEditor agents={demoAgents} members={[{ role: "review", agentId: "pi" }]} onChange={() => undefined} />); expect(members).toContain("searchable-agent-picker"); expect(members).not.toContain("更多 agent");
   });
   it("renders additional original vendor marks and preserves the generic fallback", () => {
     for (const id of ["cline", "roo-code", "kiro", "augment", "mistral", "junie", "amp", "aider", "trae"]) { expect(agentVendor(id)).not.toBe("generic"); expect(renderToStaticMarkup(<AgentIcon agent={id} />)).toContain("<svg"); }

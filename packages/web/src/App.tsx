@@ -29,7 +29,6 @@ import { CancelRunDialog } from "./components/BackgroundProcesses.js";
 import { AddProject, ProjectsEmpty } from "./components/Projects.js";
 import { liveProjectSummaries, readCurrentProject, saveCurrentProject } from "./lib/projects.js";
 import { AgentsPage } from "./components/Agents.js";
-import { AgentNavigation } from "./components/AgentPicker.js";
 import { agentReady } from "./lib/agents.js";
 import { NewRun } from "./components/NewRun.js";
 import { desktopBridge, desktopRoute } from "./desktop.js";
@@ -201,7 +200,7 @@ export default function App({ client }: { client: BatonClient }) {
   const saveDefaults = (policy: RunPolicy): void => { setDefaults(policy); localStorage.setItem("baton.defaults", JSON.stringify({ ...policy, maxCostUsd: policy.budget?.maxCostUsd })); };
   const proposals = pendingProposals(snapshot?.run.team);
 
-  return <AgentNavigation.Provider value={() => { setNewRun(false); setTeamDialog(null); setReassignId(null); setPage("agents"); }}><div className="app-shell">
+  return <div className="app-shell">
     <Sidebar pullRequests={visiblePrs} projects={projects} currentProjectId={currentProjectId} reveal={projectReveal} selectProject={rememberProject} addProject={() => { resumeNewRun.current = false; setAddProject(true); }} mutateProject={async (id, request) => { await client.patchProject(id, request); await refreshProjects(); }} runs={runs} runId={runId} page={page} navigate={setPage} selectRun={id => { const projectId = runs.find(run => run.id === id)?.projectId; if (projectId) rememberProject(projectId); setRunId(id); setPage("runs"); }} newRun={openNewRun} canCreate={agents.some(agentReady)} pendingCount={inboxState.loaded ? inboxState.items.length : runs.reduce((sum, run) => sum + run.pendingTotal, 0)} agentCount={agents.filter(agentReady).length} presetCount={presets.length} theme={theme} toggleTheme={() => setTheme(current => current === "dark" ? "light" : "dark")} demo={client.demo} loading={initialLoading} />
     <main className="main-shell">
       {client.demo && <div className="demo-banner"><span className="demo-tag">DEMO</span><span>浏览器内实时模拟 · 尝试处理授权、查看委派结果，或给任意节点发消息</span><span className="demo-local">无服务端连接</span></div>}
@@ -221,7 +220,7 @@ export default function App({ client }: { client: BatonClient }) {
     {snapshot && cancelingRun && <CancelRunDialog snapshot={snapshot} busy={busy} error={error} close={() => { if (!busy) setCancelingRun(false); }} submit={request => { void action(async () => { await client.cancelRun(snapshot.run.id, request); setCancelingRun(false); }); }} />}
     {addProject && <AddProject client={client} close={() => setAddProject(false)} added={async project => { await refreshProjects(); setNewRun(false); selectProject(project.id); setAddProject(false); if (resumeNewRun.current) { setNewRun(true); resumeNewRun.current = false; } }} />}
     {newRun && <NewRun projects={projects} initialProjectId={currentProjectId} selectProject={rememberProject} addProject={() => { resumeNewRun.current = true; setAddProject(true); }} agents={agents} presets={presets} defaults={defaults} close={() => setNewRun(false)} create={create} busy={busy} demo={client.demo} error={error} />}
-  </div></AgentNavigation.Provider>;
+  </div>;
 }
 
 function SettingsPage({ client, policy, setPolicy, theme, setTheme, agents, runs, rules, busy, notifications, notificationPermission, toggleNotifications, createRule, removeRule }: { client: BatonClient; runs: RunSummary[]; rules: PermissionRule[]; busy: boolean; notifications: boolean; notificationPermission: NotificationPermission | "unsupported"; toggleNotifications: (enabled: boolean) => void; createRule: (input: CreatePermissionRuleRequest) => Promise<boolean>; removeRule: (id: string) => void; policy: RunPolicy; setPolicy: (policy: RunPolicy) => void; theme: string; setTheme: (theme: string) => void; agents: AgentEntry[] }) {

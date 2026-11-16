@@ -1311,10 +1311,66 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .agent-picker-option > span:not(.agent-mark) { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }.agent-picker-option strong { font-size: 11px; font-weight: 500; }.agent-picker-option small { font-size: 9px; color: var(--text-dim); }
 .agent-picker-option:not(:disabled):hover, .agent-picker-option[aria-selected="true"] { background: var(--surface-hover); }.agent-picker-option:focus-visible { outline-offset: -2px; }
 .agent-picker-option:disabled { opacity: .5; cursor: not-allowed; }.agent-picker-option .picker-unavailable { flex: none; font-size: 8px; }
-.more-agents-link { align-self: flex-start; font-size: 9px; margin: -2px 0 0; }.agent-picker-popover > .more-agents-link { margin: 2px 5px; }.agent-picker-empty { font-size: 10px; padding: 8px; }
+.agent-picker-empty { font-size: 10px; padding: 8px; }
 .proposal-roster .searchable-agent-picker { min-width: 150px; }.proposal-roster .agent-picker-label { display: none; }.proposal-roster .agent-picker-popover { top: 35px; }
 @media (max-width: 1100px) { .agent-catalog-group > div { grid-template-columns: 1fr; } }
 @media (max-width: 650px) { .agent-catalog-main { flex-wrap: wrap; }.agent-catalog-identity { min-width: 120px; }.catalog-version { margin-left: 38px; }.catalog-availability { margin-left: auto; } }
 .agent-picker-popover[popover] { position: fixed; inset: auto; margin: 0; max-height: min(330px, calc(100dvh - 24px)); }
 .proposal-roster .agent-picker-popover[popover] { top: auto; }
 .agent-picker-popover[popover]::backdrop { background: transparent; }
+
+/* Composer stack: dock, queue, tool pills and the composer share one centred column so their left
+   edges line up. */
+.composer-stack { flex: none; display: flex; flex-direction: column; gap: 6px; align-self: center; width: calc(100% - 36px); max-width: 840px; margin: 7px 18px 10px; min-width: 0; }
+.composer-stack > .composer { margin: 0; width: 100%; max-width: none; align-self: stretch; }
+.composer-stack > .composer-tools { margin: 0; max-width: none; }
+.composer-stack > .composer-tools:not(:has(button)) { display: none; }
+.composer-stack > .queue-dock { margin: 0; }
+@media (max-width: 680px) { .composer-stack { width: calc(100% - 20px); margin: 6px 10px 8px; } .composer-stack > .composer-tools { margin: 0; } }
+
+/* Pending questions dock above the composer, compact and capped so the transcript stays visible. */
+.question-dock { display: flex; flex-direction: column; gap: 6px; max-height: min(44dvh, 360px); overflow: auto; overscroll-behavior: contain; }
+.question-dock > .question-card + .question-card { margin-top: 0; }
+.question-card.is-compact { padding: 8px 11px 9px; font-size: 11px; box-shadow: var(--shadow); }
+.question-dock > .question-card.is-compact { border-left-width: 3px; }
+.question-card.is-compact .human-card-heading { margin-bottom: 4px; gap: 7px; flex-wrap: nowrap; min-width: 0; }
+.question-card.is-compact .human-card-heading strong { font-size: 11px; flex: none; }
+.question-card.is-compact .human-card-heading .tag { flex: none; font-size: 9px; }
+.question-card.is-compact .human-card-heading time { flex: none; }
+.question-card.is-compact.is-minimised .human-card-heading { margin-bottom: 0; }
+.question-minimised-text { min-width: 0; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-secondary); }
+.question-collapse { flex: none; width: 22px; height: 22px; padding: 0; margin: -3px -5px -3px 0; }
+.question-collapse[aria-expanded="false"] svg { transform: rotate(180deg); }
+.question-card.is-compact .question-prompt { padding: 5px 0; display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 8px; align-items: baseline; }
+.question-card.is-compact .question-prompt-header { margin: 0; font-size: 10px; }
+.question-card.is-compact .question-prompt > .markdown { font-size: 11px; min-width: 0; }
+.question-card.is-compact .question-prompt > .markdown p { margin: 0; }
+.question-card.is-compact .question-prompt > :not(.question-prompt-header):not(.markdown) { grid-column: 1 / -1; }
+.question-card.is-compact .question-options { margin: 5px 0 0; gap: 5px; }
+.question-card.is-compact .question-option { display: inline-flex; align-items: baseline; gap: 6px; padding: 3px 8px; font-size: 11px; border-radius: 5px; max-width: 100%; min-width: 0; }
+.question-card.is-compact .question-option-label { flex: none; gap: 4px; }
+.question-card.is-compact .question-option-description { margin: 0; font-size: 10px; min-width: 0; max-width: 24em; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.question-card.is-compact .question-option-description .markdown, .question-card.is-compact .question-option-description p { display: inline; margin: 0; font-size: inherit; }
+.question-card.is-compact .question-prompt textarea { margin-top: 5px; font-size: 11px; padding: 5px 7px; }
+.question-card.is-compact .question-submit { margin-top: 6px; display: flex; flex-direction: row-reverse; align-items: center; gap: 9px; }
+.question-card.is-compact .question-submit .muted { font-size: 9px; }
+.question-card.is-compact .question-async, .question-card.is-compact .question-cancel-reason { margin: 4px 0 0; font-size: 10px; }
+.question-card.is-compact .question-answered summary { font-size: 11px; }
+.transcript-content > .question-card.is-compact { margin: 0 0 14px 31px; box-shadow: none; }
+.question-marker { display: flex; align-items: center; gap: 7px; width: calc(100% - 31px); margin: 0 0 14px 31px; padding: 6px 10px; border: 1px dashed color-mix(in srgb, var(--blue) 55%, var(--border)); border-radius: 6px; background: color-mix(in srgb, var(--blue) 5%, var(--surface)); color: var(--text); font-size: 11px; text-align: left; min-width: 0; }
+.question-marker:hover { border-style: solid; }
+.question-marker > i { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--blue); }
+.question-marker > strong { flex: none; font-weight: 600; }
+.question-marker > span { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-secondary); }
+.question-marker > small { flex: none; color: var(--blue); font-size: 10px; }
+
+/* The searchable agent trigger matches the text inputs next to it. */
+.agent-picker-trigger { border-color: var(--border-strong); border-radius: 6px; }
+.proposal-roster input, .proposal-roster .agent-picker-trigger { height: 30px; }
+.proposal-roster .agent-picker-trigger { min-height: 0; padding: 0 6px; font-size: 10px; }
+.proposal-roster .agent-picker-trigger .agent-mark.small { width: 18px; height: 18px; font-size: 10px; border-radius: 4px; }
+.proposal-roster td { vertical-align: middle; }
+.agent-fields input, .agent-fields select, .agent-fields .agent-picker-trigger, .member-editor-row input, .member-editor-row select, .member-editor-row .agent-picker-trigger { height: 34px; }
+.agent-fields input, .agent-fields select, .member-editor-row input, .member-editor-row select { padding-top: 0; padding-bottom: 0; }
+.agent-fields .agent-picker-trigger, .member-editor-row .agent-picker-trigger { min-height: 0; padding-top: 0; padding-bottom: 0; }
+.agent-fields .agent-picker-trigger .agent-mark.small, .member-editor-row .agent-picker-trigger .agent-mark.small { width: 21px; height: 21px; font-size: 12px; }

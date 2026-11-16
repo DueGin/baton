@@ -24,6 +24,12 @@ describe("shared question cards", () => {
     const canceled = render({ ...question, status: "canceled", cancelReason: "会话已暂停 <script>" });
     expect(canceled).toContain("提问已取消"); expect(canceled).toContain("会话已暂停 &lt;script&gt;"); expect(canceled).not.toContain("<script>"); expect(canceled).not.toContain("提交回答");
   });
+  it("renders the compact docked variant with a minimise toggle only while pending", () => {
+    const compact = renderToStaticMarkup(<QuestionCard compact question={question} answer={() => undefined} busy={false} />);
+    expect(compact).toContain("question-card question-pending is-compact"); expect(compact).toContain('aria-label="收起问题"'); expect(compact).toContain('title="响应更快，保留 `projectId`"');
+    const answered = renderToStaticMarkup(<QuestionCard compact question={{ ...question, status: "answered", answer: "当前项目" }} answer={() => undefined} busy={false} />);
+    expect(answered).toContain("is-compact"); expect(answered).not.toContain("收起问题"); expect(answered).toContain("你的回答：当前项目");
+  });
   it("assigns the jump anchor only to transcript cards so inspector copies cannot duplicate IDs", () => {
     expect(render(question, true)).toContain('id="question-q%2Fnative"'); expect(render(question)).not.toContain('id="question-q%2Fnative"');
   });
