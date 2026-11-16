@@ -85,10 +85,11 @@ class ACPSession extends ProviderSession implements Client {
             throw error;
         }
     }
+    private startupTimeoutMs(): number { return this.options.timeoutMs ?? this.options.spec?.startupTimeoutMs ?? 30000; }
     private async bounded<T>(operation: Promise<T>): Promise<T> {
         let timer: NodeJS.Timeout | undefined;
         try {
-            return await Promise.race([operation, this.connection.closed.then(() => { throw new Error(`ACP disconnected ${this.stderr}`); }), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("ACP initialization timed out")), this.options.timeoutMs ?? 10000); })]);
+            return await Promise.race([operation, this.connection.closed.then(() => { throw new Error(`ACP disconnected ${this.stderr}`); }), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`ACP request timed out after ${Math.round(this.startupTimeoutMs() / 1000)}s`)), this.startupTimeoutMs()); })]);
         }
         finally {
             clearTimeout(timer);
