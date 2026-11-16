@@ -10,6 +10,7 @@ export function exportRun(store: Store, id: string, format: ExportFormat): strin
   if (format !== "md") throw new Error("Unknown export format");
   const lines = [`# ${s.run.title}`, "", `Run: ${id} · ${s.run.status}`, `Working directory: ${s.run.cwd}`, "", "## Delegation tree", ""];
   if (project) lines.splice(4, 0, `Project: ${project.name} (${project.path})`);
+  if (s.run.pauses?.length) { lines.push("## Pauses", ""); for (const pause of s.run.pauses) lines.push(`- ${pause.at} → ${pause.resumedAt ?? "paused"} (${pause.by})`); lines.push(""); }
   const walk = (parent: string | null, depth: number): void => {
     for (const n of s.nodes.filter((n) => n.parentNodeId === parent)) { lines.push(`${"  ".repeat(depth)}- **${n.title}** (${n.agentId}) — ${n.status}`); walk(n.id, depth + 1); }
   }; walk(null, 0);

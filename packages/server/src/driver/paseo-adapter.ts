@@ -69,6 +69,7 @@ function parsePersistence(value: JsonValue, expectedProvider: string): AgentPers
     return { provider: expectedProvider as AgentPersistenceHandle["provider"], sessionId: value.sessionId, ...(typeof value.sessionFile === "string" ? { sessionFile: value.sessionFile } : {}) };
 }
 export class PaseoDriverSession implements DriverSession {
+    supportsLongToolCalls(): boolean { return this.session.supportsLongToolCalls?.() ?? false; }
     private listeners = new Set<(event: DriverEvent) => void>();
     private turnId: string | null = null;
     private closed = false;

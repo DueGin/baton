@@ -10,6 +10,8 @@ import { validateSchema } from "./schema.js";
 import type { TitleNaming } from "../titles/index.js";
 import type { ProcessSource } from "../background/attribution.js";
 import { Projects } from "../projects/index.js";
+import { nativePrompts, nativeUpdatedInput } from "./questions.js";
+import type { QuestionRecord } from "@baton/protocol";
 
 /** True when a permission request is for one of baton's own MCP tools (Claude names them
  * mcp__baton__*, Codex asks via an MCP elicitation carrying serverName "baton"). */
@@ -29,6 +31,8 @@ type HumanMessage = ItemRecord & { item: Extract<TimelineItem, { type: "user_mes
 type MessageDelivery = Omit<SendMessageResponse, "accepted">;
 export class MessageError extends Error { readonly status = 409; }
 const HUMAN_INTERRUPT = "interrupted by human message";
+const PAUSE_REASON = "paused by human";
+const RESUME_PROMPT = "<baton-notice>The human paused this run and has now resumed it. Continue where you left off.</baton-notice>";
 interface Runtime {
   token: string; session?: DriverSession; opening?: Promise<DriverSession>; unsubscribe?: () => void;
   turnId?: string; driverTurnId?: string; report?: ReportResultInput; finalText: string; corrections: number;
@@ -37,8 +41,10 @@ interface Runtime {
   idleTimer?: NodeJS.Timeout; stallTimer?: NodeJS.Timeout;
   /** Hold other prompts while an interrupted turn is being replaced. */
   interrupting?: string;
+  interruptReason?: string;
+  starting?: Promise<{ turnId: string }>;
 }
-export interface KernelOptions { baseUrl: string; maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; titles?: TitleNaming }
+export interface KernelOptions { baseUrl: string; maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; askTimeoutMinutes?: number; titles?: TitleNaming }
 export class Kernel {
   private runtimes = new Map<string, Runtime>();
   private identities = new Map<string, string>();
@@ -52,6 +58,8 @@ export class Kernel {
   private decidingPermissions = new Set<string>();
   private messageActions = new Set<string>();
   private drainingMessages = new Set<string>();
+  private pausing = new Map<string, Promise<void>>();
+  private resuming = new Set<string>();
   readonly teams: Teams;
   readonly human: HumanInteraction;
   readonly rules: PermissionRules;
@@ -60,10 +68,11 @@ export class Kernel {
     this.projects = new Projects(store);
     this.rules = new PermissionRules(store);
     this.human = new HumanInteraction(store, {
-      activity: (id, activity) => this.patchNode(id, { activity }),
+      activity: (id, activity) => { this.patchNode(id, { activity }); this.armStall(id); },
       enqueue: (id, text) => this.enqueue(id, text),
       cancel: (id, reason) => this.cancelNode(id, reason),
       followup: (id, text) => this.sendFollowup(id, text),
+      nativeAnswer: (question) => this.answerNative(question),
     });
     this.teams = new Teams(store, registry, {
       cancelForReplacement: (id, reason) => { const d = this.store.node(id).delegationId; if (d) this.replacing.add(d); return this.cancelNode(id, reason, true); },
@@ -89,7 +98,7 @@ export class Kernel {
     this.emit(n.runId, Object.values(patch).some((value) => value === undefined)
       ? { type: "node.created", node: next }
       : { type: "node.updated", nodeId: id, patch: { ...patch, updatedAt: next.updatedAt } });
-    if (patch.status && ["completed", "failed", "canceled", "replaced"].includes(patch.status)) this.human.cancelQuestions(id);
+    if (patch.status && ["completed", "failed", "canceled", "replaced"].includes(patch.status)) this.human.endQuestions(id, `Node ${patch.status}`);
   }
   private patchDelegation(id: string, patch: Partial<DelegationRecord>): void {
     const d = this.store.delegation(id);
@@ -100,12 +109,20 @@ export class Kernel {
   private runtime(id: string): Runtime {
     let rt = this.runtimes.get(id);
     if (!rt) {
-      rt = { token: randomBytes(32).toString("hex"), finalText: "", corrections: 0, usage: emptyUsage(), chain: Promise.resolve(), queued: [], pendingMessages: new Map(), closed: false };
+      const rows = new Map(this.store.items(id).filter((row) => row.item.type === "user_message" && row.item.delivery === "queued").map((row) => [row.seq, row]));
+      rt = { token: randomBytes(32).toString("hex"), finalText: "", corrections: 0, usage: emptyUsage(), chain: Promise.resolve(), queued: this.store.heldPrompts(id).flatMap((p): QueuedPrompt[] => p.humanSeq === undefined ? [{ text: p.text, trigger: p.trigger }] : rows.has(p.humanSeq) ? [{ text: p.text, trigger: p.trigger, humanItem: rows.get(p.humanSeq)! }] : []), pendingMessages: rows, closed: false };
       this.runtimes.set(id, rt); this.identities.set(rt.token, id);
     }
     return rt;
   }
   identify(token: string): string | undefined { return this.identities.get(token); }
+  private paused(runId: string): boolean { return this.store.snapshot(runId).run.status === "paused"; }
+  private interruptedTurn(id: string, turnId: string): boolean {
+    const rt = this.runtime(id);
+    return rt.interrupting === turnId || this.store.snapshot(this.store.node(id).runId).turns.some((turn) => turn.id === turnId && turn.status === "canceled" && [HUMAN_INTERRUPT, PAUSE_REASON].includes(turn.error ?? ""));
+  }
+  private persistQueue(id: string): void { this.store.holdPrompts(id, this.runtime(id).queued.map((p) => ({ text: p.text, trigger: p.trigger, ...(p.humanItem ? { humanSeq: p.humanItem.seq } : {}) }))); }
+  private queuePrompts(id: string, prompts: QueuedPrompt[]): void { this.runtime(id).queued.push(...prompts); this.persistQueue(id); }
   processSources(): ProcessSource[] {
     return this.store.list().flatMap((r) => {
       const snapshot = this.store.snapshot(r.id);
@@ -123,12 +140,13 @@ export class Kernel {
       const s = this.store.snapshot(run.id);
       const normalized = this.validatePolicy(s.run.policy);
       if (JSON.stringify(s.run.policy) !== JSON.stringify(normalized)) this.emit(run.id, { type: "run.updated", patch: { policy: normalized } });
-      for (const n of s.nodes) if (active(n.status)) this.patchNode(n.id, { status: "interrupted", activity: "Interrupted by daemon restart", error: "Daemon restarted" });
-      for (const d of s.delegations) if (active(d.status) && !d.blockedByProposal) this.patchDelegation(d.id, { status: "interrupted" });
-      for (const t of s.turns) if (t.status === "running") this.emit(run.id, { type: "turn.updated", turnId: t.id, patch: { status: "interrupted", endedAt: now(), error: "Daemon restarted" } });
+      for (const n of s.nodes) if (active(n.status)) { if (run.status === "paused" && s.turns.some((t) => t.nodeId === n.id && t.status === "running")) this.store.rememberPausedNode(run.id, n.id); this.patchNode(n.id, { status: "interrupted", activity: run.status === "paused" ? "Paused" : "Interrupted by daemon restart", error: "Daemon restarted" }); }
+      for (const d of s.delegations) if (active(d.status) && !d.blockedByProposal && !(run.status === "paused" && d.status === "queued")) this.patchDelegation(d.id, { status: "interrupted" });
+      for (const t of s.turns) if (t.status === "running") this.emit(run.id, { type: "turn.updated", turnId: t.id, patch: { status: run.status === "paused" ? "canceled" : "interrupted", endedAt: now(), error: run.status === "paused" ? PAUSE_REASON : "Daemon restarted" } });
       for (const p of s.permissions) if (p.status === "pending") this.emit(run.id, { type: "permission", permission: { ...p, status: "expired", resolvedAt: now() } });
       for (const span of s.toolSpans) if (span.status === "running") this.emit(run.id, { type: "tool.span", span: { ...span, status: "canceled", endedAt: now() } });
       for (const n of s.nodes) this.human.refreshActivity(n.id);
+      for (const n of s.nodes) this.human.endQuestions(n.id, "Daemon restarted");
       this.updateRun(run.id);
       for (const parentId of new Set(s.delegations.filter((d) => done(d) && d.result && !d.deliveredAt).map((d) => d.fromNodeId))) this.scheduleDelivery(parentId);
     }
@@ -225,7 +243,7 @@ export class Kernel {
       if (!driver) throw new Error(`Agent unavailable: ${n.agentId}`);
       const run = this.store.snapshot(n.runId).run;
 
-      const spec: OpenSessionSpec = { cwd: n.cwd, model: n.model, modeId: n.modeId, thinking: n.thinking, title: n.title, systemPrompt: systemPrompt(n, run.policy, (await this.registry.detect()).filter((a) => a.status === "ready" && a.enabled), run.team), mcpServers: { baton: { type: "http" as const, url: `${this.options.baseUrl}/mcp/n/${rt.token}` } } };
+      const spec: OpenSessionSpec = { cwd: n.cwd, model: n.model, modeId: n.modeId, thinking: n.thinking, title: n.title, env: { MCP_TOOL_TIMEOUT: String(Math.ceil(Math.max(60, this.options.askTimeoutMinutes ?? 60) * 60000 + 60000)) }, systemPrompt: systemPrompt(n, run.policy, (await this.registry.detect()).filter((a) => a.status === "ready" && a.enabled), run.team), mcpServers: { baton: { type: "http" as const, url: `${this.options.baseUrl}/mcp/n/${rt.token}` } } };
       const session = n.persistence !== undefined && driver.capabilities.resume ? await driver.resume(n.persistence, spec) : await driver.open(spec);
       if (rt.closed) { await session.close(); throw new Error("Node session closed during startup"); }
       rt.session = session;
@@ -248,12 +266,12 @@ export class Kernel {
     // A cancel/close can abandon a message while session startup or steer is awaiting the driver.
     prompts = prompts.filter((p) => !p.humanItem || rt.pendingMessages.has(p.humanItem.seq));
     if (!prompts.length) return "queued";
-    if (rt.turnId || (rt.interrupting && !interrupt)) { rt.queued.push(...prompts); return "queued"; }
+    if (rt.turnId || this.paused(n.runId) || (rt.interrupting && !interrupt)) { this.queuePrompts(id, prompts); return "queued"; }
     if (["canceled", "replaced"].includes(n.status) || this.canceling.has(id)) throw new Error("Node is canceled");
     const session = await this.session(id);
     prompts = prompts.filter((p) => !p.humanItem || rt.pendingMessages.has(p.humanItem.seq));
     if (!prompts.length) return "queued";
-    if (rt.turnId || (rt.interrupting && !interrupt)) { rt.queued.push(...prompts); return "queued"; }
+    if (rt.turnId || this.paused(n.runId) || (rt.interrupting && !interrupt)) { this.queuePrompts(id, prompts); return "queued"; }
     const current = this.store.node(id);
     if (["canceled", "replaced"].includes(current.status) || this.canceling.has(id) || this.stopped) throw new Error("Node has been canceled or daemon stopped");
     if (!active(current.status)) this.checkGlobalLimit();
@@ -280,13 +298,16 @@ export class Kernel {
     if (n.delegationId) this.patchDelegation(n.delegationId, { status: "running", startedAt: now(), endedAt: undefined, ...(n.status === "completed" || n.status === "failed" ? { deliveredAt: undefined, deliveredVia: undefined, result: undefined } : {}) });
     this.updateRun(n.runId); this.armStall(id);
     try {
-      const started = await session.startTurn(text); rt.driverTurnId = started.turnId;
+      const starting = session.startTurn(text); rt.starting = starting;
+      const started = await starting;
+      if (rt.turnId !== turnId) return "turn";
+      rt.driverTurnId = started.turnId;
       this.emit(n.runId, { type: "turn.updated", turnId, patch: { driverTurnId: started.turnId } });
       this.patchNode(id, { persistence: session.persistence() ?? undefined });
     } catch (error) {
       await this.finishTurn(id, "failed", undefined, error instanceof Error ? error.message : String(error));
       throw error;
-    }
+    } finally { rt.starting = undefined; }
     return "turn";
   }
   async message(id: string, text: string, clientId?: string, mode: SendMode = "queue"): Promise<MessageDelivery> {
@@ -337,6 +358,7 @@ export class Kernel {
     const next = { ...row, item: { ...row.item, text, editedAt: now() } };
     rt.queued = rt.queued.map((prompt) => prompt.humanItem?.seq === seq ? { ...prompt, text, humanItem: next } : prompt);
     this.replaceMessage(id, next);
+    this.persistQueue(id);
   }
   async deliverHumanMessage(id: string, seq: number, mode: "steer" | "interrupt"): Promise<MessageDelivery> {
     if (mode !== "steer" && mode !== "interrupt") throw new Error("Invalid delivery mode");
@@ -347,10 +369,11 @@ export class Kernel {
     this.messageActions.add(key);
     // Reserve before awaiting steer/interrupt so the old turn cannot drain this row too.
     rt.queued = rt.queued.filter((p) => p.humanItem?.seq !== seq);
+    this.persistQueue(id);
     rt.pendingMessages.set(seq, row);
     try { return await this.sendHumanMessage(id, row, mode, true); }
     catch (error) {
-      if (rt.pendingMessages.has(seq) && row.item.delivery === "queued" && !rt.queued.some((p) => p.humanItem?.seq === seq)) rt.queued.push({ text: row.item.text, trigger: "user", humanItem: row });
+      if (rt.pendingMessages.has(seq) && row.item.delivery === "queued" && !rt.queued.some((p) => p.humanItem?.seq === seq)) this.queuePrompts(id, [{ text: row.item.text, trigger: "user", humanItem: row }]);
       if (row.item.delivery === "steered") rt.pendingMessages.delete(seq);
       throw error;
     } finally { this.messageActions.delete(key); }
@@ -360,6 +383,7 @@ export class Kernel {
     if (this.messageActions.has(`${id}:${seq}`)) throw new MessageError("Message delivery is already in progress");
     if (row.item.delivery !== "queued") throw new MessageError("Only queued messages can be retracted");
     rt.queued = rt.queued.filter((p) => p.humanItem?.seq !== seq);
+    this.persistQueue(id);
     rt.pendingMessages.delete(seq);
     const { queuePosition: _position, ...item } = row.item;
     this.replaceMessage(id, { ...row, item: { ...item, delivery: "retracted" } });
@@ -367,6 +391,7 @@ export class Kernel {
   private async sendHumanMessage(id: string, row: ItemRecord, mode: SendMode, escalated: boolean): Promise<MessageDelivery> {
     if (row.item.type !== "user_message") throw new Error("Expected human message");
     const rt = this.runtime(id), turnId = rt.turnId;
+    if (this.paused(this.store.node(id).runId)) { const delivery = await this.startPrompts(id, [{ text: row.item.text, trigger: "user", humanItem: row }]); return { delivery, itemSeq: row.seq }; }
     let steerUnsupported = false;
     if (mode === "interrupt" && turnId) return this.interruptForMessage(id, row);
     if (mode === "steer" && turnId && !rt.interrupting) {
@@ -374,7 +399,7 @@ export class Kernel {
       try { outcome = await rt.session?.steer(row.item.text); }
       catch (error) { this.log(this.store.node(id).runId, error, id); }
       if (!rt.pendingMessages.has(row.seq)) return { delivery: "queued", itemSeq: row.seq };
-      const interrupted = rt.interrupting === turnId || this.store.snapshot(this.store.node(id).runId).turns.some((t) => t.id === turnId && t.status === "canceled" && t.error === HUMAN_INTERRUPT);
+      const interrupted = this.interruptedTurn(id, turnId);
       if (outcome === "steered" && !interrupted) {
         this.deliverMessage(id, { ...row, item: { ...row.item, escalated } }, "steered", turnId);
         return { delivery: "steered", itemSeq: row.seq };
@@ -391,7 +416,9 @@ export class Kernel {
     if (rt.interrupting) throw new MessageError("A human interruption is already in progress");
     if (!turnId || row.item.type !== "user_message") throw new Error("No active turn to interrupt");
     rt.interrupting = turnId;
+    rt.interruptReason = HUMAN_INTERRUPT;
     try {
+      await rt.starting?.catch(() => {});
       await rt.session?.interrupt();
       // Driver.interrupt resolves when the old turn can no longer run. Its terminal event
       // may still be queued on the kernel event chain; finalize it before opening a turn.
@@ -401,6 +428,7 @@ export class Kernel {
       return { delivery, itemSeq: row.seq };
     } finally {
       rt.interrupting = undefined;
+      rt.interruptReason = undefined;
       // Notices/results held during the transition can now reach the replacement turn.
       if (this.store.notices(id).length || this.store.snapshot(this.store.node(id).runId).delegations.some((d) => d.fromNodeId === id && done(d) && d.result && !d.deliveredAt)) this.scheduleDelivery(id);
     }
@@ -419,7 +447,7 @@ export class Kernel {
     this.replaceMessage(id, next);
   }
   private abandonMessages(id: string): void {
-    const rt = this.runtime(id); rt.queued = [];
+    const rt = this.runtime(id); rt.queued = []; this.store.clearHeldPrompts(id);
     for (const seq of rt.pendingMessages.keys()) this.abandonMessage(id, seq);
   }
   private abandonMessage(id: string, seq: number): void {
@@ -427,8 +455,9 @@ export class Kernel {
   }
   private async drainMessages(id: string): Promise<void> {
     const rt = this.runtime(id);
-    if (rt.queued.length && !rt.closed && !rt.interrupting) {
+    if (rt.queued.length && !rt.closed && !rt.interrupting && !this.paused(this.store.node(id).runId)) {
       const prompts = rt.queued.splice(0), keys = prompts.flatMap((prompt) => prompt.humanItem ? [`${id}:${prompt.humanItem.seq}`] : []);
+      this.persistQueue(id);
       // Reserve before startPrompts awaits session startup; an edit must not race its
       // captured text, even while the persisted row still says queued.
       for (const key of keys) this.drainingMessages.add(key);
@@ -439,11 +468,12 @@ export class Kernel {
   private async sendPrompt(id: string, text: string, trigger: TurnTrigger): Promise<void> {
     const n = this.store.node(id), rt = this.runtime(id);
     if (["canceled", "replaced"].includes(n.status) || this.canceling.has(id)) throw new Error("Node is canceled");
-    if (rt.interrupting) { rt.queued.push({ text, trigger }); return; }
+    if (rt.interrupting || this.paused(n.runId)) { this.queuePrompts(id, [{ text, trigger }]); return; }
     if (rt.turnId) {
+      const turnId = rt.turnId;
       const outcome = await rt.session?.steer(text);
-      if (outcome === "steered") { this.addItem(id, { type: "user_message", text }); return; }
-      rt.queued.push({ text, trigger }); return;
+      if (outcome === "steered" && !this.interruptedTurn(id, turnId)) { this.addItem(id, { type: "user_message", text }); return; }
+      this.queuePrompts(id, [{ text, trigger }]); return;
     }
     await this.startTurn(id, text, trigger);
   }
@@ -480,7 +510,7 @@ export class Kernel {
     const d: DelegationRecord = { blockedByProposal: target.proposalId, id: delegationId, runId: parent.runId, kind: "delegate", fromNodeId: parentId, toNodeId: nodeId, role: target.member.role, memberId: target.member.id, replaces, brief: { title: input.title, task: input.task, context: input.context, acceptance: input.acceptance, readonly: input.readonly, outputSchema: input.outputSchema as Record<string, JsonValue> | undefined }, round: 1, status: "queued", createdAt: ts, subtreeUsage: emptyUsage() };
     if (!target.proposalId) this.emit(parent.runId, { type: "node.created", node: { id: nodeId, runId: parent.runId, parentNodeId: parentId, delegationId, depth: parent.depth + 1, agentId: target.member.agentId, role: target.member.role, memberId: target.member.id, model: target.model, thinking: target.thinking, modeId: input.readonly ? entry.modes.find((m) => m.isReadOnly)?.id ?? target.modeId : target.modeId, title: input.title, cwd: parent.cwd, status: "starting", createdAt: ts, updatedAt: ts, usage: emptyUsage(), turns: 0 } });
     this.emit(parent.runId, { type: "delegation.created", delegation: d });
-    if (!target.proposalId) setImmediate(() => { void this.startTurn(nodeId, briefPrompt(d), "delegation").catch((e: unknown) => this.failNode(nodeId, e)); });
+    if (!target.proposalId) this.launchDelegation(nodeId, d);
     return { delegationId, nodeId: target.proposalId ? undefined : nodeId, status: target.proposalId ? "pending_approval" : "queued", proposalId: target.proposalId, note: "Result will be delivered automatically. Do not poll." };
   }
   private async releaseProposal(runId: string, proposalId: string): Promise<void> {
@@ -508,9 +538,17 @@ export class Kernel {
       this.emit(runId, { type: "node.created", node: { id: d.toNodeId, runId, parentNodeId: parent.id, delegationId: d.id, depth: parent.depth + 1, agentId: member.agentId, memberId: member.id, role: member.role, model: member.model, modeId: d.brief.readonly ? entry?.modes.find((m) => m.isReadOnly)?.id ?? member.modeId : member.modeId, thinking: member.thinking, title: d.brief.title, cwd: parent.cwd, status: "starting", createdAt: ts, updatedAt: ts, usage: emptyUsage(), turns: 0 } });
       this.patchDelegation(d.id, { memberId: member.id, blockedByProposal: undefined });
       const ready = this.store.delegation(d.id);
-      setImmediate(() => { void this.startTurn(d.toNodeId, briefPrompt(ready), "delegation").catch((e: unknown) => this.failNode(d.toNodeId, e)); });
+      this.launchDelegation(d.toNodeId, ready);
     }
     this.updateRun(runId);
+  }
+  private launchDelegation(id: string, delegation: DelegationRecord): void {
+    if (this.paused(delegation.runId)) { this.queuePrompts(id, [{ text: briefPrompt(delegation), trigger: "delegation" }]); return; }
+    setImmediate(() => {
+      if (this.stopped) return;
+      if (this.store.node(id).turns > 0) return;
+      void this.startTurn(id, briefPrompt(delegation), "delegation").catch((error: unknown) => this.failNode(id, error));
+    });
   }
   private own(nodeId: string, delegationId: string): DelegationRecord {
     const d = this.store.delegation(delegationId);
@@ -525,7 +563,12 @@ export class Kernel {
     const input = BATON_TOOLS[name].input.parse(raw) as Record<string, unknown>;
     switch (name) {
       case "list_agents": return this.agents();
-      case "ask_human": { if (["completed", "failed", "canceled", "replaced"].includes(node.status)) throw new Error("Node is terminal"); return this.human.ask(node, input as unknown as AskHumanInput); }
+      case "ask_human": {
+        if (["completed", "failed", "canceled", "replaced"].includes(node.status)) throw new Error("Node is terminal");
+        const session = this.runtime(nodeId).session;
+        const result = this.human.ask(node, input as unknown as AskHumanInput, this.questionAnchor(nodeId, "ask_human"), (this.options.askTimeoutMinutes ?? 60) * 60000, session?.supportsLongToolCalls?.() !== true);
+        this.armStall(nodeId); return result;
+      }
       case "get_team": return this.teams.get(node.runId);
       case "form_team": {
         const form = input as unknown as FormTeamInput;
@@ -588,6 +631,7 @@ export class Kernel {
     const rt = this.runtime(id); clearTimeout(rt.stallTimer);
     if (!rt.turnId || this.stopped) return;
     const n = this.store.node(id);
+    if (this.paused(n.runId) || this.store.snapshot(n.runId).questions.some((q) => q.nodeId === id && q.status === "pending" && q.delivery === "inline")) return;
     const ms = this.options.stallTimeoutMs ?? (this.store.snapshot(n.runId).run.policy.stallMinutes ?? 10) * 60000;
     rt.stallTimer = setTimeout(() => { rt.stallTimer = undefined; if (rt.turnId && !rt.closed && !this.canceling.has(id) && !this.stopped) this.human.stall(this.store.node(id), ms); }, ms);
     rt.stallTimer.unref();
@@ -619,6 +663,21 @@ export class Kernel {
   private log(runId: string, error: unknown, nodeId?: string): void {
     if (!this.stopped) this.emit(runId, { type: "log", level: "error", message: error instanceof Error ? error.message : String(error), nodeId });
   }
+  private questionAnchor(id: string, name: string, input?: Record<string, unknown>): QuestionRecord["anchor"] {
+    this.flushItem(id);
+    const rt = this.runtime(id), callId = input?.callId ?? input?.tool_use_id ?? input?.itemId;
+    const calls = this.store.items(id).filter((row) => row.turnId === rt.turnId && row.item.type === "tool_call");
+    const row = (typeof callId === "string" ? calls.findLast((row) => row.item.type === "tool_call" && row.item.callId === callId) : undefined)
+      ?? calls.findLast((row) => row.item.type === "tool_call" && (row.item.name === name || row.item.name.endsWith(`__${name}`)));
+    return { turnId: rt.turnId, ...(row ? { itemSeq: row.seq, callId: row.item.type === "tool_call" ? row.item.callId : undefined } : typeof callId === "string" ? { callId } : {}) };
+  }
+  private async answerNative(question: QuestionRecord): Promise<void> {
+    const rt = this.runtime(question.nodeId), requestId = question.id.slice(question.nodeId.length + 1);
+    const request = rt.session?.pendingPermissions().find((request) => request.id === requestId);
+    if (!rt.session || !request || !rt.turnId || rt.interrupting || this.paused(question.runId) || rt.turnId !== question.anchor?.turnId) throw new Error("Native question turn is no longer active");
+    await rt.session.respondToPermission(requestId, { behavior: "allow", updatedInput: nativeUpdatedInput(request, question.prompts ?? nativePrompts(request), question.answers ?? {}) });
+    this.armStall(question.nodeId);
+  }
   private async onEvent(id: string, event: DriverEvent): Promise<void> {
     if (this.stopped) return;
     const rt = this.runtime(id), n = this.store.node(id);
@@ -635,6 +694,11 @@ export class Kernel {
       case "turn_failed": await this.finishTurn(id, "failed", undefined, event.error); break;
       case "turn_canceled": await this.finishTurn(id, "canceled", undefined, event.reason); break;
       case "permission_requested": {
+        if (event.request.kind === "question" && !isBatonToolPermission(event.request)) {
+          const prompts = nativePrompts(event.request);
+          const question: QuestionRecord = { id: `${id}:${event.request.id}`, runId: n.runId, nodeId: id, question: prompts.map((prompt) => prompt.question).join("\n"), blocking: true, source: "native", delivery: "inline", prompts, anchor: this.questionAnchor(id, event.request.name, event.request.input), status: "pending", askedAt: now() };
+          this.emit(n.runId, { type: "question", question }); this.human.refreshActivity(id); this.armStall(id); break;
+        }
         const p: PermissionRecord = { id: `${id}:${event.request.id}`, runId: n.runId, nodeId: id, requestId: event.request.id, request: event.request, status: "pending", requestedAt: now() };
         this.emit(n.runId, { type: "permission", permission: p }); this.patchNode(id, { status: "waiting_permission", activity: event.request.title || event.request.name });
         // baton's own delegation tools never need a human: they only act on this node's own delegations.
@@ -698,6 +762,13 @@ export class Kernel {
     if (row.item.type === "assistant_message") rt.finalText = row.item.text;
     if (text) { rt.pendingItem = row; rt.itemTimer ??= setTimeout(() => this.flushItem(id), 100); }
     else this.store.appendItem(n.runId, row);
+    if (item.type === "tool_call") {
+      for (const question of this.store.snapshot(n.runId).questions) {
+        if (question.nodeId !== id || question.status !== "pending" || question.anchor?.itemSeq || question.anchor?.turnId !== rt.turnId) continue;
+        const request = question.source === "native" ? rt.session?.pendingPermissions().find((request) => question.id === `${id}:${request.id}`) : undefined;
+        if (question.source === "ask_human" ? item.name.endsWith("ask_human") : question.anchor?.callId === item.callId || request?.name === item.name) this.emit(n.runId, { type: "question", question: { ...question, anchor: { ...question.anchor, itemSeq: row.seq, callId: item.callId } } });
+      }
+    }
     return row;
   }
   private flushItem(id: string): void {
@@ -722,19 +793,20 @@ export class Kernel {
   private async finishTurn(id: string, status: "completed" | "failed" | "canceled", usage?: Usage, error?: string): Promise<void> {
     const rt = this.runtime(id), n = this.store.node(id); if (!rt.turnId) return;
     const interrupted = rt.interrupting === rt.turnId;
-    if (interrupted) { status = "canceled"; error = HUMAN_INTERRUPT; }
+    if (interrupted) { status = "canceled"; error = rt.interruptReason ?? HUMAN_INTERRUPT; }
     if (status === "canceled" && !interrupted) this.abandonMessages(id);
     if (usage) this.usage(id, usage);
     this.flushItem(id);
     this.patchNode(id, { persistence: rt.session?.persistence() ?? undefined });
     const turnId = rt.turnId; rt.turnId = undefined; clearTimeout(rt.stallTimer);
+    this.human.endQuestions(id, error ?? `Turn ${status}`, false, turnId);
     this.emit(n.runId, { type: "turn.updated", turnId, patch: { status, endedAt: now(), usage: { inputTokens: rt.usage.inputTokens, cachedInputTokens: rt.usage.cachedInputTokens, outputTokens: rt.usage.outputTokens, totalCostUsd: rt.usage.costUsd }, error } });
     for (const p of this.store.snapshot(n.runId).permissions) if (p.nodeId === id && p.status === "pending") this.emit(n.runId, { type: "permission", permission: { ...p, status: "expired", resolvedAt: now() } });
     for (const span of this.store.snapshot(n.runId).toolSpans) if (span.nodeId === id && span.status === "running") this.emit(n.runId, { type: "tool.span", span: { ...span, status: status === "completed" ? "completed" : status, endedAt: now() } });
     if (interrupted) {
       // A human redirect ends only this turn: no result capture, terminal node state,
       // descendant cancellation, or queue drain. The caller starts the replacement turn.
-      this.patchNode(id, { status: "idle", activity: "Interrupted by human message" });
+      this.patchNode(id, { status: "idle", activity: error === PAUSE_REASON ? "Paused" : "Interrupted by human message" });
       this.updateRun(n.runId);
       return;
     }
@@ -773,7 +845,7 @@ export class Kernel {
   private armIdle(id: string): void {
     const rt = this.runtime(id); clearTimeout(rt.idleTimer);
     rt.idleTimer = setTimeout(() => {
-      if (rt.turnId) return;
+      if (rt.turnId || this.paused(this.store.node(id).runId)) return;
       const n = this.store.node(id);
       const s = this.store.snapshot(n.runId);
       if (s.questions.some((q) => q.nodeId === id && q.status === "pending") || s.run.team?.proposals.some((p) => p.status === "pending") || this.store.notices(id).length || s.nodes.some((node) => active(node.status)) || s.delegations.some((d) => !done(d) || (d.status !== "replaced" && !d.deliveredAt))) { this.armIdle(id); return; }
@@ -785,7 +857,7 @@ export class Kernel {
   private updateRun(runId: string): void {
     const s = this.store.snapshot(runId), root = s.nodes.find((n) => n.id === s.run.rootNodeId);
     if (!root) return;
-    const status: RunStatus = root.status === "canceled" ? "canceled" : s.nodes.some((n) => active(n.status)) || s.delegations.some((d) => active(d.status)) ? "active" : root.status === "failed" ? "failed" : root.status === "completed" ? "completed" : "idle";
+    const status: RunStatus = root.status === "canceled" ? "canceled" : s.run.status === "paused" ? "paused" : s.nodes.some((n) => active(n.status)) || s.delegations.some((d) => active(d.status)) ? "active" : root.status === "failed" ? "failed" : root.status === "completed" ? "completed" : "idle";
     const patch = { status, updatedAt: now(), endedAt: ["completed", "failed", "canceled"].includes(status) ? now() : undefined };
     if (s.run.endedAt && patch.endedAt === undefined) this.emit(runId, { type: "run.created", run: { ...s.run, ...patch } });
     else this.emit(runId, { type: "run.updated", patch });
@@ -802,20 +874,21 @@ export class Kernel {
     this.delivering.add(parentId);
     try {
     const parent = this.store.node(parentId), rt = this.runtime(parentId);
-    if (rt.interrupting) return;
+    if (rt.interrupting || this.paused(parent.runId) || this.resuming.has(parent.runId)) return;
     if (["canceled", "failed", "replaced"].includes(parent.status)) return;
     const pending = this.store.snapshot(parent.runId).delegations.filter((d) => d.fromNodeId === parentId && done(d) && d.status !== "replaced" && !this.replacing.has(d.id) && d.result && !d.deliveredAt);
     const notices = this.store.notices(parentId);
     if (!pending.length && !notices.length) return;
     const text = [pending.length ? resultsPrompt(pending) : "", ...notices.map((notice) => notice.text)].filter(Boolean).join("\n\n");
     if (rt.turnId) {
+      const turnId = rt.turnId;
       // Reserve before awaiting the provider so a concurrent delivery cannot enqueue the
       // same results. A failed/unsupported steer releases the reservation.
       for (const d of pending) this.delivered(d, "steer");
       let outcome: Awaited<ReturnType<DriverSession["steer"]>> | undefined;
       try { outcome = await rt.session?.steer(text); }
       catch (error) { for (const d of pending) this.patchDelegation(d.id, { deliveredAt: undefined, deliveredVia: undefined }); throw error; }
-      if (outcome !== "steered") {
+      if (outcome !== "steered" || this.interruptedTurn(parentId, turnId)) {
         for (const d of pending) this.patchDelegation(d.id, { deliveredAt: undefined, deliveredVia: undefined });
         if (!rt.turnId) this.scheduleDelivery(parentId);
         return;
@@ -861,6 +934,7 @@ export class Kernel {
     for (const d of s.delegations) if (subtree.has(d.fromNodeId) && d.blockedByProposal && d.status === "queued") this.patchDelegation(d.id, { status: "canceled", endedAt: now(), result: { status: "failed", summary: reason, finalText: "", reported: false } });
     for (const child of s.nodes.filter((child) => child.parentNodeId === id && child.status !== "replaced")) await this.cancelNode(child.id, reason);
     const rt = this.runtime(id); rt.closed = true; this.abandonMessages(id);
+    this.human.endQuestions(id, reason);
     clearTimeout(this.deliveryTimers.get(id)); this.deliveryTimers.delete(id);
     if (rt.session) await rt.session.interrupt().catch((error: unknown) => this.log(n.runId, error, id));
     this.flushItem(id);
@@ -872,18 +946,79 @@ export class Kernel {
     if (n.delegationId && !replacing) { const d = this.store.delegation(n.delegationId); this.patchDelegation(d.id, { status: "canceled", endedAt: now(), result: { status: "failed", summary: reason, finalText: "", reported: false } }); this.scheduleDelivery(d.fromNodeId); }
     this.updateRun(n.runId);
   }
-  async cancelRun(id: string): Promise<void> { await this.cancelNode(this.store.snapshot(id).run.rootNodeId); }
-  private async closeSession(id: string): Promise<void> {
-    const rt = this.runtime(id); clearTimeout(rt.idleTimer); clearTimeout(rt.stallTimer); this.identities.delete(rt.token); rt.unsubscribe?.(); rt.closed = true; this.abandonMessages(id);
+  async cancelRun(id: string): Promise<void> {
+    const s = this.store.snapshot(id);
+    for (const node of s.nodes) this.human.endQuestions(node.id, "Run canceled", true);
+    await this.cancelNode(s.run.rootNodeId);
+  }
+  async pauseRun(id: string): Promise<RunSnapshot["run"]> {
+    const run = this.store.snapshot(id).run;
+    if (this.pausing.has(id)) { await this.pausing.get(id); return this.store.snapshot(id).run; }
+    if (run.status === "paused") return run;
+    if (["completed", "failed", "canceled"].includes(run.status)) throw new MessageError("A terminal run cannot be paused");
+    this.emit(id, { type: "run.updated", patch: { status: "paused", pauses: [...run.pauses ?? [], { at: now(), by: "human" }], updatedAt: now() } });
+    const running = this.store.snapshot(id).nodes.filter((node) => this.runtime(node.id).turnId);
+    for (const node of running) {
+      const rt = this.runtime(node.id); this.store.rememberPausedNode(id, node.id);
+      rt.interrupting = rt.turnId; rt.interruptReason = PAUSE_REASON; clearTimeout(rt.stallTimer); this.persistQueue(node.id);
+    }
+    const work = Promise.all(running.map(async (node) => {
+      const rt = this.runtime(node.id), turnId = rt.turnId;
+      try {
+        await rt.starting?.catch(() => {});
+        await rt.session?.interrupt(); await rt.chain;
+        if (rt.turnId === turnId) await this.finishTurn(node.id, "canceled", undefined, PAUSE_REASON);
+      } finally { rt.interrupting = undefined; rt.interruptReason = undefined; }
+    })).then(() => {});
+    this.pausing.set(id, work);
+    try { await work; } finally { this.pausing.delete(id); }
+    return this.store.snapshot(id).run;
+  }
+  async resumeRun(id: string): Promise<RunSnapshot["run"]> {
+    await this.pausing.get(id);
+    const run = this.store.snapshot(id).run;
+    if (run.status !== "paused") throw new MessageError("Run is not paused");
+    const interrupted = new Set(this.store.pausedNodes(id)); this.resuming.add(id);
+    this.emit(id, { type: "run.updated", patch: { status: "active", pauses: (run.pauses ?? []).map((pause, index, list) => index === list.length - 1 && !pause.resumedAt ? { ...pause, resumedAt: now() } : pause), updatedAt: now() } });
+    try {
+      for (const node of this.store.snapshot(id).nodes) {
+        if (["canceled", "replaced"].includes(node.status)) { this.store.forgetPausedNode(node.id); continue; }
+        const rt = this.runtime(node.id);
+        const prompts: QueuedPrompt[] = interrupted.has(node.id) ? [{ text: RESUME_PROMPT, trigger: "resume" }] : [];
+        const pending = this.store.snapshot(id).delegations.filter((d) => d.fromNodeId === node.id && done(d) && d.status !== "replaced" && d.result && !d.deliveredAt);
+        const notices = this.store.notices(node.id);
+        const content = [pending.length ? resultsPrompt(pending) : "", ...notices.map((notice) => notice.text)].filter(Boolean).join("\n\n");
+        if (content) prompts.push({ text: content, trigger: "result" });
+        prompts.push(...rt.queued.splice(0)); this.persistQueue(node.id);
+        // A queued delegate may have been created just before a restart, before its
+        // scheduled first prompt was persisted. Reconstruct the assignment in that case.
+        if (!prompts.length && node.delegationId && node.turns === 0) {
+          const d = this.store.delegation(node.delegationId); if (d.status === "queued" && !d.blockedByProposal) prompts.push({ text: briefPrompt(d), trigger: "delegation" });
+        }
+        if (prompts.length) {
+          for (const d of pending) this.delivered(d, "turn");
+          try { await this.startPrompts(node.id, prompts); this.store.deleteNotices(notices.map((notice) => notice.id)); }
+          catch (error) { for (const d of pending) this.patchDelegation(d.id, { deliveredAt: undefined, deliveredVia: undefined }); throw error; }
+        }
+        this.store.forgetPausedNode(node.id);
+      }
+    } finally { this.resuming.delete(id); }
+    this.updateRun(id);
+    for (const node of this.store.snapshot(id).nodes) this.scheduleDelivery(node.id);
+    return this.store.snapshot(id).run;
+  }
+  private async closeSession(id: string, preserveQueue = false): Promise<void> {
+    const rt = this.runtime(id); clearTimeout(rt.idleTimer); clearTimeout(rt.stallTimer); this.identities.delete(rt.token); rt.unsubscribe?.(); rt.closed = true; if (preserveQueue) this.persistQueue(id); else this.abandonMessages(id);
     await rt.opening?.catch(() => {});
     await rt.session?.close(); rt.session = undefined;
     for (const finish of this.waits.get(id) ?? []) finish(); this.waits.delete(id);
   }
   async shutdown(): Promise<void> {
     this.stopped = true; this.titleController.abort();
+    this.human.shutdown();
     for (const waits of this.waits.values()) for (const finish of waits) finish(); this.waits.clear();
     for (const timer of this.deliveryTimers.values()) clearTimeout(timer); this.deliveryTimers.clear();
-    for (const [id, rt] of this.runtimes) { this.flushItem(id); rt.unsubscribe?.(); clearTimeout(rt.idleTimer); await rt.session?.interrupt(); await this.closeSession(id); }
+    for (const [id, rt] of this.runtimes) { this.flushItem(id); rt.unsubscribe?.(); clearTimeout(rt.idleTimer); await rt.session?.interrupt(); await this.closeSession(id, this.paused(this.store.node(id).runId)); }
     await this.registry.shutdown();
     await Promise.all([...this.runtimes.values()].map((rt) => rt.chain));
   }

@@ -90,7 +90,7 @@ describe("project registry and session boundaries", () => {
     const server = await setup(async (c) => { await c.sleep(10000); }), project = await server.kernel.projects.create({ path: server.home, name: "My Project" });
     const run = await server.kernel.createRun({ projectId: project.id, agent: "root", prompt: "one" });
     const second = await server.kernel.createRun({ projectId: project.id, agent: "root", prompt: "two" });
-    await server.kernel.tool(run.run.rootNodeId, "ask_human", { question: "Pick one", blocking: true });
+    await server.kernel.tool(run.run.rootNodeId, "ask_human", { question: "Pick one", blocking: false });
     const process = { id: "99999:1", runId: run.run.id, nodeId: run.run.rootNodeId, pid: 99999, ppid: 1, pgid: 99999, command: "node app", ports: [3000], children: [], startedAt: run.run.createdAt, status: "stopping" as const, attribution: "group" as const, lastSeenAt: run.run.createdAt };
     server.store.append(run.run.id, { type: "background", process });
     expect(await api<ProjectSummary>(server, `/api/projects/${project.id}`)).toMatchObject({ id: project.id, exists: true, runCount: 2, activeRunCount: 2, pendingTotal: 1, backgroundCount: 1, lastRunAt: second.run.createdAt });

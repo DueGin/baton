@@ -1,5 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
-import { applyEvent, type ProjectRecord, type BackgroundProcess, type ItemRecord, type RunEvent, type RunEventEnvelope, type RunSnapshot, type RunSummary, type TeamPreset, type PermissionRule, type InboxItem, type QuestionRecord, type EscalationRecord } from "@baton/protocol";
+import { applyEvent, type ProjectRecord, type BackgroundProcess, type ItemRecord, type RunEvent, type RunEventEnvelope, type RunSnapshot, type RunSummary, type TeamPreset, type PermissionRule, type InboxItem, type QuestionRecord, type EscalationRecord, type TurnTrigger } from "@baton/protocol";
+export interface HeldPrompt { text: string; trigger: TurnTrigger; humanSeq?: number }
 
 const tables = ["nodes", "delegations", "turns", "tool_spans", "permissions", "questions", "escalations", "background_processes"] as const;
 export class Store {
@@ -12,6 +13,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS permission_rules (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS delegation_round_limits (id TEXT PRIMARY KEY, extra INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS notices (id TEXT PRIMARY KEY, node_id TEXT NOT NULL, run_id TEXT NOT NULL, text TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS paused_nodes (node_id TEXT PRIMARY KEY, run_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS held_prompts (node_id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS team_presets (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, data TEXT NOT NULL, seq INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS events (run_id TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(run_id, seq));
@@ -69,6 +72,12 @@ export class Store {
     const { seq, ts, ...rest } = item;
     return this.append(runId, { type: "item", ...rest, itemSeq: seq, itemTs: ts });
   }
+  rememberPausedNode(runId: string, nodeId: string): void { this.db.prepare("INSERT OR IGNORE INTO paused_nodes VALUES (?, ?)").run(nodeId, runId); }
+  pausedNodes(runId: string): string[] { return this.db.prepare("SELECT node_id FROM paused_nodes WHERE run_id=? ORDER BY rowid").all(runId).map((row) => String(row.node_id)); }
+  forgetPausedNode(nodeId: string): void { this.db.prepare("DELETE FROM paused_nodes WHERE node_id=?").run(nodeId); }
+  holdPrompts(nodeId: string, prompts: HeldPrompt[]): void { this.db.prepare("INSERT INTO held_prompts VALUES (?, ?) ON CONFLICT(node_id) DO UPDATE SET data=excluded.data").run(nodeId, JSON.stringify(prompts)); }
+  heldPrompts(nodeId: string): HeldPrompt[] { const row = this.db.prepare("SELECT data FROM held_prompts WHERE node_id=?").get(nodeId); return row ? JSON.parse(String(row.data)) as HeldPrompt[] : []; }
+  clearHeldPrompts(nodeId: string): void { this.db.prepare("DELETE FROM held_prompts WHERE node_id=?").run(nodeId); }
   events(runId: string, after = 0): RunEventEnvelope[] {
     return this.db.prepare("SELECT data FROM events WHERE run_id=? AND seq>? ORDER BY seq").all(runId, after).map((r) => JSON.parse(String(r.data)) as RunEventEnvelope);
   }
@@ -87,7 +96,7 @@ export class Store {
     const rows = projectId === undefined ? this.db.prepare("SELECT id FROM runs ORDER BY rowid DESC").all() : this.db.prepare("SELECT id FROM runs WHERE json_extract(data, '$.projectId')=? ORDER BY rowid DESC").all(projectId);
     return rows.map((r) => {
       const s = this.snapshot(String(r.id));
-      return { ...s.run, ...(s.lastEventAt ? { lastEventAt: s.lastEventAt } : {}), rootAgentId: s.nodes.find((n) => n.id === s.run.rootNodeId)?.agentId ?? "", agents: [...new Set(s.nodes.map((n) => n.agentId))], nodeCount: s.nodes.length, activeNodeCount: s.nodes.filter((n) => ["starting", "running", "waiting_permission"].includes(n.status)).length, pendingPermissions: s.permissions.filter((p) => p.status === "pending").length, pendingTotal: this.inboxFor(s).length, backgroundCount: backgroundCount(s.backgroundProcesses) };
+      return { ...s.run, ...(s.lastEventAt ? { lastEventAt: s.lastEventAt } : {}), rootAgentId: s.nodes.find((n) => n.id === s.run.rootNodeId)?.agentId ?? "", agents: [...new Set(s.nodes.map((n) => n.agentId))], nodeCount: s.nodes.length, activeNodeCount: s.run.status === "paused" ? 0 : s.nodes.filter((n) => ["starting", "running", "waiting_permission"].includes(n.status)).length, pendingPermissions: s.permissions.filter((p) => p.status === "pending").length, pendingTotal: this.inboxFor(s).length, backgroundCount: backgroundCount(s.backgroundProcesses) };
     });
   }
   private inboxFor(s: RunSnapshot): InboxItem[] {

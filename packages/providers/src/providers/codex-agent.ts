@@ -61,6 +61,7 @@ async function connect(options: ClientOptions, config: AgentSessionConfig): Prom
     return client;
 }
 class CodexSession extends ProviderSession {
+    supportsLongToolCalls(): boolean { return !!this.config.mcpServers?.baton; }
     processIds(): number[] { return this.client?.processIds() ?? []; }
     private client!: CodexAppServerClient;
     private nativeTurn: string | null = null;
@@ -81,7 +82,7 @@ class CodexSession extends ProviderSession {
             session.client.setUnexpectedTerminationHandler(error => session.processExited(error.message));
             for (const method of ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "item/mcpToolCall/requestApproval", "item/tool/requestUserInput", "tool/requestUserInput", "mcpServer/elicitation/request"])
                 session.client.setRequestHandler(method, params => session.permission(method, record(params)));
-            const mcpServers = Object.fromEntries(Object.entries(config.mcpServers ?? {}).map(([name, server]) => [name, server.type === "stdio" ? { command: server.command, args: server.args, env: server.env } : { url: server.url, http_headers: server.headers }]));
+            const mcpServers = Object.fromEntries(Object.entries(config.mcpServers ?? {}).map(([name, server]) => [name, { ...(server.type === "stdio" ? { command: server.command, args: server.args, env: server.env } : { url: server.url, http_headers: server.headers }), ...(name === "baton" ? { tool_timeout_sec: Math.ceil(Number(config.env?.MCP_TOOL_TIMEOUT ?? 3660000) / 1000) } : {}) }]));
             const full = config.modeId === "full-access" || config.modeId === "bypass";
             const params = {
                 cwd: config.cwd, ...(config.model ? { model: config.model } : {}),

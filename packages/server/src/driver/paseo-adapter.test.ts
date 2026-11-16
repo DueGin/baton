@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,7 @@ const disabled = Object.fromEntries(["claude", "codex", "pi", "gemini", "qwen", 
 beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), "baton-driver-test-"));
     const profiles = Object.fromEntries(["acp", "codex"].map(provider => [`fake-${provider}`, { extends: provider, command: [process.execPath, fixture, provider], env: { BATON_HOME: home } }]));
+    Object.assign(profiles, Object.fromEntries(["builtin", "adapter"].map(mcp => [`fake-pi-${mcp}`, { extends: "pi", command: [process.execPath, fixture, "pi"], env: { BATON_HOME: home, FAKE_MCP: mcp } }])));
     await writeFile(join(home, "config.json"), JSON.stringify({ agents: { ...disabled, ...profiles } }));
     registry = createPaseoDriverRegistry({ home });
 });
@@ -26,6 +27,7 @@ describe("Paseo driver registry", () => {
         const driver = registry.get("fake-codex")!;
         const session = await driver.open({ cwd: home, mcpServers: { baton: { type: "http", url: "http://127.0.0.1:7433/test" } } });
         const events = collect(session);
+        expect(session.supportsLongToolCalls?.()).toBe(true);
         expect(session.processIds?.()).toEqual([expect.any(Number)]);
         session.subscribe(() => { throw new Error("bad listener"); });
         expect(await session.steer("idle")).toBe("no_active_turn");
@@ -42,12 +44,14 @@ describe("Paseo driver registry", () => {
         await session.close();
         expect(session.processIds?.()).toEqual([]);
         const resumed = await driver.resume(persistence, { cwd: home, mcpServers: {} });
+        expect(resumed.supportsLongToolCalls?.()).toBe(false);
         expect(resumed.persistence()).toEqual(persistence);
         await expect(driver.resume({ provider: "pi", sessionId: "invalid" }, { cwd: home, mcpServers: {} })).rejects.toThrow("Invalid provider persistence");
     });
     it("returns steer outcomes for ACP and native sessions, and closes all processes on shutdown", async () => {
         await registry.detect();
         const acp = await registry.get("fake-acp")!.open({ cwd: home, mcpServers: {} });
+        expect(acp.supportsLongToolCalls?.()).toBe(false);
         expect(await acp.steer("idle")).toBe("unsupported");
         const codex = await registry.get("fake-codex")!.open({ cwd: home, mcpServers: {} });
         const events = collect(codex);
@@ -61,5 +65,16 @@ describe("Paseo driver registry", () => {
     it("maps notices and drops worktree rows without changing the contract", () => {
         expect(mapProviderEvent({ type: "timeline", timestamp: "now", item: { type: "notification", level: "warning", message: "hello" } })).toMatchObject({ type: "item", item: { type: "notice", message: "hello" } });
         expect(mapProviderEvent({ type: "timeline", timestamp: "now", item: { type: "tool_call", callId: "x", name: "worktree", status: "completed", error: null, detail: { type: "worktree_setup", worktreePath: home, branchName: "x", log: "", commands: [] } } })).toBeNull();
+    });
+    it("advertises long tool calls only for builtin pi MCP with an injected timeout", async () => {
+        await registry.detect();
+        const spec = { cwd: home, env: { MCP_TOOL_TIMEOUT: "3660000" }, mcpServers: { baton: { type: "http" as const, url: "http://127.0.0.1:7433/test" } } };
+        const builtin = await registry.get("fake-pi-builtin")!.open(spec);
+        const adapter = await registry.get("fake-pi-adapter")!.open(spec);
+        expect(builtin.supportsLongToolCalls?.()).toBe(true);
+        expect(adapter.supportsLongToolCalls?.()).toBe(false);
+        const providersHome = (await readdir(home)).filter(name => name.startsWith("pi-runtime-"));
+        const extensions = await Promise.all(providersHome.map(async name => { try { return await readFile(join(home, name, "baton.mjs"), "utf8"); } catch { return ""; } }));
+        expect(extensions.some(value => value.includes('"timeout":3660'))).toBe(true);
     });
 });

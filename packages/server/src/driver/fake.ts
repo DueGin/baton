@@ -35,6 +35,7 @@ export class FakeDriver implements AgentDriver {
   }
 }
 export class FakeSession implements DriverSession {
+  supportsLongToolCalls(): boolean { return true; }
   sessionId: string = randomUUID(); turns = 0; closed = false;
   readonly prompts: string[] = []; readonly steered: string[] = [];
   private listeners = new Set<(event: DriverEvent) => void>();
@@ -88,7 +89,7 @@ export class FakeSession implements DriverSession {
         const callId = randomUUID(); item({ type: "tool_call", callId, name: `mcp__baton__${tool}`, status: "running", detail: { type: "unknown", input, output: undefined } });
         try {
           const client = await this.mcpClient(); controller.signal.throwIfAborted();
-          const response = await client.callTool({ name: tool, arguments: input }, undefined, { signal: controller.signal });
+          const response = await client.callTool({ name: tool, arguments: input }, undefined, { signal: controller.signal, timeout: 3660000, resetTimeoutOnProgress: true });
           const content = response.content;
           const text = Array.isArray(content) ? content.filter((v: unknown): v is { type: "text"; text: string } => !!v && typeof v === "object" && "type" in v && v.type === "text" && "text" in v && typeof v.text === "string").map((v) => v.text).join("\n") : "";
           if (response.isError) throw new Error(text);

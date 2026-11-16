@@ -56,6 +56,7 @@ export class ClaudeAgentClient implements AgentClient {
     }
 }
 class ClaudeSession extends ProviderSession {
+    supportsLongToolCalls(): boolean { return Number(this.config.env?.MCP_TOOL_TIMEOUT ?? 0) >= 3600000; }
     processIds(): number[] { return this.child?.pid && this.child.exitCode === null && this.child.signalCode === null ? [this.child.pid] : []; }
     private query: Query;
     private child?: ChildProcessWithoutNullStreams;
