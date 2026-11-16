@@ -1,5 +1,6 @@
 // Ported from Paseo (https://github.com/getpaseo/paseo) packages/server/src/utils/tree-kill.ts @63ea3e5 — Copyright (c) 2025-present Mohamed Boudra, Apache-2.0. Modified for baton.
 import treeKill from "tree-kill";
+import { execFile } from "node:child_process";
 export interface TreeKillTarget {
     pid?: number;
     exitCode?: number | null;
@@ -45,11 +46,11 @@ export function signalProcessTree(child: TreeKillTarget, signal: NodeJS.Signals)
         signalDirectChild(child, signal);
         return Promise.resolve();
     }
-    // Provider sessions are their own POSIX process group. Signaling the group also
-    // catches children that were reparented after their launcher exited.
-    if (process.platform !== "win32") { try { process.kill(-pid, signal); } catch { /* non-group fixture or already exited */ } }
     return new Promise((resolve) => {
         treeKill(pid, signal, (error) => {
+            // Enumerate descendants before killing the group: tools may each own a
+            // process group and become invisible to tree-kill after the root exits.
+            if (process.platform !== "win32") { try { process.kill(-pid, signal); } catch { /* non-group fixture or already exited */ } }
             if (error) {
                 signalDirectChild(child, signal);
             }
@@ -62,6 +63,17 @@ export async function terminateProcessIds(pids: number[]): Promise<void> {
     await Promise.all([...new Set(pids)].filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid).map(async (pid) => {
         await signalProcessTree({ pid, kill(signal) { try { process.kill(pid, signal ?? "SIGKILL"); return true; } catch { return false; } } }, "SIGKILL");
     }));
+}
+/** Capture descendants while the agent is still alive so shutdown can reap them
+ * even if a graceful interrupt reparents a tool process. Windows taskkill /T owns
+ * its tree enumeration; providers keep the root alive until close(). */
+export async function descendantProcessIds(roots: number[]): Promise<number[]> {
+    if (process.platform === "win32" || !roots.length) return roots;
+    const output = await new Promise<string>((resolve) => execFile("ps", ["-axo", "pid=,ppid="], { timeout: 1000, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => resolve(error ? "" : stdout)));
+    const rows = output.split("\n").flatMap((line) => { const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line); return match ? [{ pid: Number(match[1]), ppid: Number(match[2]) }] : []; });
+    const family = new Set(roots); let changed = true;
+    while (changed) { changed = false; for (const row of rows) if (family.has(row.ppid) && !family.has(row.pid)) { family.add(row.pid); changed = true; } }
+    return [...family];
 }
 function signalDirectChild(child: TreeKillTarget, signal: NodeJS.Signals): void {
     try {

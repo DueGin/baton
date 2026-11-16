@@ -7,4 +7,4 @@ export { ProviderRegistry, probeVersion, versionProbeCommand } from "./registry.
 export type { DetectedAgent, ProviderRegistryOptions } from "./registry.js";
 export { findExecutable } from "./executable-resolution.js";
 export { processLaunch } from "./windows-command.js";
-export { terminateProcessIds } from "./tree-kill.js";
+export { terminateProcessIds, descendantProcessIds } from "./tree-kill.js";

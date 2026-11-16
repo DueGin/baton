@@ -60,6 +60,15 @@ describe("desktop notifications", () => {
     expect(notificationMode({ notifications: { desktop: false } }, undefined, "darwin")).toBe("off");
     expect(notificationMode({ notifications: { mode: "os" } }, "client", "darwin")).toBe("client");
   });
+  it("broadcasts PR transition notifications through the same client stream", async () => {
+    const { s, create } = await setup(undefined, { notifications: "client", pullRequests: { autoPoll: false, resolveExecutable: async () => "/fixture/gh", runner: async () => JSON.stringify({ state: "OPEN", statusCheckRollup: [{ name: "tests", conclusion: "FAILURE" }] }) } });
+    const run = await create(); await until(() => s.store.node(run.run.rootNodeId).status === "idle"); await delay(30);
+    const stream = await notificationStream(s);
+    try {
+      const pr = s.pullRequests.link(run.run.id, "https://github.com/a/b/pull/1"); await s.pullRequests.refresh(pr.id);
+      expect(await stream.next()).toMatchObject({ kind: "pr", runId: run.run.id, route: `/runs/${run.run.id}`, body: expect.stringContaining("CI checks failed") });
+    } finally { await stream.close(); }
+  });
   it("disables background registry on win32 and advertises capabilities", async () => {
     const { s } = await setup(undefined, { platform: "win32" });
     const response = await fetch(s.url + "/api/info", { headers: { authorization: `Bearer ${s.token}` } });

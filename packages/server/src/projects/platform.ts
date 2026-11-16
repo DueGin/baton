@@ -2,7 +2,11 @@ import { posix, win32 } from "node:path";
 import type { ListDirsResponse } from "@baton/protocol";
 
 export function pathKey(path: string, platform: NodeJS.Platform = process.platform): string {
-  return platform === "win32" ? win32.normalize(path).replace(/[\\/]+$/, "").toLowerCase() : posix.normalize(path).replace(/\/$/, "") || "/";
+  if (platform === "win32") {
+    const normalized = win32.normalize(path), root = win32.parse(normalized).root;
+    return (normalized === root ? root : normalized.replace(/[\\/]+$/, "")).toLowerCase();
+  }
+  return posix.normalize(path).replace(/\/$/, "") || "/";
 }
 export function containsPath(base: string, child: string, platform: NodeJS.Platform = process.platform): boolean {
   const paths = platform === "win32" ? win32 : posix, relative = paths.relative(pathKey(base, platform), pathKey(child, platform));

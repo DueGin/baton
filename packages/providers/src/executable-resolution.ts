@@ -6,7 +6,7 @@ import { posix, win32 } from "node:path";
 export function envValue(env: NodeJS.ProcessEnv, key: string): string | undefined { return Object.entries(env).find(([name]) => name.toLowerCase() === key.toLowerCase())?.[1]; }
 export function executableCandidates(name: string, env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): string[] {
   const paths = platform === "win32" ? win32 : posix;
-  const extensions = platform === "win32" && !paths.extname(name) ? ["", ...(envValue(env, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD").split(";").filter((e) => /^\.[a-z0-9]+$/i.test(e))] : [""];
+  const extensions = platform === "win32" && !paths.extname(name) ? ["", ...(envValue(env, "PATHEXT") || ".COM;.EXE;.BAT;.CMD").split(";").filter((e) => /^\.[a-z0-9]+$/i.test(e))] : [""];
   const bases = /[/\\]/.test(name) ? [name] : (envValue(env, "PATH") ?? "").split(platform === "win32" ? ";" : ":").filter(Boolean).map((dir) => paths.join(dir.replace(/^"|"$/g, ""), name));
   return [...new Set(bases.flatMap((base) => extensions.map((extension) => base + extension)))];
 }

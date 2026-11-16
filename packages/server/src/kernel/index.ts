@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { terminateProcessIds } from "@baton/providers";
+import { descendantProcessIds, terminateProcessIds } from "@baton/providers";
 import { BATON_TOOLS, LEAD_ONLY_TOOLS, emptyUsage, type AgentEntry, type AskHumanInput, type PermissionDecision, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionRequest, type PermissionResponse, type ReportResultInput, type FormTeamInput, type ReplaceMemberInput, type ReassignInput, type ReorderQueueResponse, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type SendMessageResponse, type SendMode, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
 import type { DriverEvent, DriverRegistry, DriverSession, OpenSessionSpec } from "../driver/types.js";
 import { Store } from "../store/index.js";
@@ -1029,11 +1029,11 @@ export class Kernel {
     for (const timer of this.deliveryTimers.values()) clearTimeout(timer); this.deliveryTimers.clear();
     await Promise.all([...this.runtimes].map(async ([id, rt]) => {
       this.flushItem(id); rt.unsubscribe?.(); clearTimeout(rt.idleTimer);
-      const pids = rt.session?.processIds?.() ?? [];
+      const pids = await descendantProcessIds(rt.session?.processIds?.() ?? []);
       let timer: NodeJS.Timeout | undefined;
-      const force = new Promise<void>((resolve) => { timer = setTimeout(() => { void terminateProcessIds(pids).finally(resolve); }, 5000); });
+      const force = new Promise<void>((resolve) => { timer = setTimeout(() => { void descendantProcessIds([...pids, ...(rt.session?.processIds?.() ?? [])]).then(terminateProcessIds).catch(() => {}).finally(resolve); }, 5000); });
       const closing = (async () => { try { await rt.session?.interrupt(); } finally { await this.closeSession(id, this.paused(this.store.node(id).runId)); } })();
-      try { await Promise.race([closing, force]); } finally { clearTimeout(timer); }
+      try { await Promise.race([closing, force]); } finally { clearTimeout(timer); await terminateProcessIds(pids); }
     }));
     await this.registry.shutdown();
     await Promise.all([...this.runtimes.values()].map((rt) => rt.chain));
