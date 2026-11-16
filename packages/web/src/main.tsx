@@ -6,7 +6,9 @@ import { DemoClient } from "./demo/client.js";
 import "@xyflow/react/dist/style.css";
 import "./styles.css";
 import { highlightStyles } from "./highlight.js";
+import { installDesktopLinks } from "./desktop.js";
 
+installDesktopLinks();
 const token = readToken(window.location, window.sessionStorage, window.history);
 const demo = new URLSearchParams(window.location.search).get("demo") === "1" || !token;
 const client = demo ? new DemoClient() : new ApiClient(token!);

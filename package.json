@@ -17,10 +17,14 @@
   ],
   "scripts": {
     "build": "tsc -b packages/protocol packages/providers packages/server && npm run build -w @baton/web --if-present",
-    "typecheck": "tsc -b packages/protocol packages/providers packages/server && npm run typecheck -w @baton/web --if-present",
+    "typecheck": "tsc -b packages/protocol packages/providers packages/server && npm run typecheck -w @baton/web --if-present && npm run typecheck -w @baton/desktop",
     "test": "npm run test --workspaces --if-present",
     "dev": "npm run dev -w @baton/server",
-    "dev:web": "npm run dev -w @baton/web"
+    "dev:web": "npm run dev -w @baton/web",
+    "desktop": "npm run dev -w @baton/desktop",
+    "build:desktop": "npm run build -w @baton/desktop",
+    "dist:mac": "npm run dist:mac -w @baton/desktop",
+    "dist:win": "npm run dist:win -w @baton/desktop"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

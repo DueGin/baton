@@ -3,11 +3,22 @@
   "version": "0.1.0",
   "private": true,
   "license": "Apache-2.0",
+  "author": "baton contributors",
   "description": "baton desktop app (Electron) for macOS and Windows",
+  "type": "module",
   "main": "dist/main.js",
-  "scripts": {},
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "tsc -b ../protocol ../providers ../server && npm run build -w @baton/web && tsc -b && node scripts/icons.mjs",
+    "typecheck": "tsc -b",
+    "stage": "node scripts/stage.mjs",
+    "dist:mac": "npm run build && npm run stage && electron-builder --mac --arm64 --x64",
+    "dist:win": "npm run build && npm run stage && electron-builder --win --x64",
+    "smoke": "node scripts/smoke.mjs",
+    "test": "vitest run src"
+  },
   "devDependencies": {
-    "electron": "^45.3.2",
+    "electron": "45.3.2",
     "electron-builder": "^26.18.0"
   }
 }
