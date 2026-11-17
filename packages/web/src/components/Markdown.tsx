@@ -8,6 +8,7 @@ import rehypeHighlight from "rehype-highlight";
 import { codeFences, fixBareUrls, remarkBrTags, safeLink } from "../lib/markdown.js";
 import { useColorTheme } from "../lib/theme.js";
 import { MermaidBlock } from "./MermaidBlock.js";
+import { MarkdownImage } from "./Images.js";
 
 import { CopyButton } from "./CopyButton.js";
 
@@ -16,7 +17,11 @@ function plainChildren(children: ReactNode): string {
 }
 // Chat-style text: single newlines are line breaks (no stray spaces between CJK lines).
 const REMARK_PLUGINS = [remarkGfm, remarkCjkFriendly, remarkCjkFriendlyGfmStrikethrough, remarkBreaks, remarkBrTags];
-export const Markdown = memo(function Markdown({ text: source, streaming = false }: { text: string; streaming?: boolean }) {
+/** Links keep the http(s)/mailto allow-list; image URLs pass through to MarkdownImage, which only
+ * renders attachment markers, local image paths, http(s) and base64 image data URLs. */
+const urlTransform = (url: string, key: string): string => key === "src" ? url : safeLink(url) ?? "";
+/** `cwd` resolves relative image paths (otherwise the surrounding ImageContext's cwd is used). */
+export const Markdown = memo(function Markdown({ text: source, streaming = false, cwd }: { text: string; streaming?: boolean; cwd?: string }) {
   // Fence offsets, Mermaid stability and rendering all use the same normalized text.
   const text = useMemo(() => fixBareUrls(source), [source]);
   const theme = useColorTheme();
@@ -25,8 +30,7 @@ export const Markdown = memo(function Markdown({ text: source, streaming = false
   const fences = useMemo(() => codeFences(text), [text]);
   const components = useMemo<Components>(() => ({
     a: ({ href, children }) => safeLink(href ?? "") ? <a href={href} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span>,
-    // Images from agent text are links, avoiding remote requests and oversized inline assets.
-    img: ({ src, alt }) => safeLink(typeof src === "string" ? src : "") ? <a href={src} target="_blank" rel="noopener noreferrer">{alt || "图片"}</a> : <span>{alt}</span>,
+    img: ({ src, alt }) => <MarkdownImage src={typeof src === "string" ? src : undefined} alt={alt} cwd={cwd} />,
     table: ({ children }) => <div className="markdown-table-scroll"><table>{children}</table></div>,
     pre: ({ node, children }) => {
       const start = node?.position?.start.offset;
@@ -37,8 +41,8 @@ export const Markdown = memo(function Markdown({ text: source, streaming = false
       const code = fence?.code ?? plainChildren(children).replace(/\n$/, "");
       return language === "mermaid" ? <MermaidBlock code={code} complete={fence?.complete ?? false} stable={stableText === text} theme={theme} /> : <div className="code-block"><div className="code-language"><span>{language}</span><CopyButton text={code} /></div><pre>{children}</pre></div>;
     },
-  }), [fences, stableText, text, theme]);
-  return <div className={`markdown theme-${theme}${streaming ? " streaming-text" : ""}`}><ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={[[rehypeHighlight, { detect: false, plainText: ["mermaid"] }]]} urlTransform={url => safeLink(url) ?? ""} components={components}>{text}</ReactMarkdown></div>;
+  }), [cwd, fences, stableText, text, theme]);
+  return <div className={`markdown theme-${theme}${streaming ? " streaming-text" : ""}`}><ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={[[rehypeHighlight, { detect: false, plainText: ["mermaid"] }]]} urlTransform={urlTransform} components={components}>{text}</ReactMarkdown></div>;
 });
 
 const INLINE_ELEMENTS = ["p", "strong", "em", "del", "code", "br"];

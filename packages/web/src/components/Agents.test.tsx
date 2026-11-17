@@ -10,6 +10,8 @@ describe("expanded Agents UI", () => {
     const html = renderToStaticMarkup(<AgentsPage agents={demoAgents} refresh={() => undefined} refreshing={false} />);
     for (const text of ["已就绪", "版本过低或出错", "未安装", "已禁用", 'aria-label="搜索 Agents"', "30 个 agent", "重新检测", "Native", "ACP", "要求 ≥1.0.0", "models", "modes", "steer", "resume", "mcp", "reasoning", "自定义", "复制 Claude Code 安装命令", "npm i -g @anthropic-ai/claude-code", 'target="_blank" rel="noopener noreferrer"']) expect(html).toContain(text);
     expect(html.match(/data-agent-id=/g)).toHaveLength(30);
+    const claude = renderToStaticMarkup(<AgentCatalogRow agent={demoAgents.find(agent => agent.id === "claude")!} />); expect(claude).toContain('class="enabled" title="图片: 支持">✓ 图片');
+    const pi = renderToStaticMarkup(<AgentCatalogRow agent={demoAgents.find(agent => agent.id === "pi")!} />); expect(pi).toContain('class="unsupported"'); expect(pi).toContain("− 图片"); expect(pi).toContain("本地文件路径");
     const refreshing = renderToStaticMarkup(<AgentsPage agents={[]} refresh={() => undefined} refreshing />); expect(refreshing).toContain("检测中…"); expect(refreshing).toContain('disabled=""'); expect(refreshing).toContain('aria-busy="true"');
   });
   it("renders agent content as safe text and discards unsafe homepage URLs", () => {

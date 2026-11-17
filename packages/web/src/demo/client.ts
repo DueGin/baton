@@ -21,7 +21,9 @@ import { snapshotInbox, sortInbox, permissionPattern } from "../lib/inbox.js";
 import { matchPermissionRule } from "../lib/permission-rules.js";
 import { activeMembers, cleanMember, defaultAgentSpec, pendingProposals, validateMembers, validatePreset } from "../lib/teams.js";
 import { questionPrompts } from "../lib/questions.js";
-import type { RunRecord, TurnTrigger } from "@baton/protocol";
+import type { RunRecord, TurnTrigger, AttachmentRecord } from "@baton/protocol";
+import { demoAttachments, demoLocalImages, drawDemoImage } from "./images.js";
+import { attachmentProblem } from "../lib/images.js";
 
 interface DemoRun { snapshot: RunSnapshot; remaining: RunEventEnvelope[]; log: RunEventEnvelope[] }
 export class DemoClient implements BatonClient {
@@ -42,6 +44,8 @@ export class DemoClient implements BatonClient {
   private projectRecords = new Map<string, ProjectRecord>();
   private pausedNodes = new Map<string, string[]>();
   private heldMessages = new Map<string, string[]>();
+  private attachments = new Map<string, { blob: Blob; record: AttachmentRecord }>();
+  private attachmentSerial = 0;
   constructor(private readonly now: () => number = Date.now) {
     initialDemoProjects(new Date(now() - 86_400_000).toISOString()).forEach(project => this.projectRecords.set(project.id, project));
     const scenario = createScenario(now() - 86000);
@@ -85,6 +89,23 @@ export class DemoClient implements BatonClient {
     prDemo.prs.forEach(pr => this.emit(prData, { type: "pr", pr }));
   }
   agents = async () => structuredClone(demoAgents);
+  /** Uploads stay in memory; a short delay shows the pill's uploading state, and a name containing "fail" shows the failed one. */
+  uploadAttachment = async (file: Blob, name: string): Promise<AttachmentRecord> => {
+    const problem = attachmentProblem(file); if (problem) throw new HttpError(415, problem);
+    await new Promise(resolve => setTimeout(resolve, 700));
+    if (/fail|失败/i.test(name)) throw new HttpError(500, "演示：上传失败，可点击缩略图重试");
+    const record: AttachmentRecord = { id: `att_demo_upload_${++this.attachmentSerial}`, mimeType: file.type, name, size: file.size, createdAt: new Date(this.now()).toISOString() };
+    this.attachments.set(record.id, { blob: file, record }); return structuredClone(record);
+  };
+  attachmentBlob = async (id: string): Promise<Blob> => {
+    const stored = this.attachments.get(id); if (stored) return stored.blob;
+    const fixture = demoAttachments[id]; if (fixture) return drawDemoImage(fixture.kind);
+    throw new HttpError(404, "附件不存在");
+  };
+  localImageBlob = async (path: string): Promise<Blob> => {
+    const kind = demoLocalImages[path]; if (kind) return drawDemoImage(kind);
+    throw new HttpError(404, "文件不存在");
+  };
   runs = async (projectId?: string) => { this.advance(); return [...this.data.values()].map(data => summarize(data.snapshot)).filter(run => !projectId || run.projectId === projectId).reverse(); };
   dirs = async (path = "~") => demoDirs(path, [...this.projectRecords.values()]);
   projects = async (includeArchived = false): Promise<ProjectSummary[]> => liveProjectSummaries([...this.projectRecords.values()].filter(project => includeArchived || !project.archived).map(project => ({ ...project, exists: true, ...(project.gitRoot ? { gitBranch: "main" } : {}), runCount: 0, activeRunCount: 0, pendingTotal: 0, backgroundCount: 0 })), await this.runs());
@@ -809,13 +830,18 @@ export class DemoClient implements BatonClient {
     };
     history(170, { type: "item", nodeId: root, itemSeq: 1, itemTs: at(-170_000), item: { type: "user_message", text: "请展示完整 Markdown、Mermaid，以及运行中继续发送消息的体验。", delivery: "turn" } });
     history(140, { type: "item", nodeId: root, itemSeq: 2, itemTs: at(-140_000), item: { type: "assistant_message", text: richConversation } });
+    // Images: a pasted screenshot inline in the human message, a tool that returned a screenshot, and
+    // an agent reply pointing at a local file relative to the node's cwd.
+    history(130, { type: "item", nodeId: root, itemSeq: 3, itemTs: at(-130_000), item: { type: "user_message", text: "这是现在的搜索面板 ![搜索面板截图](attachment:att_demo_search) 结果行太挤，也看不到匹配数，帮我调一下？", delivery: "turn" } });
+    history(120, { type: "item", nodeId: root, itemSeq: 4, itemTs: at(-120_000), item: { type: "tool_call", callId: "demo-screenshot", name: "mcp__browser__screenshot", status: "completed", detail: { type: "unknown", input: { url: "http://127.0.0.1:5173/search?q=权限" }, output: { saved: "docs/search-spacing.png" } }, images: [demoAttachments.att_demo_shot!] } });
+    history(110, { type: "item", nodeId: root, itemSeq: 5, itemTs: at(-110_000), item: { type: "assistant_message", text: "已调整：结果行高 52px、行间距 12px，并在右侧显示匹配数。截图存到了 `docs/search-spacing.png`：\n\n![调整后的搜索面板](docs/search-spacing.png)" } });
     for (const node of snapshot.nodes) {
       const turnId = `${node.id}:quiet`;
       history(100, { type: "turn.started", turn: { id: turnId, nodeId: node.id, runId: snapshot.run.id, trigger: "user", status: "running", startedAt: at(-100_000) } });
     }
     for (const node of snapshot.nodes) {
       const turnId = `${node.id}:quiet`;
-      history(65, { type: "item", nodeId: node.id, itemSeq: node.id === root ? 3 : 1, turnId, itemTs: at(-65_000), item: { type: "reasoning", text: "正在梳理复杂边界。此 demo 故意保持较长静默，仍会显示本轮计时与无新输出时长。\n默认发送会排队；Claude 可将消息改为引导，pi 不支持引导。尝试引导后可立即发送，中断本轮。" } });
+      history(65, { type: "item", nodeId: node.id, itemSeq: node.id === root ? 6 : 1, turnId, itemTs: at(-65_000), item: { type: "reasoning", text: "正在梳理复杂边界。此 demo 故意保持较长静默，仍会显示本轮计时与无新输出时长。\n默认发送会排队；Claude 可将消息改为引导，pi 不支持引导。尝试引导后可立即发送，中断本轮。" } });
       data.remaining.push({ type: "node.updated", nodeId: node.id, patch: { status: "idle", activity: "本轮完成" }, runId: snapshot.run.id, seq: 0, ts: at(45_000) });
       data.remaining.push({ type: "turn.updated", turnId, patch: { status: "completed", endedAt: at(45_000) }, runId: snapshot.run.id, seq: 0, ts: at(45_000) });
     }

@@ -1410,3 +1410,25 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .question-declined .question-cancel-reason { color: var(--text-secondary); }
 /* Keep 提交回答 in view while the docked card scrolls. */
 .question-dock .question-card.is-compact .question-submit { position: sticky; bottom: -9px; z-index: 1; margin: 6px -11px -9px; padding: 7px 11px 8px; background: var(--surface); border-top: 1px solid var(--border); border-radius: 0 0 7px 7px; }
+
+/* Images in messages: rounded thumbnails that open a lightbox. Authenticated sources (attachments,
+   local files) reserve their space while the blob loads. */
+.image-thumb { display: inline-block; vertical-align: top; max-width: 100%; margin: 3px 4px 3px 0; padding: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); overflow: hidden; line-height: 0; cursor: zoom-in; transition: border-color .15s, box-shadow .15s; }
+.image-thumb:hover { border-color: var(--border-strong); box-shadow: var(--shadow); }
+.image-thumb img { display: block; max-width: 100%; max-height: 240px; width: auto; height: auto; object-fit: contain; }
+.image-thumb.is-loading { width: 192px; aspect-ratio: 16 / 10; cursor: default; background: linear-gradient(100deg, var(--surface-hover) 30%, var(--surface-active) 50%, var(--surface-hover) 70%); background-size: 220% 100%; animation: image-shimmer 1.3s ease-in-out infinite; }
+.message-user_message .image-thumb img { max-height: 120px; }
+.message-user_message .image-thumb.is-loading { width: 120px; }
+@keyframes image-shimmer { from { background-position: 100% 0; } to { background-position: -120% 0; } }
+@media (prefers-reduced-motion: reduce) { .image-thumb.is-loading { animation: none; } }
+.image-fallback { color: var(--text-secondary); }
+.tool-images { display: flex; flex-wrap: wrap; gap: 6px; margin: -3px 0 9px 31px; }
+.tool-images .image-thumb { margin: 0; }
+.tool-images .image-thumb img { max-height: 132px; }
+.tool-images .image-thumb.is-loading { width: auto; height: 132px; max-width: 220px; }
+.image-lightbox { position: fixed; inset: 0; z-index: 1100; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 40px 32px 24px; background: #0b0f13e0; cursor: zoom-out; outline: none; animation: image-lightbox-in .12s ease-out; }
+.image-lightbox img { max-width: 100%; max-height: calc(100% - 32px); object-fit: contain; border-radius: 6px; box-shadow: 0 12px 48px #0008; }
+.image-lightbox-caption { max-width: 80%; color: #dce3e9; font-size: 12px; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.image-lightbox-close { position: absolute; top: 12px; right: 14px; width: 32px; height: 32px; border: 0; border-radius: 50%; background: #ffffff1f; color: #fff; font-size: 20px; line-height: 1; }
+.image-lightbox-close:hover { background: #ffffff33; }
+@keyframes image-lightbox-in { from { opacity: 0; } to { opacity: 1; } }
