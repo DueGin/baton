@@ -11,6 +11,10 @@ export const BATON_MCP_SERVER_NAME = "baton";
 export const listAgentsInput = z.object({});
 
 export const delegateInput = z.object({
+  candidate: z
+    .string()
+    .optional()
+    .describe("Preset candidate id from get_team (preset runs): hires that candidate into the team under `role` (name a new role) and delegates to it. No roster approval is needed."),
   role: z
     .string()
     .optional()

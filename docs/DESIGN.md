@@ -404,6 +404,27 @@ interface BatonDesktopBridge {
 - 打包内容：server、protocol、providers、web 的 dist，以及生产依赖。
 - macOS 在本机构建。Windows 包需要在 Windows 上构建，或者走 CI（附 GitHub Actions 矩阵工作流）；本机能交叉打的就打，打不了在文档里说明。
 
+### 4.13 消息回退（会话 / 文件 / 两者）
+
+每当人发出的消息在某个节点上开启新的一轮，内核先打一个检查点（`CheckpointRecord`）：
+
+- **文件**：把该节点 cwd 的当前状态提交到 baton 自己的影子 git 仓库（放在 `BATON_HOME/checkpoints/` 下，`--git-dir` 指向它、`--work-tree` 指向 cwd），遵守 `.gitignore`，从不碰项目自己的 `.git`。这样任何 agent、任何 shell 命令改的文件都能还原。cwd 太大或不可读时跳过，检查点只支持会话回退。
+- **会话**：记录 provider 能否回退到这条消息之前。Claude 用 SDK 的 forkSession（`upToMessageId`），Codex 用 `thread/rollback`（新版本用 fork），Pi / OpenCode 用各自的分叉；都不支持时用 "replay"——新开会话，把这条消息之前的对话整理成一段上下文喂给它。
+
+`POST /api/nodes/:nodeId/rollback { checkpointId, mode }`：
+
+- 先中断本 Run 里正在跑的轮次（不进入暂停）。
+- `conversation`：从这条消息起的条目标记 `rolledBack: true`（默认隐藏，可展开查看），provider 会话回退；这个节点在检查点之后发起的委派连同子树取消。返回 `draft` = 被回退的那条消息，控制台把它放回输入框。
+- `files`：把 cwd 还原到快照（之后新建的文件删除，被删的文件恢复）。回退前可用 `GET /api/checkpoints/:id/changes` 预览会改动哪些文件。
+- `both`：两者都做。
+
+控制台在每条人发出的消息上提供「回退」，弹出三选一：回退会话、回退文件、回退会话和文件；不可用的选项置灰并说明原因。
+
+### 4.14 预设团队的候选成员
+
+预设团队除了固定角色（`members`），还可以列候选成员（`candidates`）：只填 agent、模型、模式、思考级别，可选描述，不填角色。Run 开始时候选成员带上 id（`c1`、`c2`…）进入 `TeamRecord.candidates`，`get_team` 会列出来。主导者根据任务、模型和描述自己挑：`delegate({ candidate: "c1", role: "前端", … })` 把候选成员按它命名的角色招进团队（`TeamMember.candidateId`），不需要人再批准名单（人把他放进预设就是批准）。一个候选成员可以被招进多个角色。只有候选成员、没有固定角色的预设也合法。
+
+
 ## 5. Driver 接口（server 和 providers 之间的边界）
 
 契约文件是 `packages/server/src/driver/types.ts`。内核只依赖这个接口：

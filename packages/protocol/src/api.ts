@@ -353,6 +353,39 @@ export interface NotificationEvent {
   ts: string;
 }
 
+// ───────────────────────────── rollback (DESIGN §4.13) ─────────────────────────────
+
+/** GET /api/nodes/:nodeId/checkpoints → { checkpoints: CheckpointRecord[] }, newest first. */
+export interface ListCheckpointsResponse {
+  checkpoints: import("./records.js").CheckpointRecord[];
+}
+/** GET /api/checkpoints/:id/changes — what a file rollback to this checkpoint would undo. */
+export interface CheckpointChangesResponse {
+  files: Array<{ path: string; status: "added" | "modified" | "deleted" }>;
+}
+/**
+ * POST /api/nodes/:nodeId/rollback — rewind to just before the checkpoint's human message.
+ * Running turns in the run are interrupted first (the run is not paused). "conversation": items from
+ * the checkpoint's message on get `rolledBack: true`, the provider session is rewound (native or
+ * replay), and delegations the node started after the checkpoint are canceled with their subtrees.
+ * "files": the node's cwd is restored to the snapshot (files added since are deleted). "both": both.
+ * 409 when the mode is not available for this checkpoint.
+ */
+export interface RollbackRequest {
+  checkpointId: string;
+  mode: import("./records.js").RollbackMode;
+}
+export interface RollbackResponse {
+  mode: import("./records.js").RollbackMode;
+  /** conversation/both: the rolled-back human message text, for the console to put back in the composer. */
+  draft?: string;
+  /** files/both: restored paths (relative to the cwd). */
+  files?: string[];
+  /** conversation/both: delegations started after the checkpoint that were canceled. */
+  canceledDelegations?: string[];
+  conversation?: "native" | "replay";
+}
+
 // ───────────────────────────── images / attachments ─────────────────────────────
 
 /** Image types accepted for attachments (upload and tool output). */
@@ -377,6 +410,10 @@ export interface AttachmentRecord extends AttachmentRef {
  * `attachment:<id>` at the cursor position, e.g. `看这里 ![截图](attachment:att_123) 哪里不对`.
  * The kernel turns the text into ordered text/image parts for agents with capabilities.images and
  * into text plus "[图片: /abs/path]" notes for the rest. Transcripts render the marker as a thumbnail.
+ *
+ * Agents pass images to each other the same way: a delegate brief, a send() follow-up or a
+ * report_result summary may contain `![name](attachment:<id>)` or `![name](/absolute/path.png)`; the
+ * kernel stores local image paths as attachments and delivers them to the recipient like a human's.
  */
 export const ATTACHMENT_URL_PREFIX = "attachment:";
 

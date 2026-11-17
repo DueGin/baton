@@ -169,6 +169,24 @@ export interface TeamMemberSpec {
   responsibilities?: string;
 }
 
+/**
+ * A candidate in a team preset: an agent configuration the lead may hire, without a role yet. The
+ * lead matches tasks to candidates by model and description and hires them on its own (the human
+ * approved them by putting them in the preset, so hiring needs no roster approval).
+ */
+export interface TeamCandidateSpec {
+  agentId: string;
+  model?: string;
+  modeId?: string;
+  thinking?: string;
+  /** What this candidate is good at, e.g. "前端、CSS 动画" or "便宜快速，适合跑测试". */
+  description?: string;
+}
+/** A preset candidate inside a run's team (ids are stable within the run, e.g. "c1"). */
+export interface TeamCandidate extends TeamCandidateSpec {
+  id: string;
+}
+
 export type TeamActor = "human" | "lead" | "preset" | "agent";
 
 export interface TeamMember extends TeamMemberSpec {
@@ -182,6 +200,8 @@ export interface TeamMember extends TeamMemberSpec {
   replacedBy?: string;
   /** Member id this one took over from. */
   replaces?: string;
+  /** Set when the lead hired this member from a preset candidate. */
+  candidateId?: string;
 }
 
 /** A roster change an agent asked for, waiting for (or decided by) the human. */
@@ -235,6 +255,8 @@ export interface TeamRecord {
   changes: TeamChange[];
   /** Agent-proposed changes (all of them; at most one is "pending" at a time). */
   proposals: TeamProposal[];
+  /** Preset candidates the lead may hire (preset runs). A candidate can be hired into several roles. */
+  candidates?: TeamCandidate[];
   updatedAt: IsoTime;
 }
 
@@ -244,7 +266,10 @@ export interface TeamPreset {
   description?: string;
   /** Agent that runs the root node when a run uses this preset. */
   lead: { agentId: string; model?: string; modeId?: string; thinking?: string };
+  /** Fixed roles. May be empty when the preset only offers candidates. */
   members: TeamMemberSpec[];
+  /** Agents the lead may hire and assign roles to itself. */
+  candidates?: TeamCandidateSpec[];
   createdAt: IsoTime;
   updatedAt: IsoTime;
 }
@@ -448,7 +473,31 @@ export interface ItemRecord {
   turnId?: string;
   ts: IsoTime;
   item: import("./timeline.js").TimelineItem;
+  /** Hidden by a conversation rollback (POST /api/nodes/:nodeId/rollback). Kept for history. */
+  rolledBack?: boolean;
 }
+
+/**
+ * A restore point taken just before a human message started a turn on a node (DESIGN §4.13).
+ * Files are a snapshot of the node's cwd in baton's own shadow git repository (BATON_HOME, never the
+ * project's .git), respecting .gitignore, so it covers changes by every agent and every shell command.
+ */
+export interface CheckpointRecord {
+  id: string;
+  runId: string;
+  nodeId: string;
+  /** The human user_message item this checkpoint precedes. */
+  itemSeq: number;
+  createdAt: IsoTime;
+  /** Absent when the cwd could not be snapshotted (e.g. too large or unreadable). */
+  files?: { cwd: string; ref: string };
+  /**
+   * How the conversation can be rewound to this point: "native" = the provider's own rewind/fork,
+   * "replay" = a fresh provider session seeded with the earlier transcript, "unsupported" = neither.
+   */
+  conversation: "native" | "replay" | "unsupported";
+}
+export type RollbackMode = "conversation" | "files" | "both";
 
 // ───────────────────────────── human-in-the-loop (inbox) ─────────────────────────────
 
