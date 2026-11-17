@@ -37,13 +37,13 @@ import { desktopBridge, desktopRoute } from "./desktop.js";
 import { Sidebar, type Page } from "./components/Sidebar.js";
 const Topology = lazy(() => import("./components/Topology.js").then(module => ({ default: module.Topology })));
 const Timeline = lazy(() => import("./components/Timeline.js").then(module => ({ default: module.Timeline })));
-const defaultPolicy: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, teamApproval: true, mode: "dynamic", maxTeamSize: 5, stallMinutes: 10, maxRoundsPerDelegation: 3, prFeedback: "notify" };
+const defaultPolicy: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, teamApproval: true, mode: "dynamic", maxTeamSize: 5, stallMinutes: 10, prFeedback: "notify" };
 function storedPolicy(): RunPolicy {
   try {
     const saved: unknown = JSON.parse(localStorage.getItem("baton.defaults") ?? "null");
     if (typeof saved === "object" && saved) {
       const values = saved as Record<string, unknown>;
-      return { prFeedback: values.prFeedback === "off" || values.prFeedback === "auto" ? values.prFeedback : "notify", maxTeamSize: typeof values.maxTeamSize === "number" ? Math.max(1, Math.min(50, values.maxTeamSize)) : 5, stallMinutes: typeof values.stallMinutes === "number" ? Math.max(1, Math.min(1440, values.stallMinutes)) : 10, maxRoundsPerDelegation: typeof values.maxRoundsPerDelegation === "number" ? Math.max(1, Math.min(100, values.maxRoundsPerDelegation)) : 3, maxDepth: typeof values.maxDepth === "number" ? Math.max(0, Math.min(10, values.maxDepth)) : 3, maxActiveChildren: typeof values.maxActiveChildren === "number" ? Math.max(1, Math.min(30, values.maxActiveChildren)) : 6, autoApprove: values.autoApprove === true, teamApproval: values.teamApproval !== false, mode: values.mode === "solo" || values.mode === "preset" ? values.mode : "dynamic", ...(typeof values.maxCostUsd === "number" && values.maxCostUsd > 0 ? { budget: { maxCostUsd: values.maxCostUsd } } : {}) };
+      return { prFeedback: values.prFeedback === "off" || values.prFeedback === "auto" ? values.prFeedback : "notify", maxTeamSize: typeof values.maxTeamSize === "number" ? Math.max(1, Math.min(50, values.maxTeamSize)) : 5, stallMinutes: typeof values.stallMinutes === "number" ? Math.max(1, Math.min(1440, values.stallMinutes)) : 10, ...(typeof values.maxRoundsPerDelegation === "number" && values.maxRoundsPerDelegation > 0 && localStorage.getItem("baton.roundsUnlimitedMigrated") !== null ? { maxRoundsPerDelegation: Math.min(100, values.maxRoundsPerDelegation) } : {}), maxDepth: typeof values.maxDepth === "number" ? Math.max(0, Math.min(10, values.maxDepth)) : 3, maxActiveChildren: typeof values.maxActiveChildren === "number" ? Math.max(1, Math.min(30, values.maxActiveChildren)) : 6, autoApprove: values.autoApprove === true, teamApproval: values.teamApproval !== false, mode: values.mode === "solo" || values.mode === "preset" ? values.mode : "dynamic", ...(typeof values.maxCostUsd === "number" && values.maxCostUsd > 0 ? { budget: { maxCostUsd: values.maxCostUsd } } : {}) };
     }
   } catch { /* Use conservative defaults for malformed settings. */ }
   return defaultPolicy;
@@ -200,7 +200,7 @@ export default function App({ client }: { client: BatonClient }) {
     setRefreshing(true); setError(null);
     try { setAgents(await client.agents(true)); } catch (cause) { setError(errorText(cause)); } finally { setRefreshing(false); }
   };
-  const saveDefaults = (policy: RunPolicy): void => { setDefaults(policy); localStorage.setItem("baton.defaults", JSON.stringify({ ...policy, maxCostUsd: policy.budget?.maxCostUsd })); };
+  const saveDefaults = (policy: RunPolicy): void => { setDefaults(policy); localStorage.setItem("baton.defaults", JSON.stringify({ ...policy, maxCostUsd: policy.budget?.maxCostUsd })); localStorage.setItem("baton.roundsUnlimitedMigrated", "1"); };
   const proposals = pendingProposals(snapshot?.run.team);
 
   return <ImageContext value={images}><div className="app-shell">

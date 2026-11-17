@@ -109,7 +109,7 @@ export interface RunPolicy {
   maxTeamSize?: number;
   /** A node with an active turn and no events for this long raises a "stall" escalation. Default 10. */
   stallMinutes?: number;
-  /** A parent's `send` beyond this many rounds of one delegation is escalated to the human. Default 3. */
+  /** A parent's `send` beyond this many rounds of one delegation is escalated to the human. Absent (or 0) = no limit (the default). */
   maxRoundsPerDelegation?: number;
   /** Optional run budget; exceeding it rejects new delegations and cancels nothing by itself. */
   budget?: { maxCostUsd?: number; maxTokens?: number; maxWallMinutes?: number };

@@ -25,7 +25,7 @@ export function isBatonToolPermission(request: PermissionRequest): boolean {
   const server = request.input?.serverName ?? request.input?.server_name ?? request.input?.server;
   return server === "baton";
 }
-export const DEFAULT_POLICY: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "dynamic", teamApproval: true, maxTeamSize: 5, stallMinutes: 10, maxRoundsPerDelegation: 3, prFeedback: "notify" };
+export const DEFAULT_POLICY: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "dynamic", teamApproval: true, maxTeamSize: 5, stallMinutes: 10, prFeedback: "notify" };
 const now = (): string => new Date().toISOString();
 const active = (status: string): boolean => ["starting", "running", "waiting_permission", "queued"].includes(status);
 const done = (d: DelegationRecord): boolean => ["completed", "failed", "canceled", "replaced"].includes(d.status);
@@ -235,10 +235,13 @@ export class Kernel {
     if (policy.mode !== undefined && !["dynamic", "preset", "solo"].includes(policy.mode)) throw new Error("Invalid collaboration mode");
     const { delegation: _legacy, ...normalized } = policy as RunPolicy & { delegation?: unknown };
     if (policy.teamApproval !== undefined && typeof policy.teamApproval !== "boolean") throw new Error("Invalid teamApproval policy");
-    for (const key of ["maxTeamSize", "maxRoundsPerDelegation"] as const) if (policy[key] !== undefined && (!Number.isInteger(policy[key]) || policy[key]! < 1)) throw new Error(`Invalid ${key}`);
+    if (policy.maxTeamSize !== undefined && (!Number.isInteger(policy.maxTeamSize) || policy.maxTeamSize < 1)) throw new Error("Invalid maxTeamSize");
+    if (policy.maxRoundsPerDelegation !== undefined && (!Number.isInteger(policy.maxRoundsPerDelegation) || policy.maxRoundsPerDelegation < 0)) throw new Error("Invalid maxRoundsPerDelegation");
     if (policy.stallMinutes !== undefined && (!Number.isFinite(policy.stallMinutes) || policy.stallMinutes <= 0)) throw new Error("Invalid stallMinutes");
     if (policy.prFeedback !== undefined && !["off", "notify", "auto"].includes(policy.prFeedback)) throw new Error("Invalid prFeedback policy");
-    return { ...DEFAULT_POLICY, ...normalized, mode: normalized.mode ?? "dynamic", teamApproval: normalized.teamApproval ?? true };
+    const result: RunPolicy = { ...DEFAULT_POLICY, ...normalized, mode: normalized.mode ?? "dynamic", teamApproval: normalized.teamApproval ?? true };
+    if (!result.maxRoundsPerDelegation) delete result.maxRoundsPerDelegation; // 0 = unlimited, stored as absent
+    return result;
   }
   patchRun(id: string, input: PatchRunRequest): RunSnapshot {
     const s = this.store.snapshot(id);
@@ -628,7 +631,8 @@ export class Kernel {
         if (d.blockedByProposal) throw new Error("Delegation is waiting for team approval");
         if (["canceled", "replaced"].includes(d.status)) throw new Error(`Delegation is ${d.status}${d.replacedBy ? `; replacement: ${d.replacedBy}` : ""}`);
         this.budget(d.runId);
-        const maximum = (this.store.snapshot(d.runId).run.policy.maxRoundsPerDelegation ?? 3) + this.store.extraRounds(d.id);
+        const limit = this.store.snapshot(d.runId).run.policy.maxRoundsPerDelegation; // absent or 0 = unlimited
+        const maximum = limit ? limit + this.store.extraRounds(d.id) : Infinity;
         if (d.round + 1 > maximum) return this.human.limit(d.id, String(input.message), maximum);
         await this.sendFollowup(d.id, String(input.message)); return { sent: true, round: d.round + 1 };
       }

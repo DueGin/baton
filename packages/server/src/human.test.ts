@@ -106,6 +106,20 @@ describe("supervision", () => {
     await api(s, `/api/escalations/${e.id}/resolve`, "POST", { resolution: "dismiss", note: "Expected delay" }); expect(s.store.escalation(e.id).resolution).toBe("dismiss");
     expect(exportRun(s.store, run.run.id, "md")).toContain("## Escalations");
   });
+  it.each([undefined, 0] as const)("never limits follow-up rounds when maxRoundsPerDelegation is %s", async (limit) => {
+    const messages: string[] = [];
+    const s = await setup({ root: idle, child: async (c) => { messages.push(c.prompt); c.text(`round ${c.turn}`); } });
+    const run = await create(s, limit === undefined ? {} : { maxRoundsPerDelegation: limit });
+    expect(s.store.snapshot(run.run.id).run.policy.maxRoundsPerDelegation).toBeUndefined();
+    const child = await s.kernel.delegate(run.run.rootNodeId, { agent: "child", title: "Review", task: "x" });
+    for (let round = 2; round <= 6; round++) {
+      await until(() => s.store.delegation(child.delegationId).status === "completed");
+      const result = await s.kernel.tool(run.run.rootNodeId, "send", { delegationId: child.delegationId, message: `Round ${round}` }) as { sent?: boolean; status?: string };
+      expect(result.sent).toBe(true);
+      await until(() => messages.length === round);
+    }
+    expect(s.store.snapshot(run.run.id).escalations.filter((e) => e.kind === "round_limit")).toEqual([]);
+  });
   it.each(["extend", "cancel", "dismiss"] as const)("escalates beyond round limit and handles %s", async (resolution) => {
     const messages: string[] = [];
     const s = await setup({ root: idle, child: async (c) => { messages.push(c.prompt); c.text(`round ${c.turn}`); } });
