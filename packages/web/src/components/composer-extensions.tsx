@@ -1,5 +1,5 @@
 import { createContext, useContext, useSyncExternalStore } from "react";
-import { Extension, Node, type AnyExtension } from "@tiptap/core";
+import { Extension, markInputRule, Node, type AnyExtension } from "@tiptap/core";
 import { NodeViewWrapper, ReactNodeViewRenderer, type NodeViewProps } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
@@ -72,6 +72,25 @@ export const RawMarkdown = Node.create({
   renderHTML() { return ["pre", { "data-raw-markdown": "", class: "composer-raw" }, ["code", 0]]; },
 });
 
+/**
+ * Emphasis as you type, also right after CJK text: TipTap's own rules need whitespace before `**`,
+ * so `请把**结果行**调高` would stay literal. `*` and `~~` may open after anything but the same
+ * delimiter or a backslash (as in CommonMark with the CJK-friendly extension the transcript uses);
+ * the lookbehind keeps the preceding character out of the replaced range.
+ */
+export const EMPHASIS_INPUT = {
+  bold: /(?<=^|[^*\\])(\*\*(?![\s*])([^*]+?)(?<!\s)\*\*)$/,
+  italic: /(?<=^|[^*\\])(\*(?![\s*])([^*]+?)(?<!\s)\*)$/,
+  strike: /(?<=^|[^~\\])(~~(?![\s~])([^~]+?)(?<!\s)~~)$/,
+};
+const CjkEmphasis = Extension.create({
+  name: "cjkEmphasis",
+  addInputRules() {
+    const marks = this.editor.schema.marks;
+    return (["bold", "italic", "strike"] as const).flatMap(name => marks[name] ? [markInputRule({ find: EMPHASIS_INPUT[name], type: marks[name] })] : []);
+  },
+});
+
 /** ⌘/Ctrl+Enter sends (never mid-IME composition); Enter and Shift+Enter keep their editor meaning. */
 function submitKeys(submit: () => void): AnyExtension {
   return Extension.create({
@@ -90,6 +109,7 @@ export function composerExtensions(options: { placeholder: () => string; submit:
     TaskItem.configure({ nested: true }),
     ComposerImage,
     RawMarkdown,
+    CjkEmphasis,
     Placeholder.configure({ placeholder: () => options.placeholder(), showOnlyWhenEditable: false }),
     submitKeys(options.submit),
   ];

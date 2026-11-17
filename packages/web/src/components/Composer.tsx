@@ -3,8 +3,8 @@ import { EditorContent, useEditor, type Editor, type JSONContent } from "@tiptap
 import { Slice, type Node as PMNode, type Schema } from "@tiptap/pm/model";
 import type { BatonClient } from "../api.js";
 import { docIsEmpty, docToMarkdown, IMAGE_NODE, pastedTextDoc } from "../lib/composer-markdown.js";
-import { attachmentName, composerUploads } from "../lib/composer-uploads.js";
-import { attachmentProblem, IMAGE_ACCEPT, imageSource, useImageContext, useImageUrl } from "../lib/images.js";
+import { acceptImages, attachmentName, composerUploads } from "../lib/composer-uploads.js";
+import { IMAGE_ACCEPT, imageSource, useImageContext, useImageUrl } from "../lib/images.js";
 import { composerExtensions, imageIdentity, ImageOrderContext, imageStatus, type ComposerImageStatus } from "./composer-extensions.js";
 import { ImageLightbox } from "./Images.js";
 import { Icon } from "./common.js";
@@ -143,10 +143,8 @@ export function Composer({ ref, nodeId, client, placeholder, disabled, imagesEna
     editor.commands.clearContent(true);
   };
   actions.current.attach = (files, at) => {
-    if (!editor || editor.isDestroyed || props.current.disabled || !files.length) return;
-    if (!props.current.imagesEnabled) return flash("当前 agent 不支持图片");
-    const accepted: File[] = []; let problem: string | null = null;
-    for (const file of files) { const reason = attachmentProblem(file); if (reason) problem ??= reason; else accepted.push(file); }
+    if (!editor || editor.isDestroyed || props.current.disabled) return;
+    const { accepted, hint: problem } = acceptImages(files, props.current.imagesEnabled);
     if (problem) flash(problem);
     if (!accepted.length) return;
     const pills: JSONContent[] = accepted.map(file => { const name = attachmentName(file); return { type: IMAGE_NODE, attrs: { key: composerUploads.start(props.current.client, file, name), alt: name, src: null } }; });

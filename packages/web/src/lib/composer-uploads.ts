@@ -1,6 +1,6 @@
 import { ATTACHMENT_URL_PREFIX } from "@baton/protocol";
 import type { BatonClient } from "../api.js";
-import { imageCache } from "./images.js";
+import { attachmentProblem, imageCache } from "./images.js";
 
 /** An image pasted, dropped or picked into the composer, uploading or uploaded. */
 export interface ComposerUpload {
@@ -69,4 +69,16 @@ export function attachmentName(file: File | Blob): string {
   if (name && !/^image\.(png|jpe?g|gif|webp)$/i.test(name)) return name;
   const extension = /\/(png|jpeg|gif|webp)$/.exec(file.type)?.[1]?.replace("jpeg", "jpg") ?? "png";
   return `截图.${extension}`;
+}
+
+/**
+ * Which pasted/dropped/picked files become images, and what to tell the user about the rest. Agents
+ * without `capabilities.images` take none: the hint says so and nothing is inserted.
+ */
+export function acceptImages<T extends Pick<Blob, "type" | "size">>(files: readonly T[], imagesEnabled: boolean): { accepted: T[]; hint: string | null } {
+  if (!files.length) return { accepted: [], hint: null };
+  if (!imagesEnabled) return { accepted: [], hint: "当前 agent 不支持图片" };
+  const accepted: T[] = []; let hint: string | null = null;
+  for (const file of files) { const problem = attachmentProblem(file); if (problem) hint ??= problem; else accepted.push(file); }
+  return { accepted, hint };
 }
