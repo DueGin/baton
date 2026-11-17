@@ -186,7 +186,7 @@ export const BATON_TOOLS = {
   ask_human: {
     input: askHumanInput,
     description:
-      "Ask the human a judgment question (a decision, missing information, a risky trade-off). Do not use it for things you can find out yourself. By default the call waits for the answer and returns it, so you can continue right away. If it returns \"no answer yet\", continue with other work or end your turn; the answer will arrive as a <baton-answer> message.",
+      "Ask the human a judgment question (a decision, missing information, a risky trade-off). Do not use it for things you can find out yourself. By default the call waits for the answer and returns it, so you can continue right away. If it returns \"no answer yet\", continue with other work or end your turn; the answer will arrive as a <baton-answer> message. If it returns \"declined\" (or a <baton-answer declined=\"true\"> arrives), the human chose not to answer: do not ask again, decide yourself and say which assumption you made.",
   },
   report_result: {
     input: reportResultInput,

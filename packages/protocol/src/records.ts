@@ -494,6 +494,8 @@ export interface QuestionRecord {
   anchor?: { itemSeq?: number; callId?: string; turnId?: string };
   /** Why it was canceled (turn interrupted, run paused, node ended…). */
   cancelReason?: string;
+  /** Set when the human closed the card without answering (status "canceled"). */
+  declinedAt?: IsoTime;
   askedAt: IsoTime;
   answeredAt?: IsoTime;
 }

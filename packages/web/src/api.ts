@@ -62,6 +62,7 @@ export interface BatonClient {
   inbox(): Promise<InboxItem[]>;
   inboxEvents(changed: () => void, signal: AbortSignal): Promise<void>;
   answer(id: string, request: AnswerQuestionRequest): Promise<void>;
+  declineQuestion(id: string): Promise<void>;
   resolveEscalation(id: string, request: ResolveEscalationRequest): Promise<void>;
   permissionRules(): Promise<PermissionRule[]>;
   createPermissionRule(request: CreatePermissionRuleRequest): Promise<void>;
@@ -146,6 +147,7 @@ export class ApiClient implements BatonClient {
   rejectTeam = (id: string, proposalId: string, body: RejectTeamProposalRequest) => this.request<void>(`/runs/${encodeURIComponent(id)}/team/proposals/${encodeURIComponent(proposalId)}/reject`, "POST", body);
   inbox = () => this.request<InboxItem[]>("/inbox");
   answer = (id: string, body: AnswerQuestionRequest) => this.request<void>(`/questions/${encodeURIComponent(id)}/answer`, "POST", body);
+  declineQuestion = (id: string) => this.request<void>(`/questions/${encodeURIComponent(id)}/decline`, "POST");
   resolveEscalation = (id: string, body: ResolveEscalationRequest) => this.request<void>(`/escalations/${encodeURIComponent(id)}/resolve`, "POST", body);
   permissionRules = () => this.request<PermissionRule[]>("/permission-rules");
   createPermissionRule = (body: CreatePermissionRuleRequest) => this.request<void>("/permission-rules", "POST", body);

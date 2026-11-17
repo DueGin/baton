@@ -185,6 +185,13 @@ export interface AnswerQuestionRequest {
   answers?: Record<string, string[]>;
 }
 
+/**
+ * POST /api/questions/:id/decline — no body. The human closes the card without answering: the
+ * question becomes "canceled" with `declinedAt`, and the asking agent is told so (a native question
+ * is denied with that message, a blocking ask_human returns status "declined", an async one gets a
+ * notice) so it can continue on its own judgment. Returns the QuestionRecord.
+ */
+
 /** POST /api/runs/:runId/pause and /resume take no body; both return the RunRecord. */
 
 /** POST /api/escalations/:id/resolve */

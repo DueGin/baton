@@ -40,3 +40,11 @@ export const Markdown = memo(function Markdown({ text: source, streaming = false
   }), [fences, stableText, text, theme]);
   return <div className={`markdown theme-${theme}${streaming ? " streaming-text" : ""}`}><ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={[[rehypeHighlight, { detect: false, plainText: ["mermaid"] }]]} urlTransform={url => safeLink(url) ?? ""} components={components}>{text}</ReactMarkdown></div>;
 });
+
+const INLINE_ELEMENTS = ["p", "strong", "em", "del", "code", "br"];
+const INLINE_COMPONENTS: Components = { p: ({ children }) => <>{children}</> };
+/** Inline-only Markdown (bold, italic, strike, code) for places like option buttons: block elements,
+ * links and images are unwrapped to their text so nothing interactive nests inside a button. */
+export const InlineMarkdown = memo(function InlineMarkdown({ text }: { text: string }) {
+  return <span className="inline-markdown"><ReactMarkdown remarkPlugins={REMARK_PLUGINS} allowedElements={INLINE_ELEMENTS} unwrapDisallowed components={INLINE_COMPONENTS}>{text}</ReactMarkdown></span>;
+});

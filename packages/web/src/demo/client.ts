@@ -692,6 +692,21 @@ export class DemoClient implements BatonClient {
     this.inboxListeners.add(changed); const timer = setInterval(() => this.advance(), 500);
     await new Promise<void>(resolve => { const cleanup = (): void => { clearInterval(timer); this.inboxListeners.delete(changed); resolve(); }; if (signal.aborted) cleanup(); else signal.addEventListener("abort", cleanup, { once: true }); });
   }
+  async declineQuestion(id: string): Promise<void> {
+    for (const data of this.data.values()) {
+      const question = data.snapshot.questions.find(row => row.id === id && row.status === "pending"); if (!question) continue;
+      this.emit(data, { type: "question", question: { ...question, status: "canceled", cancelReason: "用户选择不作答", declinedAt: new Date(this.now()).toISOString() } });
+      if (question.delivery === "inline") {
+        const tool = data.log.findLast(event => event.type === "item" && event.nodeId === question.nodeId && event.item.type === "tool_call" && event.item.callId === question.anchor?.callId);
+        if (tool?.type === "item" && tool.item.type === "tool_call") this.emit(data, { type: "item", nodeId: question.nodeId, itemSeq: tool.itemSeq, itemTs: tool.itemTs, turnId: tool.turnId, item: { ...tool.item, status: "completed" } });
+        const seq = this.append(data, question.nodeId, { type: "assistant_message", text: "没有收到回答，我按默认方案继续…" }); const turnId = question.anchor?.turnId;
+        data.remaining.push({ type: "item", nodeId: question.nodeId, itemSeq: seq, itemTs: new Date(this.now()).toISOString(), turnId, item: { type: "assistant_message", text: "没有收到回答，我按默认方案继续：搜索范围取**当前项目**，验证覆盖中文与权限。" }, seq: 0, runId: question.runId, ts: new Date(this.now() + 2000).toISOString() });
+        if (turnId) data.remaining.push({ type: "turn.updated", turnId, patch: { status: "completed", endedAt: new Date(this.now() + 3000).toISOString() }, seq: 0, runId: question.runId, ts: new Date(this.now() + 3000).toISOString() }, { type: "node.updated", nodeId: question.nodeId, patch: { status: "idle", activity: "等待下一条消息" }, seq: 0, runId: question.runId, ts: new Date(this.now() + 3000).toISOString() });
+        data.remaining.sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
+      } else await this.send(question.nodeId, `<baton-answer question="${id}" declined="true">\n用户选择不作答。\n</baton-answer>`); return;
+    }
+    throw new Error("提问已处理或不存在");
+  }
   async answer(id: string, request: AnswerQuestionRequest): Promise<void> {
     if (!request.answer?.trim() && !Object.values(request.answers ?? {}).some(values => values.some(value => value.trim()))) throw new Error("请填写回答");
     for (const data of this.data.values()) {

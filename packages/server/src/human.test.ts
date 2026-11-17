@@ -45,6 +45,28 @@ describe("human questions", () => {
     expect(exportRun(s.store, run.run.id, "md")).toContain("## Questions"); expect(exportRun(s.store, run.run.id, "otlp")).toContain("baton.questions");
     const snap = s.store.snapshot(run.run.id); expect(s.store.events(run.run.id).reduce(applyEvent, { ...snap, nodes: [], delegations: [], turns: [], toolSpans: [], permissions: [], questions: [], escalations: [], lastSeq: 0 })).toEqual(snap);
   });
+  it("lets the human close a question without answering; the agent is told and carries on", async () => {
+    let received: unknown;
+    const s = await setup({ root: async (c) => { if (c.turn === 1) await c.call("ask_human", { question: "Optional detail?", blocking: false }); }, child: async (c) => {
+      received = await c.call("ask_human", { question: "Which output format?", options: ["JSON", "Markdown"], blocking: true });
+      c.text("Picked JSON myself");
+      await c.call("report_result", { status: "success", summary: "Used JSON" });
+    } });
+    const run = await create(s), d = await s.kernel.delegate(run.run.rootNodeId, { agent: "child", title: "Question", task: "x" });
+    await until(() => s.store.snapshot(run.run.id).questions.some((q) => q.nodeId === d.nodeId));
+    const blocking = s.store.snapshot(run.run.id).questions.find((q) => q.nodeId === d.nodeId)!;
+    const declined = await api<{ status: string; declinedAt?: string }>(s, `/api/questions/${encodeURIComponent(blocking.id)}/decline`, "POST");
+    expect(declined).toMatchObject({ status: "canceled", declinedAt: expect.any(String) });
+    await until(() => s.store.delegation(d.delegationId).status === "completed");
+    expect(received).toMatchObject({ status: "declined", message: expect.stringContaining("without answering") });
+    expect(s.store.node(d.nodeId!).activity).not.toContain("等你回答");
+    // An async question gets a notice so an idle agent is not left waiting for an answer forever.
+    const asynchronous = s.store.snapshot(run.run.id).questions.find((q) => q.nodeId === run.run.rootNodeId)!;
+    await api(s, `/api/questions/${asynchronous.id}/decline`, "POST");
+    const prompts = () => (s.kernel.registry as FakeDriverRegistry).get("root")!.sessions[0]!;
+    await until(() => [...prompts().prompts, ...prompts().steered].some((m) => m.includes('declined="true"')));
+    await expect(api(s, `/api/questions/${asynchronous.id}/decline`, "POST")).rejects.toThrow(/not pending/);
+  });
   it("delivers a nonblocking answer by steer while working, keeps asynchronous questions on completion", async () => {
     const s = await setup({ root: async (c) => { if (c.turn === 1) { await c.call("ask_human", { question: "Preference?", blocking: false }); await c.sleep(500); } }, child: async (c) => { await c.call("ask_human", { question: "Optional?", blocking: false }); c.text("Done anyway"); } });
     const run = await create(s); await until(() => s.store.snapshot(run.run.id).questions.length === 1);

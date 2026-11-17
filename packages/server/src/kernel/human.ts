@@ -10,7 +10,9 @@ interface HumanHooks {
   cancel(id: string, reason: string): Promise<void>;
   followup(delegationId: string, message: string): Promise<void>;
   nativeAnswer(question: QuestionRecord): Promise<void>;
+  nativeDecline(question: QuestionRecord, message: string): Promise<void>;
 }
+const DECLINED_MESSAGE = "The human closed this question without answering. Do not ask it again; continue with your best judgment and state the assumption you made.";
 export class HumanInteraction {
   private waiting = new Map<string, (question: QuestionRecord) => void>();
   private answering = new Set<string>();
@@ -24,7 +26,7 @@ export class HumanInteraction {
     return new Promise((resolve) => {
       const finish = (q: QuestionRecord): void => {
         clearTimeout(timer); this.waiting.delete(q.id);
-        resolve(q.status === "answered" ? { questionId: q.id, status: "answered", answer: q.answer, answers: q.answers } : { questionId: q.id, status: q.status === "canceled" ? "canceled" : "no_answer_yet" });
+        resolve(q.status === "answered" ? { questionId: q.id, status: "answered", answer: q.answer, answers: q.answers } : q.declinedAt ? { questionId: q.id, status: "declined", message: DECLINED_MESSAGE } : { questionId: q.id, status: q.status === "canceled" ? "canceled" : "no_answer_yet" });
       };
       const timer = setTimeout(() => {
         const current = this.store.question(question.id);
@@ -58,6 +60,22 @@ export class HumanInteraction {
       throw error;
     }
     finally { this.answering.delete(id); }
+  }
+  /** The human closed the card without answering; tell the agent so it can carry on. */
+  async decline(id: string): Promise<QuestionRecord> {
+    const q = this.store.question(id);
+    if (q.status !== "pending") throw new Error("Question is not pending");
+    if (this.answering.has(id)) throw new Error("Question answer is already in progress");
+    const declined: QuestionRecord = { ...q, status: "canceled", cancelReason: "用户选择不作答", declinedAt: new Date().toISOString() };
+    this.answering.add(id);
+    try {
+      this.store.append(q.runId, { type: "question", question: declined });
+      if (q.source === "native") await this.hooks.nativeDecline(declined, DECLINED_MESSAGE).catch(() => {});
+      const waiting = this.waiting.get(id);
+      if (waiting) waiting(declined);
+      else if (q.source !== "native") this.hooks.enqueue(q.nodeId, `<baton-answer question="${q.id}" declined="true">\n${DECLINED_MESSAGE}\n</baton-answer>`);
+      this.refreshActivity(q.nodeId); return declined;
+    } finally { this.answering.delete(id); }
   }
   refreshActivity(id: string): void {
     const node = this.store.node(id), q = this.store.snapshot(node.runId).questions.find((q) => q.nodeId === id && q.blocking && q.status === "pending");

@@ -10,6 +10,7 @@ import type { HumanActions } from "./HumanActions.js";
 import { RosterStrip } from "./Teams.js";
 import { AgentMark, Icon, PermissionActions, Status, Toggle } from "./common.js";
 import { ModelIcon } from "./AgentIcon.js";
+import { markdownPlainText } from "../lib/markdown.js";
 
 interface GraphContextValue extends HumanActions { snapshot: RunSnapshot; now: number; decide: (id: string, response: PermissionResponse) => void; busy: boolean; reassign: (id: string) => void; inspect: (id: string) => void }
 const GraphContext = createContext<GraphContextValue | null>(null);
@@ -34,7 +35,7 @@ const AgentCard = memo(function AgentCard({ data, selected }: NodeProps<AgentNod
     <div className={`node-activity ${terminal(node.status) ? "muted" : ""}`}><span className={`activity-indicator ${snapshot.run.status !== "paused" && node.status === "running" ? "live" : ""}`} />{tool?.summary ?? node.activity ?? "等待活动"}</div>
     <div className="node-metrics"><span>{duration(node.createdAt, node.endedAt ?? now)}</span><span>{tokens(node.usage.inputTokens + node.usage.outputTokens)} tokens</span><span>{cost(node.usage.costUsd)}</span>{children.length > 0 && <span title="子委派">⑂ {children.length}</span>}</div>
     {permissions.length > 0 && <div className="node-permission"><span>⚑ {permissions[0]!.request.title ?? "需要授权"}</span><PermissionActions permission={permissions[0]!} decide={context.decide} busy={context.busy} /></div>}
-    {questions[0] && <div className="node-human nodrag nopan" onClick={event => event.stopPropagation()}><strong>等你回答</strong><p title={questions[0].question}>{questions[0].question}</p><div><button className="text-button" onClick={() => context.inspect(node.id)}>回答 ↗</button></div></div>}
+    {questions[0] && <div className="node-human nodrag nopan" onClick={event => event.stopPropagation()}><strong>等你回答</strong><p title={markdownPlainText(questions[0].question)}>{markdownPlainText(questions[0].question)}</p><div><button className="text-button" onClick={() => context.inspect(node.id)}>回答 ↗</button></div></div>}
     {stalls[0] && <div className="node-human node-stall-actions nodrag nopan" onClick={event => event.stopPropagation()}><strong>停滞</strong><p title={stalls[0].detail}>{stalls[0].detail}</p><div><button className="button small" disabled={context.busy} onClick={() => context.resolve(stalls[0]!.id, { resolution: "dismiss" })}>忽略</button><button className="button small danger" disabled={context.busy} onClick={() => context.resolve(stalls[0]!.id, { resolution: "cancel" })}>取消委派</button></div></div>}
     <Handle type="source" position={Position.Bottom} />
   </div>;

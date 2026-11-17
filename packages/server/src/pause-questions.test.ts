@@ -128,11 +128,27 @@ describe("inline questions", () => {
     expect(answer).toBeUndefined(); expect(s.store.snapshot(run.run.id).permissions).toEqual([]);
     expect(q).toMatchObject({ source: "native", delivery: "inline", anchor: { callId: "call-question", itemSeq: expect.any(Number), turnId: run.turns[0]!.id }, prompts: [{ id: "color", question: "Which colors?", multiSelect: true, allowFreeText: true }] });
     expect(s.store.inbox().filter((item) => item.kind === "permission")).toEqual([]);
-    await api(s, `/api/questions/${q.id}/answer`, { answers: { color: ["Blue", "Green", "Other color"] } });
+    // The console encodes the id (native ids are "<nodeId>:<callId>"), so the route must decode it.
+    expect(q.id).toContain(":");
+    await api(s, `/api/questions/${encodeURIComponent(q.id)}/answer`, { answers: { color: ["Blue", "Green", "Other color"] } });
     await until(() => s.store.node(root).status === "idle");
     expect(answer).toMatchObject(provider === "claude" ? { behavior: "allow", updatedInput: { questions: input.questions, answers: { "Which colors?": "Blue, Green, Other color" } } } : { behavior: "allow", updatedInput: { answers: { color: { answers: ["Blue", "Green", "Other color"] } } } });
     expect(registry.get("root")!.sessions[0]!.prompts).toHaveLength(1);
     expect(s.store.question(q.id).status).toBe("answered");
+  });
+
+  it("denies a native question the human closed, with a carry-on message, and the turn continues", async () => {
+    let answer: PermissionResponse | undefined;
+    const { s, run, root } = await setup({ root: async (c) => {
+      answer = await c.permission({ id: "native-decline", kind: "question", name: "AskUserQuestion", input: { questions: [{ question: "Which colors?", header: "Color", options: [{ label: "Blue" }] }] } });
+      c.text("Chose myself");
+    } });
+    await until(() => s.store.snapshot(run.run.id).questions.length === 1);
+    const q = s.store.snapshot(run.run.id).questions[0]!;
+    await api(s, `/api/questions/${encodeURIComponent(q.id)}/decline`);
+    await until(() => s.store.node(root).status === "idle");
+    expect(answer).toMatchObject({ behavior: "deny", message: expect.stringContaining("without answering") });
+    expect(s.store.question(q.id)).toMatchObject({ status: "canceled", declinedAt: expect.any(String) });
   });
 
   it("cancels native questions when interrupted or paused, with a reason", async () => {

@@ -6,6 +6,8 @@ import { Markdown, ToolDetail } from "./Transcript.js";
 
 export interface HumanActions {
   answer: (id: string, request: AnswerQuestionRequest) => void;
+  /** Close a question without answering (不作答). */
+  decline?: (id: string) => void;
   resolve: (id: string, request: ResolveEscalationRequest) => void;
 }
 export { QuestionCard } from "./QuestionCard.js";

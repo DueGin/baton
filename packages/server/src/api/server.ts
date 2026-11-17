@@ -36,6 +36,8 @@ export interface BatonServer {
   close(): Promise<void>;
 }
 class HttpError extends Error { constructor(readonly status: number, message: string) { super(message); } }
+/** A captured path segment, percent-decoded (ids such as "<nodeId>:<toolUseId>" arrive as %3A). */
+function segment(value: string): string { try { return decodeURIComponent(value); } catch { throw new HttpError(400, "Malformed path segment"); } }
 function json(response: ServerResponse, status: number, body: unknown): void { response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }).end(JSON.stringify(body)); }
 async function body(request: IncomingMessage): Promise<unknown> {
   if (request.headers["content-type"]?.split(";")[0]?.trim().toLowerCase() !== "application/json") throw new HttpError(415, "Only application/json request bodies are accepted");
@@ -161,11 +163,13 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
         if (method === "POST") { json(response, 201, kernel.rules.create(record(await body(request)) as unknown as CreatePermissionRuleRequest)); return; }
       }
       const permissionRule = /^\/api\/permission-rules\/([^/]+)$/.exec(path);
-      if (method === "DELETE" && permissionRule) { store.deleteRule(permissionRule[1]!); json(response, 200, { deleted: true }); return; }
+      if (method === "DELETE" && permissionRule) { store.deleteRule(segment(permissionRule[1]!)); json(response, 200, { deleted: true }); return; }
       const question = /^\/api\/questions\/([^/]+)\/answer$/.exec(path);
-      if (method === "POST" && question) { const input = record(await body(request)); json(response, 200, await kernel.human.answer(question[1]!, input)); return; }
+      const declineRoute = /^\/api\/questions\/([^/]+)\/decline$/.exec(path);
+      if (method === "POST" && declineRoute) { if (request.headers["content-length"] && request.headers["content-length"] !== "0") await body(request); json(response, 200, await kernel.human.decline(segment(declineRoute[1]!))); return; }
+      if (method === "POST" && question) { const input = record(await body(request)); json(response, 200, await kernel.human.answer(segment(question[1]!), input)); return; }
       const escalation = /^\/api\/escalations\/([^/]+)\/resolve$/.exec(path);
-      if (method === "POST" && escalation) { json(response, 200, await kernel.human.resolve(escalation[1]!, record(await body(request)) as unknown as ResolveEscalationRequest)); return; }
+      if (method === "POST" && escalation) { json(response, 200, await kernel.human.resolve(segment(escalation[1]!), record(await body(request)) as unknown as ResolveEscalationRequest)); return; }
       if (method === "GET" && path === "/api/info") { json(response, 200, { name: "baton", version: "0.1.0", home, port, platform, features: { backgroundProcesses: platform !== "win32", notificationStream: true }, defaults: DEFAULT_POLICY }); return; }
       if (method === "GET" && path === "/api/agents") { json(response, 200, await kernel.agents()); return; }
       if (method === "POST" && path === "/api/agents/refresh") { await body(request); json(response, 200, await kernel.agents(true)); return; }
@@ -179,36 +183,36 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
       }
       const preset = /^\/api\/teams\/([^/]+)$/.exec(path);
       if (preset) {
-        if (method === "GET") { json(response, 200, store.preset(preset[1]!)); return; }
-        if (method === "PUT") { json(response, 200, await kernel.teams.savePreset(record(await body(request)) as unknown as TeamPresetInput, preset[1]!)); return; }
-        if (method === "DELETE") { store.deletePreset(preset[1]!); json(response, 200, { deleted: true }); return; }
+        if (method === "GET") { json(response, 200, store.preset(segment(preset[1]!))); return; }
+        if (method === "PUT") { json(response, 200, await kernel.teams.savePreset(record(await body(request)) as unknown as TeamPresetInput, segment(preset[1]!))); return; }
+        if (method === "DELETE") { store.deletePreset(segment(preset[1]!)); json(response, 200, { deleted: true }); return; }
       }
       const proposalRoute = /^\/api\/runs\/([^/]+)\/team\/proposals\/([^/]+)\/(approve|reject)$/.exec(path);
       if (method === "POST" && proposalRoute) {
         const input = record(await body(request));
-        const result = proposalRoute[3] === "approve" ? await kernel.teams.approve(proposalRoute[1]!, proposalRoute[2]!, input as ApproveTeamProposalRequest) : await kernel.teams.reject(proposalRoute[1]!, proposalRoute[2]!, input.feedback as string);
+        const result = proposalRoute[3] === "approve" ? await kernel.teams.approve(segment(proposalRoute[1]!), segment(proposalRoute[2]!), input as ApproveTeamProposalRequest) : await kernel.teams.reject(segment(proposalRoute[1]!), segment(proposalRoute[2]!), input.feedback as string);
         json(response, 200, result); return;
       }
       const teamRoute = /^\/api\/runs\/([^/]+)\/team\/(members|save-preset)(?:\/([^/]+)(?:\/(replace))?)?$/.exec(path);
       if (teamRoute) {
-        const id = teamRoute[1]!, memberId = teamRoute[3]; store.snapshot(id);
+        const id = segment(teamRoute[1]!), memberId = teamRoute[3]; store.snapshot(id);
         if (method === "POST" && teamRoute[2] === "save-preset") { json(response, 201, await kernel.teams.saveRun(id, record(await body(request)) as unknown as SaveTeamPresetRequest)); return; }
         if (method === "POST" && !memberId) { json(response, 201, await kernel.teams.add(id, record(await body(request)) as unknown as AddMemberRequest)); return; }
         if (method === "POST" && memberId && teamRoute[4] === "replace") { json(response, 200, await kernel.teams.replace(id, memberId, record(await body(request)) as unknown as ReplaceMemberRequest, "human")); return; }
         if (method === "DELETE" && memberId && !teamRoute[4]) { json(response, 200, kernel.teams.remove(id, memberId)); return; }
       }
       const reassign = /^\/api\/delegations\/([^/]+)\/reassign$/.exec(path);
-      if (method === "POST" && reassign) { json(response, 200, await kernel.teams.reassign(reassign[1]!, record(await body(request)) as unknown as ReassignRequest)); return; }
+      if (method === "POST" && reassign) { json(response, 200, await kernel.teams.reassign(segment(reassign[1]!), record(await body(request)) as unknown as ReassignRequest)); return; }
       const regenerate = /^\/api\/runs\/([^/]+)\/title\/regenerate$/.exec(path);
       if (method === "POST" && regenerate) {
-        await body(request); store.snapshot(regenerate[1]!);
-        try { json(response, 200, await kernel.regenerateTitle(regenerate[1]!)); }
+        await body(request); store.snapshot(segment(regenerate[1]!));
+        try { json(response, 200, await kernel.regenerateTitle(segment(regenerate[1]!))); }
         catch (error) { throw new HttpError(502, error instanceof Error ? error.message : String(error)); }
         return;
       }
       const run = /^\/api\/runs\/([^/]+)(?:\/(events|cancel|export|pause|resume))?$/.exec(path);
       if (run) {
-        const id = run[1]!, action = run[2]; store.snapshot(id);
+        const id = segment(run[1]!), action = run[2]; store.snapshot(id);
         if (method === "GET" && !action) { json(response, 200, store.snapshot(id)); return; }
         if (method === "POST" && (action === "pause" || action === "resume")) { json(response, 200, action === "pause" ? await kernel.pauseRun(id) : await kernel.resumeRun(id)); return; }
         if (method === "PATCH" && !action) { json(response, 200, kernel.patchRun(id, record(await body(request)) as PatchRunRequest)); return; }
@@ -238,7 +242,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
       }
       const message = /^\/api\/nodes\/([^/]+)\/messages\/([^/]+)(\/deliver)?$/.exec(path);
       if (message) {
-        const id = message[1]!, seq = sequence(message[2]);
+        const id = segment(message[1]!), seq = sequence(message[2]);
         if (seq < 1) throw new HttpError(400, "Invalid message sequence");
         if (method === "POST" && message[3]) {
           const input = record(await body(request));
@@ -256,7 +260,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
       }
       const node = /^\/api\/nodes\/([^/]+)\/(items|messages|cancel|queue)$/.exec(path);
       if (node) {
-        const id = node[1]!; store.node(id);
+        const id = segment(node[1]!); store.node(id);
         if (method === "PUT" && node[2] === "queue") {
           const input = record(await body(request));
           if (!Array.isArray(input.order) || !input.order.every((seq: unknown) => typeof seq === "number" && Number.isSafeInteger(seq) && seq > 0)) throw new HttpError(400, "order must be an array of positive item sequences");
@@ -276,7 +280,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
       const permission = /^\/api\/permissions\/([^/]+)$/.exec(path);
       if (method === "POST" && permission) { const input = record(await body(request)) as unknown as PermissionDecision; await kernel.respondPermission(decodeURIComponent(permission[1]!), input.response, "human", input.remember); json(response, 200, { accepted: true }); return; }
       const delegation = /^\/api\/delegations\/([^/]+)$/.exec(path);
-      if (method === "GET" && delegation) { json(response, 200, store.delegation(delegation[1]!)); return; }
+      if (method === "GET" && delegation) { json(response, 200, store.delegation(segment(delegation[1]!))); return; }
       throw new HttpError(404, "API route not found");
     }
     if (method !== "GET" && method !== "HEAD") throw new HttpError(405, "Method not allowed");

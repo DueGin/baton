@@ -74,6 +74,7 @@ export class Kernel {
       cancel: (id, reason) => this.cancelNode(id, reason),
       followup: (id, text) => this.sendFollowup(id, text),
       nativeAnswer: (question) => this.answerNative(question),
+      nativeDecline: (question, message) => this.declineNative(question, message),
     });
     this.teams = new Teams(store, registry, {
       cancelForReplacement: (id, reason) => { const d = this.store.node(id).delegationId; if (d) this.replacing.add(d); return this.cancelNode(id, reason, true); },
@@ -679,6 +680,12 @@ export class Kernel {
     const row = (typeof callId === "string" ? calls.findLast((row) => row.item.type === "tool_call" && row.item.callId === callId) : undefined)
       ?? calls.findLast((row) => row.item.type === "tool_call" && (row.item.name === name || row.item.name.endsWith(`__${name}`)));
     return { turnId: rt.turnId, ...(row ? { itemSeq: row.seq, callId: row.item.type === "tool_call" ? row.item.callId : undefined } : typeof callId === "string" ? { callId } : {}) };
+  }
+  private async declineNative(question: QuestionRecord, message: string): Promise<void> {
+    const rt = this.runtime(question.nodeId), requestId = question.id.slice(question.nodeId.length + 1);
+    if (!rt.session?.pendingPermissions().some((request) => request.id === requestId)) return;
+    await rt.session.respondToPermission(requestId, { behavior: "deny", message });
+    this.armStall(question.nodeId);
   }
   private async answerNative(question: QuestionRecord): Promise<void> {
     const rt = this.runtime(question.nodeId), requestId = question.id.slice(question.nodeId.length + 1);

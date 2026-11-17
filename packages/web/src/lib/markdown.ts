@@ -62,3 +62,18 @@ export function remarkBrTags() {
   };
   return (tree: MdNode): void => walk(tree);
 }
+
+/** One-line plain text from Markdown, for titles, tooltips and single-line previews. */
+export function markdownPlainText(text: string): string {
+  return text
+    .replace(/```[^\n]*\n([\s\S]*?)(```|$)/g, "$1")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/^\s{0,3}(#{1,6}\s+|>\s?|[-*+]\s+(\[[ xX]\]\s+)?|\d+[.)]\s+)/gm, "")
+    .replace(/(\*\*|__|~~)(.+?)\1/g, "$2")
+    .replace(/(^|[^\w*])[*_](?!\s)(.+?)(?<!\s)[*_](?=[^\w*]|$)/g, "$1$2")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/<br\s*\/?>/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}

@@ -1387,3 +1387,26 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .composer .composer-stop { display: inline-flex; align-items: center; gap: 5px; background: var(--text); border-color: var(--text); color: var(--surface); }
 .composer .composer-stop:hover:not(:disabled) { background: var(--red, #c4473a); border-color: var(--red, #c4473a); }
 .composer .composer-resume { display: inline-flex; align-items: center; gap: 5px; }
+
+/* Question options: one per line, label and description in Markdown; question text on its own row. */
+.question-options { flex-direction: column; align-items: stretch; flex-wrap: nowrap; gap: 5px; }
+.question-option, .question-card.is-compact .question-option { display: flex; align-items: flex-start; gap: 8px; width: 100%; max-width: none; text-align: left; padding: 7px 10px; border-radius: 6px; }
+.question-card.is-compact .question-option { padding: 5px 9px; font-size: 11.5px; }
+.question-option:not(:disabled):hover { border-color: color-mix(in srgb, var(--blue) 55%, var(--border)); }
+.question-option-mark { flex: none; width: 12px; font-style: normal; line-height: 18px; color: var(--blue); }
+.question-option-text { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 8px; row-gap: 2px; min-width: 0; line-height: 18px; }
+.question-option-label, .question-card.is-compact .question-option-label { display: inline; font-weight: 500; color: var(--text); }
+.question-option-description, .question-card.is-compact .question-option-description { display: inline; margin: 0; max-width: none; overflow: visible; white-space: normal; font-size: 11px; color: var(--text-secondary); }
+.question-card.is-compact .question-prompt { display: block; padding: 6px 0; }
+.question-card.is-compact .question-prompt-header { margin-bottom: 3px; }
+.question-prompt-text .markdown { font-size: 12px; }
+.question-card.is-compact .question-prompt-text .markdown { font-size: 11.5px; }
+.question-prompt-text .markdown > :first-child { margin-top: 0; }
+.question-prompt-text .markdown > :last-child { margin-bottom: 0; }
+.question-card.is-compact .question-options { margin-top: 6px; }
+.inline-markdown code { font-family: var(--font-mono); font-size: .92em; padding: 0 3px; border-radius: 3px; background: color-mix(in srgb, var(--text) 8%, transparent); }
+.question-decline { flex: none; width: 22px; height: 22px; padding: 0; margin: -3px -5px -3px 0; }
+.question-declined { opacity: .85; }
+.question-declined .question-cancel-reason { color: var(--text-secondary); }
+/* Keep 提交回答 in view while the docked card scrolls. */
+.question-dock .question-card.is-compact .question-submit { position: sticky; bottom: -9px; z-index: 1; margin: 6px -11px -9px; padding: 7px 11px 8px; background: var(--surface); border-top: 1px solid var(--border); border-radius: 0 0 7px 7px; }
