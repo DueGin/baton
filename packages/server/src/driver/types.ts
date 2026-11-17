@@ -94,6 +94,16 @@ export interface DriverSession {
    * ask_human falls back to async delivery (DESIGN §4.6).
    */
   supportsLongToolCalls?(): boolean;
+  /**
+   * Native conversation rewind (DESIGN §4.13), optional; drivers without it get a replayed transcript
+   * in a fresh session instead. `rewindPoint()` is read right after startTurn resolves: an opaque
+   * marker for "just before this turn's prompt", or null when the provider cannot tell.
+   * `rewindConversation(point)` rewinds the provider conversation to such a marker (fork, thread
+   * rollback…). Afterwards the kernel closes the session and resumes from persistence() (null: a
+   * fresh session). Rejects when the point cannot be reached; the kernel then replays.
+   */
+  rewindPoint?(): JsonValue | null;
+  rewindConversation?(point: JsonValue): Promise<void>;
 }
 
 export interface AgentDriver {

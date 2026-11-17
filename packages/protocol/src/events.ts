@@ -53,8 +53,9 @@ export type RunEvent =
    * `itemTs` is the row's own time (ItemRecord.ts, preserved across replacements); the envelope `ts`
    * is always when the event happened (monotonic, drives lastEventAt and liveness).
    * Text rows are coalesced to ≈1 event per 100 ms per node.
+   * `rolledBack` mirrors ItemRecord.rolledBack: a conversation rollback re-emits the row with it set.
    */
-  | { type: "item"; nodeId: string; itemSeq: number; turnId?: string; itemTs: IsoTime; item: TimelineItem }
+  | { type: "item"; nodeId: string; itemSeq: number; turnId?: string; itemTs: IsoTime; item: TimelineItem; rolledBack?: boolean }
   | { type: "log"; level: "debug" | "info" | "warn" | "error"; message: string; nodeId?: string };
 
 export type RunEventEnvelope = RunEvent & {

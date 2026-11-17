@@ -8,6 +8,10 @@ const permissions = new Map();
 const send = frame => process.stdout.write(JSON.stringify(frame) + '\n');
 const notify = (method, params) => send({ jsonrpc: '2.0', method, params });
 const sessionId = 'fake-session';
+/** Codex threads (rewind tests): thread id → native turn ids. */
+const threads = new Map([[sessionId, []]]);
+/** Pi session entries (rewind tests). */
+const piEntries = []; let piSession = sessionId;
 const model = { id: 'fake-model', model: 'fake-model', displayName: 'Fake model', isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: 'high' }], defaultReasoningEffort: 'high' };
 // 1×1 PNG returned by the "images" scenario (tool output, view_image, image generation).
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
@@ -76,10 +80,12 @@ createInterface({ input: process.stdin }).on('line', line => {
  if (permissions.has(message.id)) { const callback = permissions.get(message.id); permissions.delete(message.id); callback(); return; }
  if (kind === 'pi') {
   switch (message.type) {
-   case 'get_state': return reply(message, { sessionId, sessionFile: `${process.env.BATON_HOME}/pi-session.jsonl`, model: { provider: 'fake', id: 'fake-model', input: process.env.FAKE_IMAGE_INPUT === '1' ? ['text', 'image'] : ['text'] } });
+   case 'get_state': return reply(message, { sessionId: piSession, sessionFile: `${process.env.BATON_HOME}/${piSession}.jsonl`, model: { provider: 'fake', id: 'fake-model', input: process.env.FAKE_IMAGE_INPUT === '1' ? ['text', 'image'] : ['text'] } });
+   case 'get_entries': { const from = message.since ? piEntries.findIndex(entry => entry.id === message.since) + 1 : 0; return reply(message, { entries: piEntries.slice(from), leafId: piEntries.at(-1)?.id ?? null }); }
+   case 'fork': { const index = piEntries.findIndex(entry => entry.id === message.entryId); piEntries.splice(index); piSession = `fork-${message.entryId}`; return reply(message, { text: 'forked', cancelled: false }); }
    case 'get_available_models': return reply(message, { models: [{ provider: 'fake', id: 'fake-model', name: 'Fake', reasoning: true }] });
    case 'get_commands': return reply(message, { commands: process.env.FAKE_MCP === 'none' ? [] : [{ name: 'mcp', source: 'extension', sourceInfo: { path: process.env.FAKE_MCP === 'adapter' ? '/extensions/pi-mcp-adapter/index.ts' : 'builtin:mcp' } }] });
-   case 'prompt': turn++; reply(message); if (message.message.includes('images')) return images(); if (message.message.includes('hold')) return; if (message.message.includes('permission')) return askPermission(); if (message.message.includes('exit')) return process.exit(3); return complete();
+   case 'prompt': turn++; piEntries.push({ type: 'message', id: `u${turn}`, parentId: piEntries.at(-1)?.id ?? null, message: { role: 'user', content: message.message } }, { type: 'message', id: `a${turn}`, parentId: `u${turn}`, message: { role: 'assistant', content: 'DONE' } }); reply(message); if (message.message.includes('images')) return images(); if (message.message.includes('hold')) return; if (message.message.includes('permission')) return askPermission(); if (message.message.includes('exit')) return process.exit(3); return complete();
    case 'steer': reply(message); return complete();
    case 'abort': reply(message); return send({ type: 'agent_end', messages: [] });
    default: return reply(message);
@@ -94,7 +100,7 @@ createInterface({ input: process.stdin }).on('line', line => {
  if (message.method === 'session/new' || message.method === 'session/load') return reply(message, { sessionId, modes: { currentModeId: 'default', availableModes: [{ id: 'default', name: 'Default' }, { id: 'plan', name: 'Plan' }] }, models: { currentModelId: 'fake-model', availableModels: [{ modelId: 'fake-model', name: 'Fake model' }] } });
  if (message.method === 'session/set_mode' || message.method === 'session/set_model') return reply(message);
  if (message.method === 'turn/start') {
-  turn++; reply(message, { turn: { id: `turn-${turn}` } });
+  turn++; threads.get(sessionId)?.push(`turn-${turn}`); reply(message, { turn: { id: `turn-${turn}` } });
   notify('turn/started', { threadId: sessionId, turn: { id: `turn-${turn}` } });
   const prompt = promptText(message.params.input);
   if (prompt.includes('images')) return images();
@@ -125,6 +131,12 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (prompt.includes('permission')) return askPermission();
   if (prompt.includes('exit')) return process.exit(3);
   return complete();
+ }
+ if (message.method === 'thread/turns/list') return reply(message, { data: (threads.get(message.params.threadId) ?? []).map(id => ({ id })), nextCursor: null });
+ if (message.method === 'thread/fork') {
+  const turns = threads.get(message.params.threadId) ?? [], id = `fork-${threads.size}`;
+  const end = message.params.lastTurnId ? turns.indexOf(message.params.lastTurnId) + 1 : turns.length;
+  threads.set(id, turns.slice(0, end)); return reply(message, { thread: { id } });
  }
  if (message.method === 'turn/steer') { reply(message); return complete(); }
  if (message.method === 'turn/interrupt') { reply(message); return notify('turn/completed', { threadId: sessionId, turn: { id: `turn-${turn}`, status: 'interrupted' } }); }

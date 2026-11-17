@@ -24,6 +24,8 @@ import { questionPrompts } from "../lib/questions.js";
 import type { RunRecord, TurnTrigger, AttachmentRecord } from "@baton/protocol";
 import { demoAttachments, demoLocalImages, drawDemoImage } from "./images.js";
 import { attachmentProblem } from "../lib/images.js";
+import type { CheckpointChangesResponse, ListCheckpointsResponse, RollbackRequest, RollbackResponse } from "@baton/protocol";
+import { demoChanges, demoCheckpointNode, demoCheckpoints, demoRows } from "./rollback.js";
 
 interface DemoRun { snapshot: RunSnapshot; remaining: RunEventEnvelope[]; log: RunEventEnvelope[] }
 export class DemoClient implements BatonClient {
@@ -469,7 +471,7 @@ export class DemoClient implements BatonClient {
   async items(nodeId: string, after = 0): Promise<GetItemsResponse> {
     this.advance(); const data = this.forNode(nodeId);
     const rows = new Map<number, GetItemsResponse["items"][number]>();
-    for (const event of data.log) if (event.type === "item" && event.nodeId === nodeId) rows.set(event.itemSeq, { seq: event.itemSeq, nodeId, ts: event.itemTs, item: event.item, turnId: event.turnId });
+    for (const event of data.log) if (event.type === "item" && event.nodeId === nodeId) rows.set(event.itemSeq, { seq: event.itemSeq, nodeId, ts: event.itemTs, item: event.item, turnId: event.turnId, ...(event.rolledBack ? { rolledBack: true } : {}) });
     const items = [...rows.values()].filter(row => row.seq > after).sort((a, b) => a.seq - b.seq);
     return structuredClone({ items, lastSeq: items.at(-1)?.seq ?? after });
   }
@@ -508,6 +510,40 @@ export class DemoClient implements BatonClient {
     this.emit(data, { type: "item", nodeId, itemSeq, turnId, itemTs: row.itemTs, item: { ...item, delivery, ...(interrupted ? { interrupted: true } : {}), ...(mode === "steer" ? { escalated: true } : {}) } });
     return { accepted: true, delivery, itemSeq };
   }
+  async checkpoints(nodeId: string): Promise<ListCheckpointsResponse> {
+    this.advance(); const data = this.forNode(nodeId);
+    return structuredClone({ checkpoints: demoCheckpoints(data.snapshot, demoRows(data.log, nodeId), nodeId) });
+  }
+  private checkpoint(id: string) {
+    const nodeId = demoCheckpointNode(id), data = nodeId ? this.forNode(nodeId) : undefined;
+    const checkpoint = data && nodeId ? demoCheckpoints(data.snapshot, demoRows(data.log, nodeId), nodeId).find(entry => entry.id === id) : undefined;
+    if (!data || !checkpoint) throw new HttpError(404, "检查点不存在"); return { data, checkpoint };
+  }
+  async checkpointChanges(id: string): Promise<CheckpointChangesResponse> {
+    const { checkpoint } = this.checkpoint(id);
+    await new Promise(resolve => setTimeout(resolve, 120));
+    return demoChanges(checkpoint);
+  }
+  /** Simulated rollback: interrupts the node's turn, flags its rows from the checkpoint on and returns the draft. */
+  async rollback(nodeId: string, request: RollbackRequest): Promise<RollbackResponse> {
+    this.advance(); const { data, checkpoint } = this.checkpoint(request.checkpointId);
+    if (checkpoint.nodeId !== nodeId) throw new HttpError(409, "检查点属于另一个节点");
+    if (!["conversation", "files", "both"].includes(request.mode)) throw new HttpError(400, "mode 无效");
+    const rows = demoRows(data.log, nodeId), target = rows.find(row => row.seq === checkpoint.itemSeq), conversation = request.mode !== "files";
+    if (conversation && target?.rolledBack) throw new HttpError(409, "这条消息已经回退过了");
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const node = data.snapshot.nodes.find(entry => entry.id === nodeId);
+    if (node && ["running", "starting", "waiting_permission"].includes(node.status)) {
+      this.interruptTurn(data, nodeId, "interrupted by rollback");
+      this.emit(data, { type: "node.updated", nodeId, patch: { status: "idle", activity: "Interrupted by rollback", updatedAt: new Date(this.now()).toISOString() } });
+    }
+    if (conversation) for (const row of rows.filter(row => row.seq >= checkpoint.itemSeq && !row.rolledBack)) {
+      const item = row.item.type === "user_message" && row.item.delivery === "queued" ? (({ queuePosition: _position, ...rest }) => ({ ...rest, delivery: "retracted" as const }))(row.item) : row.item;
+      this.emit(data, { type: "item", nodeId, itemSeq: row.seq, turnId: row.turnId, itemTs: row.ts, item, rolledBack: true });
+    }
+    const files = request.mode !== "conversation" ? demoChanges(checkpoint).files.map(file => file.path) : undefined;
+    return { mode: request.mode, ...(conversation ? { draft: target?.item.type === "user_message" ? target.item.text : "", conversation: checkpoint.conversation === "replay" ? "replay" as const : "native" as const, canceledDelegations: [] } : {}), ...(files ? { files } : {}) };
+  }
   async retract(nodeId: string, itemSeq: number): Promise<void> {
     this.advance(); const data = this.forNode(nodeId);
     const row = data.log.findLast(event => event.type === "item" && event.nodeId === nodeId && event.itemSeq === itemSeq);
@@ -534,7 +570,7 @@ export class DemoClient implements BatonClient {
     });
     return { order: [...order] };
   }
-  private interruptTurn(data: DemoRun, nodeId: string): void {
+  private interruptTurn(data: DemoRun, nodeId: string, reason = "interrupted by human message"): void {
     const ts = new Date(this.now()).toISOString();
     const turnIds = new Set(data.snapshot.turns.filter(turn => turn.nodeId === nodeId && turn.status === "running").map(turn => turn.id));
     data.remaining = data.remaining.filter(event => {
@@ -545,7 +581,7 @@ export class DemoClient implements BatonClient {
       if (event.type === "delegation.updated" && data.snapshot.delegations.some(edge => edge.id === event.delegationId && edge.toNodeId === nodeId)) return false;
       return true;
     });
-    for (const id of turnIds) this.emit(data, { type: "turn.updated", turnId: id, patch: { status: "canceled", error: "interrupted by human message", endedAt: ts } });
+    for (const id of turnIds) this.emit(data, { type: "turn.updated", turnId: id, patch: { status: "canceled", error: reason, endedAt: ts } });
     for (const span of data.snapshot.toolSpans) if (span.nodeId === nodeId && span.status === "running") this.emit(data, { type: "tool.span", span: { ...span, status: "canceled", endedAt: ts } });
     for (const question of data.snapshot.questions.filter(question => question.nodeId === nodeId && question.status === "pending" && question.delivery === "inline")) this.emit(data, { type: "question", question: question.source === "native" ? { ...question, status: "canceled", cancelReason: data.snapshot.run.status === "paused" ? "会话已暂停" : "回合已中断", answeredAt: ts } : { ...question, delivery: "async" } });
   }

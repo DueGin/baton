@@ -8,6 +8,10 @@ export interface ComposerHandle {
   /** Add images at the caret (gated on the agent's image capability). */
   attach(files: File[]): void;
   focus(): void;
+  /** Put Markdown into the draft (replaces an empty draft, else appended) and focus it. */
+  setDraft(markdown: string): void;
+  /** Show a short hint in the composer footer. */
+  hint(text: string): void;
 }
 export interface ComposerStatus { empty: boolean; uploading: boolean; failed: boolean; hint?: string }
 

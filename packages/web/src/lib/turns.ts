@@ -33,7 +33,7 @@ export function turnFooters(entries: QuestionTranscriptEntry[], snapshot: RunSna
   return result;
 }
 export function turnFooter(turn: TurnRecord) {
-  const label = turn.status === "completed" ? "✓" : /paused|暂停/i.test(turn.error ?? "") ? "已暂停" : turn.status === "interrupted" || turn.error === "interrupted by human message" ? "已中断" : turn.status === "failed" ? "失败" : "已取消";
-  const error = turn.error && !["paused by human", "interrupted by human message"].includes(turn.error) ? turn.error : undefined;
+  const label = turn.status === "completed" ? "✓" : /paused|暂停/i.test(turn.error ?? "") ? "已暂停" : turn.status === "interrupted" || turn.error === "interrupted by human message" || turn.error === "interrupted by rollback" ? "已中断" : turn.status === "failed" ? "失败" : "已取消";
+  const error = turn.error === "interrupted by rollback" ? "因回退中断" : turn.error && !["paused by human", "interrupted by human message"].includes(turn.error) ? turn.error : undefined;
   return { label, elapsed: turn.endedAt ? duration(turn.startedAt, turn.endedAt) : undefined, tokens: usageTokens(turn.usage), trigger: turnTriggerLabels[turn.trigger], error };
 }

@@ -1,0 +1,48 @@
+/* Message rollback (DESIGN §4.13): the 回退 menu on human messages and the rolled-back row toggle. */
+.rollback-anchor { position: relative; display: inline-flex; }
+.message-top-actions .message-action-rollback { width: 28px; height: 26px; padding: 5px; }
+.message-action-rollback.is-open { background: var(--surface-active); color: var(--text); }
+.rollback-menu { position: absolute; right: 0; top: calc(100% + 5px); z-index: 30; width: min(320px, calc(100vw - 48px)); display: flex; flex-direction: column; background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: 9px; box-shadow: var(--shadow), 0 1px 3px color-mix(in srgb, var(--text) 8%, transparent); font-size: 12px; text-align: left; cursor: default; }
+.rollback-menu.opens-up { top: auto; bottom: calc(100% + 5px); }
+.rollback-menu:focus { outline: none; }
+.rollback-menu > header { display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 12px; border-bottom: 1px solid var(--border); }
+.rollback-menu > header > strong { font-size: 12px; font-weight: 600; }
+.rollback-menu > header > .icon-button { margin-left: auto; width: 24px; height: 24px; }
+.rollback-note { margin: 0; padding: 12px; color: var(--text-dim); font-size: 11px; }
+.rollback-choices { display: flex; flex-direction: column; padding: 5px; gap: 1px; }
+.rollback-choice { display: flex; align-items: flex-start; gap: 9px; width: 100%; padding: 8px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--text); text-align: left; }
+.rollback-choice > svg { flex: none; margin-top: 1px; color: var(--text-secondary); }
+.rollback-choice > span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rollback-choice strong { font-weight: 600; font-size: 12px; }
+.rollback-choice small { color: var(--text-dim); font-size: 10.5px; line-height: 1.45; }
+.rollback-choice:hover:not(:disabled) { background: var(--surface-hover); }
+.rollback-choice:hover:not(:disabled) > svg { color: var(--accent); }
+.rollback-choice:disabled { opacity: 1; cursor: not-allowed; }
+.rollback-choice:disabled strong, .rollback-choice:disabled > svg { color: var(--text-dim); }
+.rollback-files { margin: 0 5px 6px; border-top: 1px solid var(--border); padding: 6px 4px 0; }
+.rollback-files > summary { cursor: pointer; color: var(--text-secondary); font-size: 11px; padding: 3px 4px; border-radius: 4px; }
+.rollback-files > summary:hover { color: var(--text); }
+.rollback-files > ul { list-style: none; margin: 4px 0 2px; padding: 0 4px; max-height: 132px; overflow: auto; }
+.rollback-files li { display: flex; align-items: baseline; gap: 7px; padding: 2px 0; min-width: 0; }
+.rollback-files code { font-size: 10.5px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.rollback-file-status { flex: none; font-size: 10px; width: 26px; color: var(--text-dim); }
+.rollback-file-status.is-added { color: var(--red); }
+.rollback-file-status.is-modified { color: var(--amber); }
+.rollback-file-status.is-deleted { color: var(--green); }
+.rollback-confirm { padding: 11px 12px 12px; }
+.rollback-confirm > p { margin: 0 0 10px; color: var(--text-secondary); font-size: 11.5px; line-height: 1.6; }
+.rollback-confirm > p.error-text { color: var(--red); }
+.rollback-confirm-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.rollback-run { border-color: color-mix(in srgb, var(--red) 45%, var(--border-strong)); }
+.rollback-run:hover:not(:disabled) { background: var(--red-soft) !important; }
+
+/* Rolled-back rows: hidden behind a slim bar, greyed out when revealed. */
+.rolled-back-toggle { display: flex; align-items: center; gap: 6px; width: calc(100% - 31px); margin: 0 0 14px 31px; padding: 4px 10px; border: 1px dashed var(--border-strong); border-radius: 6px; background: transparent; color: var(--text-dim); font-size: 11px; text-align: left; }
+.rolled-back-toggle:hover { color: var(--text-secondary); border-color: var(--text-dim); }
+.rolled-back-toggle-action { color: var(--accent); }
+.rolled-back-toggle.is-open { margin-bottom: 10px; }
+.rolled-back-row { opacity: .5; filter: grayscale(.6); }
+.rolled-back-row:hover, .rolled-back-row:focus-within { opacity: .72; }
+.rolled-back-row .message-user_message { border-style: dashed; }
+/* A menu opened on a revealed row stays fully opaque. */
+.rolled-back-row:has(.rollback-menu) { opacity: 1; filter: none; }

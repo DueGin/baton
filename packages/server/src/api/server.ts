@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile, chmod, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ATTACHMENT_MAX_BYTES, ATTACHMENT_MIME_TYPES, type PullRequestFeedbackRequest, CreateProjectRequest, PatchProjectRequest, CreatePermissionRuleRequest, ResolveEscalationRequest, ApproveTeamProposalRequest, AddMemberRequest, ReplaceMemberRequest, ReassignRequest, SaveTeamPresetRequest, TeamPresetInput, CreateRunRequest, PatchRunRequest, PermissionDecision, RunEventEnvelope, SendMessageResponse, UpdateSettingsRequest, TestTitleModelRequest } from "@baton/protocol";
+import { ATTACHMENT_MAX_BYTES, ATTACHMENT_MIME_TYPES, type PullRequestFeedbackRequest, CreateProjectRequest, PatchProjectRequest, CreatePermissionRuleRequest, ResolveEscalationRequest, ApproveTeamProposalRequest, AddMemberRequest, ReplaceMemberRequest, ReassignRequest, SaveTeamPresetRequest, TeamPresetInput, CreateRunRequest, PatchRunRequest, PermissionDecision, RunEventEnvelope, SendMessageResponse, UpdateSettingsRequest, TestTitleModelRequest, RollbackRequest } from "@baton/protocol";
 import type { DriverRegistry } from "../driver/types.js";
 import { FakeDriverRegistry } from "../driver/fake.js";
 import { Store } from "../store/index.js";
@@ -18,6 +18,8 @@ import { BackgroundRegistry, type BackgroundOptions } from "../background/index.
 import { Projects, ProjectError } from "../projects/index.js";
 import { PullRequests, type PullRequestOptions } from "../pull-requests/index.js";
 import { AttachmentError, Attachments, isAttachmentMimeType, readLocalImage } from "../attachments/index.js";
+import { CheckpointError, Checkpoints } from "../checkpoints/index.js";
+import { ShadowGit, type ShadowGitOptions } from "../checkpoints/shadow-git.js";
 export interface StartServerOptions {
   home?: string; port?: number; registry?: DriverRegistry; fake?: boolean; webDist?: string;
   maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; askTimeoutMinutes?: number; notifier?: Notifier; notificationCoalesceMs?: number;
@@ -31,6 +33,8 @@ export interface StartServerOptions {
   platform?: NodeJS.Platform;
   /** Default-port base for tests; an explicit port always disables fallback. */
   portBase?: number;
+  /** File checkpoints for rollback (DESIGN §4.13): false disables file snapshots; an object tunes the caps. */
+  fileCheckpoints?: false | Partial<Omit<ShadowGitOptions, "root">>;
 }
 export interface BatonServer {
   home: string; port: number; token: string; url: string; server: Server; store: Store; kernel: Kernel; background: BackgroundRegistry; pullRequests: PullRequests; attachments: Attachments;
@@ -86,6 +90,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
   await chmod(join(home, "token"), 0o600);
   const store = new Store(join(home, "baton.db"));
   const attachments = new Attachments(store, join(home, "attachments"));
+  const checkpoints = new Checkpoints(store, options.fileCheckpoints === false ? undefined : new ShadowGit({ ...options.fileCheckpoints, root: join(home, "checkpoints"), exclude: [home, ...(options.fileCheckpoints?.exclude ?? [])] }));
   let registry: DriverRegistry;
   try { registry = options.registry ?? (options.fake ? new FakeDriverRegistry() : (await import("../driver/paseo-adapter.js")).createPaseoDriverRegistry({ home, saveImage: (data, mimeType, name) => attachments.saveImage(data, mimeType, name) })); }
   catch (error) { store.close(); throw error; }
@@ -110,7 +115,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
     void route(request, response).catch((error: unknown) => {
       if (response.headersSent) { response.end(); return; }
       const message = error instanceof Error ? error.message : String(error);
-      const status = error instanceof HttpError || error instanceof ProjectError || error instanceof MessageError || error instanceof AttachmentError ? error.status : /not found/i.test(message) ? 404 : 400;
+      const status = error instanceof HttpError || error instanceof ProjectError || error instanceof MessageError || error instanceof AttachmentError || error instanceof CheckpointError ? error.status : /not found/i.test(message) ? 404 : 400;
       json(response, status, { error: { code: `HTTP_${status}`, message } });
     });
   });
@@ -302,9 +307,13 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
           json(response, 200, { accepted: true }); return;
         }
       }
-      const node = /^\/api\/nodes\/([^/]+)\/(items|messages|cancel|queue)$/.exec(path);
+      const checkpointChanges = /^\/api\/checkpoints\/([^/]+)\/changes$/.exec(path);
+      if (method === "GET" && checkpointChanges) { json(response, 200, await kernel.rollbacks.changes(segment(checkpointChanges[1]!))); return; }
+      const node = /^\/api\/nodes\/([^/]+)\/(items|messages|cancel|queue|checkpoints|rollback)$/.exec(path);
       if (node) {
         const id = segment(node[1]!); store.node(id);
+        if (method === "GET" && node[2] === "checkpoints") { json(response, 200, kernel.rollbacks.list(id)); return; }
+        if (method === "POST" && node[2] === "rollback") { json(response, 200, await kernel.rollbacks.rollback(id, record(await body(request)) as unknown as RollbackRequest)); return; }
         if (method === "PUT" && node[2] === "queue") {
           const input = record(await body(request));
           if (!Array.isArray(input.order) || !input.order.every((seq: unknown) => typeof seq === "number" && Number.isSafeInteger(seq) && seq > 0)) throw new HttpError(400, "order must be an array of positive item sequences");
@@ -352,7 +361,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
   } catch (error) { notifications.close(); store.close(); await registry.shutdown(); throw error; }
   const address = server.address(); if (!address || typeof address === "string") throw new Error("Invalid server address"); port = address.port;
   const url = `http://127.0.0.1:${port}`;
-  kernel = new Kernel(store, registry, { ...options, baseUrl: url, titles, attachments }); kernel.recover();
+  kernel = new Kernel(store, registry, { ...options, baseUrl: url, titles, attachments, checkpoints }); kernel.recover();
   background = new BackgroundRegistry(store, () => kernel.processSources(), { platform, ...options.background });
   pullRequests = new PullRequests(store, settings, { queue: (id, text) => kernel.queueFeedback(id, text), notify }, options.pullRequests);
   await writeFile(join(home, "daemon.json"), JSON.stringify({ url, port, pid: process.pid, startedAt: new Date().toISOString(), version: "0.1.0", spawnedBy: process.env.BATON_SPAWNED_BY === "desktop" ? "desktop" : "cli" }), { mode: 0o600 });

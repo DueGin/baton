@@ -2,12 +2,13 @@
 import pino from "pino";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { AgentClient, AgentPersistenceHandle, AgentPromptInput, AgentSessionConfig, AgentUsage, ClientOptions, ProviderCatalog, ToolCallTimelineItem } from "../agent-sdk-types.js";
+import type { AgentClient, AgentPersistenceHandle, AgentPromptInput, AgentRewindPoint, AgentSessionConfig, AgentUsage, ClientOptions, ProviderCatalog, ToolCallTimelineItem } from "../agent-sdk-types.js";
 import { OrderedTasks, imageFileExists, imageMarkdown, imageNote, promptText, saveProviderImages, type ProviderImage } from "../images.js";
 import { ProviderSession, record, text } from "../session.js";
 import { spawnProcess } from "../process.js";
 import { CodexAppServerClient, CodexAppServerRpcError } from "./codex/app-server-transport.js";
 import { CodexAppServerStartupCoordinator } from "./codex/app-server-startup.js";
+import { listCodexTurns, parseCodexRewindPoint, revertCodexConversation } from "./codex/rewind.js";
 import { mapCodexToolCallFromThreadItem, splitCodexMcpToolResultImages } from "./codex/tool-call-mapper.js";
 const startup = new CodexAppServerStartupCoordinator();
 /** Text items plus `localImage` items at their position (Paseo codexAppServerTurnInputFromPrompt). */
@@ -106,6 +107,9 @@ class CodexSession extends ProviderSession {
     private options!: ClientOptions;
     /** Keeps notification order while an image is being stored. */
     private inbound = new OrderedTasks();
+    /** Native turn ids of the current thread, in order; null until read (resumed threads). */
+    private threadTurns: string[] | null = [];
+    private turnPoint: AgentRewindPoint | null = null;
     private constructor(config: AgentSessionConfig) { super("codex", config); }
     static async open(options: ClientOptions, config: AgentSessionConfig, handle?: AgentPersistenceHandle): Promise<CodexSession> {
         const session = new CodexSession(config);
@@ -131,6 +135,7 @@ class CodexSession extends ProviderSession {
             if (!id)
                 throw new Error("Codex did not return thread id");
             session.identify(id);
+            if (handle) session.threadTurns = null;
             session.config.model = text(response.model) || config.model;
             session.config.modeId ??= "default";
             return session;
@@ -140,7 +145,18 @@ class CodexSession extends ProviderSession {
             throw error;
         }
     }
+    private rememberTurn(id: string): void { if (id && this.threadTurns && this.threadTurns.at(-1) !== id) this.threadTurns.push(id); }
+    rewindPoint(): AgentRewindPoint | null { return this.turnPoint; }
+    async rewindConversation(value: AgentRewindPoint): Promise<void> {
+        if (this.activeTurn) throw new Error("Cannot rewind the Codex conversation while a turn is active");
+        const point = parseCodexRewindPoint(value);
+        const thread = await revertCodexConversation(this.client, point, { cwd: this.config.cwd, ...(this.config.model ? { model: this.config.model } : {}) });
+        // The host closes this session and resumes the new thread (or starts a fresh one) for the next message.
+        this.sessionId = thread; this.threadTurns = null;
+    }
     protected async launchTurn(prompt: AgentPromptInput): Promise<void> {
+        if (this.threadTurns === null && this.sessionId) this.threadTurns = await listCodexTurns(this.client, this.sessionId).catch(() => null);
+        this.turnPoint = this.sessionId && this.threadTurns ? { threadId: this.sessionId, turnId: this.threadTurns.at(-1) ?? null, index: this.threadTurns.length - 1 } : null;
         const input = await codexTurnInput(prompt);
         this.canceling = false;
         this.nativeTurn = null;
@@ -152,6 +168,7 @@ class CodexSession extends ProviderSession {
         const result = record(await this.client.request("turn/start", { threadId: this.sessionId, input, ...(this.config.model ? { model: this.config.model } : {}), ...(this.config.thinking ? { effort: this.config.thinking } : {}), cwd: this.config.cwd }, 90000));
         if (this.activeTurn === turnId)
             this.nativeTurn = text(record(result.turn).id) || this.nativeTurn;
+        if (this.nativeTurn) this.rememberTurn(this.nativeTurn);
     }
     async steerActiveTurn(prompt: AgentPromptInput): Promise<boolean> {
         if (!this.activeTurn || !this.nativeTurn)
@@ -182,8 +199,10 @@ class CodexSession extends ProviderSession {
         }
         const turn = record(params.turn);
         if (method === "turn/started") {
-            if (this.activeTurn)
+            if (this.activeTurn) {
                 this.nativeTurn = text(turn.id);
+                this.rememberTurn(this.nativeTurn);
+            }
             return;
         }
         if (method === "turn/completed") {

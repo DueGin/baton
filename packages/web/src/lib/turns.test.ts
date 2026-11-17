@@ -19,6 +19,7 @@ describe("turn annotations", () => {
     expect(turnFooter(turn)).toMatchObject({ label: "✓", elapsed: "2m 32s", tokens: 1_160_000, trigger: "" });
     expect(turnFooter({ ...turn, status: "failed", error: "provider stopped" })).toMatchObject({ label: "失败", error: "provider stopped" });
     expect(turnFooter({ ...turn, status: "canceled", error: "interrupted by human message" })).toMatchObject({ label: "已中断", error: undefined });
+    expect(turnFooter({ ...turn, status: "canceled", error: "interrupted by rollback" })).toMatchObject({ label: "已中断", error: "因回退中断" });
     expect(turnFooter({ ...turn, status: "canceled", error: "paused by human" }).label).toBe("已暂停");
     expect(turnFooter({ ...turn, status: "interrupted" }).label).toBe("已中断"); expect(turnFooter({ ...turn, status: "canceled" }).label).toBe("已取消");
     for (const trigger of ["result", "resume", "followup", "delegation", "correction"] as const) expect(turnFooter({ ...turn, trigger }).trigger).not.toBe("");

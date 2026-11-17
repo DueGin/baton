@@ -16,6 +16,8 @@ import type { ProcessSource } from "../background/attribution.js";
 import { Projects } from "../projects/index.js";
 import { nativePrompts, nativeUpdatedInput } from "./questions.js";
 import type { QuestionRecord } from "@baton/protocol";
+import type { Checkpoints } from "../checkpoints/index.js";
+import { Rollbacks } from "./rollback.js";
 
 /** True when a permission request is for one of baton's own MCP tools (Claude names them
  * mcp__baton__*, Codex asks via an MCP elicitation carrying serverName "baton"). */
@@ -30,12 +32,14 @@ const now = (): string => new Date().toISOString();
 const active = (status: string): boolean => ["starting", "running", "waiting_permission", "queued"].includes(status);
 const done = (d: DelegationRecord): boolean => ["completed", "failed", "canceled", "replaced"].includes(d.status);
 const addUsage = (a: UsageTotals, b: UsageTotals): UsageTotals => ({ inputTokens: a.inputTokens + b.inputTokens, cachedInputTokens: a.cachedInputTokens + b.cachedInputTokens, outputTokens: a.outputTokens + b.outputTokens, costUsd: a.costUsd + b.costUsd });
-interface QueuedPrompt { text: string; trigger: TurnTrigger; humanItem?: ItemRecord }
+/** `initial`: the run's first prompt, a human message without its own queued row. */
+interface QueuedPrompt { text: string; trigger: TurnTrigger; humanItem?: ItemRecord; initial?: boolean }
 type HumanMessage = ItemRecord & { item: Extract<TimelineItem, { type: "user_message" }> };
 type MessageDelivery = Omit<SendMessageResponse, "accepted">;
 export class MessageError extends Error { readonly status = 409; }
 const HUMAN_INTERRUPT = "interrupted by human message";
 const PAUSE_REASON = "paused by human";
+export const ROLLBACK_REASON = "interrupted by rollback";
 const RESUME_PROMPT = noticePrompt("system", "The human paused this run and has now resumed it. Continue where you left off.");
 const RESTART_RESUME_PROMPT = noticePrompt("system", "baton was restarted while you were working, which interrupted your turn. The human has resumed the run. Check what you had already done (files, commands, delegations) and continue where you left off.");
 interface Runtime {
@@ -49,7 +53,7 @@ interface Runtime {
   interruptReason?: string;
   starting?: Promise<{ turnId: string }>;
 }
-export interface KernelOptions { baseUrl: string; maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; askTimeoutMinutes?: number; titles?: TitleNaming; platform?: NodeJS.Platform; attachments?: Attachments }
+export interface KernelOptions { baseUrl: string; maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; askTimeoutMinutes?: number; titles?: TitleNaming; platform?: NodeJS.Platform; attachments?: Attachments; /** Rollback checkpoints (DESIGN §4.13); absent = no checkpoints. */ checkpoints?: Checkpoints }
 export class Kernel {
   private runtimes = new Map<string, Runtime>();
   private identities = new Map<string, string>();
@@ -69,6 +73,7 @@ export class Kernel {
   readonly human: HumanInteraction;
   readonly rules: PermissionRules;
   readonly projects: Projects;
+  readonly rollbacks: Rollbacks;
   constructor(readonly store: Store, readonly registry: DriverRegistry, readonly options: KernelOptions) {
     this.projects = new Projects(store, undefined, undefined, options.platform);
     this.rules = new PermissionRules(store);
@@ -91,6 +96,22 @@ export class Kernel {
       },
       release: (runId, proposalId) => this.releaseProposal(runId, proposalId),
       notify: (id, text) => this.enqueue(id, text),
+    });
+    this.rollbacks = new Rollbacks(store, options.checkpoints, {
+      interruptRun: (runId) => this.interruptRun(runId),
+      assertQuiet: (runId) => { if (this.pausing.has(runId) || this.resuming.has(runId) || this.store.snapshot(runId).nodes.some((node) => this.runtimes.get(node.id)?.interrupting)) throw new MessageError("A message interruption or pause is in progress; try again in a moment"); },
+      endQuestions: (id, reason, turnId) => this.human.endQuestions(id, reason, true, turnId),
+      cancelNode: (id, reason) => this.cancelNode(id, reason),
+      patchDelegation: (id, patch) => this.patchDelegation(id, patch),
+      flush: (id) => this.flushItem(id),
+      takeQueuedMessages: (id) => this.takeQueuedMessages(id),
+      session: (id) => this.session(id),
+      closeSession: (id) => this.closeSession(id, true),
+      patchNode: (id, patch) => this.patchNode(id, patch),
+      resetConversation: (id) => { const rt = this.runtime(id); rt.lastItem = undefined; rt.finalText = ""; rt.report = undefined; },
+      restart: (id, notice) => this.restartAfterRollback(id, notice),
+      log: (runId, error, id) => this.log(runId, error, id),
+      closed: (id) => this.stopped || this.canceling.has(id) || ["canceled", "replaced"].includes(this.store.node(id).status),
     });
   }
   /** A stored attachment's file for delivery; undefined when the id or the file is gone. */
@@ -142,7 +163,7 @@ export class Kernel {
   private paused(runId: string): boolean { return this.store.snapshot(runId).run.status === "paused"; }
   private interruptedTurn(id: string, turnId: string): boolean {
     const rt = this.runtime(id);
-    return rt.interrupting === turnId || this.store.snapshot(this.store.node(id).runId).turns.some((turn) => turn.id === turnId && turn.status === "canceled" && [HUMAN_INTERRUPT, PAUSE_REASON].includes(turn.error ?? ""));
+    return rt.interrupting === turnId || this.store.snapshot(this.store.node(id).runId).turns.some((turn) => turn.id === turnId && turn.status === "canceled" && [HUMAN_INTERRUPT, PAUSE_REASON, ROLLBACK_REASON].includes(turn.error ?? ""));
   }
   private persistQueue(id: string): void { this.store.holdPrompts(id, this.runtime(id).queued.map((p) => ({ text: p.text, trigger: p.trigger, ...(p.humanItem ? { humanSeq: p.humanItem.seq } : {}) }))); }
   private queuePrompts(id: string, prompts: QueuedPrompt[]): void { this.runtime(id).queued.push(...prompts); this.persistQueue(id); }
@@ -213,7 +234,7 @@ export class Kernel {
     this.emit(runId, { type: "run.created", run: { id: runId, rootNodeId: nodeId, projectId: input.projectId, title: input.title || promptTitle, titleSource: input.title ? "human" : "prompt", cwd, status: "active", policy, createdAt: ts, updatedAt: ts, usage: emptyUsage() } });
     this.emit(runId, { type: "node.created", node: { id: nodeId, runId, parentNodeId: null, delegationId: null, depth: 0, agentId: agent, model: input.model ?? leadDefaults?.model, modeId: input.modeId ?? leadDefaults?.modeId, thinking: input.thinking ?? leadDefaults?.thinking, title: input.title || promptTitle, cwd, status: "starting", createdAt: ts, updatedAt: ts, usage: emptyUsage(), turns: 0 } });
     if (preset || input.team) this.teams.initialize(runId, members, preset ? "preset" : "human", preset);
-    try { await this.startTurn(nodeId, input.prompt, "user"); } catch (error) { this.failNode(nodeId, error); }
+    try { await this.startPrompts(nodeId, [{ text: input.prompt, trigger: "user", initial: true }]); } catch (error) { this.failNode(nodeId, error); }
     if (!input.title) void this.generateTitle(runId, attachmentLabel(input.prompt));
     return this.store.snapshot(runId);
   }
@@ -308,12 +329,15 @@ export class Kernel {
     // A cancel/close can abandon a message while session startup or steer is awaiting the driver.
     prompts = prompts.filter((p) => !p.humanItem || rt.pendingMessages.has(p.humanItem.seq));
     if (!prompts.length) return "queued";
-    if (rt.turnId || this.paused(n.runId) || (rt.interrupting && !interrupt)) { this.queuePrompts(id, prompts); return "queued"; }
+    if (rt.turnId || this.paused(n.runId) || (rt.interrupting && !interrupt) || this.rollbacks.active(n.runId)) { this.queuePrompts(id, prompts); return "queued"; }
     if (["canceled", "replaced"].includes(n.status) || this.canceling.has(id)) throw new Error("Node is canceled");
+    // A human message's turn gets a rollback checkpoint: snapshot the cwd while the session opens.
+    const snapshot = prompts.some((p) => p.humanItem || p.initial) ? this.options.checkpoints?.snapshot(n.cwd) : undefined;
     const session = await this.session(id);
+    const files = await snapshot;
     prompts = prompts.filter((p) => !p.humanItem || rt.pendingMessages.has(p.humanItem.seq));
     if (!prompts.length) return "queued";
-    if (rt.turnId || this.paused(n.runId) || (rt.interrupting && !interrupt)) { this.queuePrompts(id, prompts); return "queued"; }
+    if (rt.turnId || this.paused(n.runId) || (rt.interrupting && !interrupt) || this.rollbacks.active(n.runId)) { this.queuePrompts(id, prompts); return "queued"; }
     const current = this.store.node(id);
     if (["canceled", "replaced"].includes(current.status) || this.canceling.has(id) || this.stopped) throw new Error("Node has been canceled or daemon stopped");
     if (!active(current.status)) this.checkGlobalLimit();
@@ -330,18 +354,25 @@ export class Kernel {
     clearTimeout(rt.idleTimer);
     const trigger = prompts[0]!.trigger, text = prompts.map((p) => p.text).join("\n\n");
     const turnId = randomUUID(); rt.turnId = turnId; rt.driverTurnId = undefined; rt.report = undefined; rt.finalText = ""; rt.usage = emptyUsage(); rt.lastItem = undefined;
+    const checkpointAt = now();
     this.emit(n.runId, { type: "turn.started", turn: { id: turnId, runId: n.runId, nodeId: id, trigger, delegationId: n.delegationId ?? undefined, status: "running", startedAt: now() } });
     this.patchNode(id, { status: "running", activity: "Thinking…", turns: n.turns + 1, error: undefined, endedAt: undefined });
     let deliveryOrder = 0;
     for (const prompt of prompts) if (prompt.humanItem) this.deliverMessage(id, prompt.humanItem, "turn", turnId, humans.length >= 2 ? ++deliveryOrder : undefined);
     // Human rows already exist. Only kernel prompts need a new transcript row for this batch.
     const kernelText = prompts.filter((p) => !p.humanItem).map((p) => p.text).join("\n\n");
-    if (kernelText) this.addItem(id, { type: "user_message", text: kernelText });
+    const kernelRow = kernelText ? this.addItem(id, { type: "user_message", text: kernelText }) : undefined;
+    const checkpointSeq = humans[0]?.humanItem?.seq ?? (prompts.some((p) => p.initial) ? kernelRow?.seq : undefined);
+    const checkpoint = files && checkpointSeq !== undefined ? this.options.checkpoints!.create({ runId: n.runId, nodeId: id, itemSeq: checkpointSeq, createdAt: checkpointAt, ...("ref" in files ? { files: { cwd: n.cwd, ref: files.ref } } : {}), conversation: session.rewindConversation ? "native" : "replay" }, turnId) : undefined;
+    // A rollback's replayed transcript or file notice rides ahead of the next prompt.
+    const preamble = this.options.checkpoints?.preamble(id);
     if (n.delegationId) this.patchDelegation(n.delegationId, { status: "running", startedAt: now(), endedAt: undefined, ...(n.status === "completed" || n.status === "failed" ? { deliveredAt: undefined, deliveredVia: undefined, result: undefined } : {}) });
     this.updateRun(n.runId); this.armStall(id);
     try {
-      const starting = session.startTurn(this.promptFor(id, text)); rt.starting = starting;
+      const starting = session.startTurn(this.promptFor(id, preamble ? `${preamble}\n\n${text}` : text)); rt.starting = starting;
       const started = await starting;
+      if (preamble !== undefined) this.options.checkpoints?.clearPreamble(id);
+      if (checkpoint) this.options.checkpoints!.setPoint(checkpoint.id, session.rewindPoint?.() ?? null);
       if (rt.turnId !== turnId) return "turn";
       rt.driverTurnId = started.turnId;
       this.emit(n.runId, { type: "turn.updated", turnId, patch: { driverTurnId: started.turnId } });
@@ -862,7 +893,7 @@ export class Kernel {
     if (interrupted) {
       // A human redirect ends only this turn: no result capture, terminal node state,
       // descendant cancellation, or queue drain. The caller starts the replacement turn.
-      this.patchNode(id, { status: "idle", activity: error === PAUSE_REASON ? "Paused" : "Interrupted by human message" });
+      this.patchNode(id, { status: "idle", activity: error === PAUSE_REASON ? "Paused" : error === ROLLBACK_REASON ? "Interrupted by rollback" : "Interrupted by human message" });
       this.updateRun(n.runId);
       return;
     }
@@ -930,7 +961,7 @@ export class Kernel {
     this.delivering.add(parentId);
     try {
     const parent = this.store.node(parentId), rt = this.runtime(parentId);
-    if (rt.interrupting || this.paused(parent.runId) || this.resuming.has(parent.runId)) return;
+    if (rt.interrupting || this.paused(parent.runId) || this.resuming.has(parent.runId) || this.rollbacks.active(parent.runId)) return;
     if (["canceled", "failed", "replaced"].includes(parent.status)) return;
     const pending = this.store.snapshot(parent.runId).delegations.filter((d) => d.fromNodeId === parentId && done(d) && d.status !== "replaced" && !this.replacing.has(d.id) && d.result && !d.deliveredAt);
     const notices = this.store.notices(parentId);
@@ -1063,6 +1094,34 @@ export class Kernel {
     this.updateRun(id);
     for (const node of this.store.snapshot(id).nodes) this.scheduleDelivery(node.id);
     return this.store.snapshot(id).run;
+  }
+  /** Rollback (DESIGN §4.13): interrupt every running turn of the run without pausing it. */
+  private async interruptRun(runId: string): Promise<string[]> {
+    const running = this.store.snapshot(runId).nodes.filter((node) => this.runtime(node.id).turnId);
+    await Promise.all(running.map(async (node) => {
+      const rt = this.runtime(node.id), turnId = rt.turnId;
+      rt.interrupting = turnId; rt.interruptReason = ROLLBACK_REASON; clearTimeout(rt.stallTimer);
+      try {
+        await rt.starting?.catch(() => {});
+        await rt.session?.interrupt(); await rt.chain;
+        if (rt.turnId === turnId) await this.finishTurn(node.id, "canceled", undefined, ROLLBACK_REASON);
+      } finally { rt.interrupting = undefined; rt.interruptReason = undefined; }
+    }));
+    return running.map((node) => node.id);
+  }
+  private takeQueuedMessages(id: string): void {
+    const rt = this.runtime(id);
+    rt.queued = rt.queued.filter((prompt) => !prompt.humanItem); this.persistQueue(id);
+    for (const row of this.queuedHumanMessages(id)) rt.pendingMessages.delete(row.seq);
+  }
+  private async restartAfterRollback(id: string, notice?: string): Promise<void> {
+    const node = this.store.node(id), rt = this.runtime(id);
+    if (this.stopped || this.canceling.has(id) || ["canceled", "replaced"].includes(node.status)) return;
+    const prompts: QueuedPrompt[] = [...(notice ? [{ text: notice, trigger: "resume" as const }] : []), ...rt.queued.splice(0)];
+    this.persistQueue(id);
+    if (prompts.length) await this.startPrompts(id, prompts);
+    this.scheduleDelivery(id);
+    if (!rt.turnId) this.armIdle(id);
   }
   private async closeSession(id: string, preserveQueue = false): Promise<void> {
     const rt = this.runtime(id); clearTimeout(rt.idleTimer); clearTimeout(rt.stallTimer); this.identities.delete(rt.token); rt.unsubscribe?.(); rt.closed = true; if (preserveQueue) this.persistQueue(id); else this.abandonMessages(id);

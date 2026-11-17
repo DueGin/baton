@@ -61,7 +61,7 @@ export class Store {
         case "pr": upsert("pull_requests", event.pr); break;
         case "item": {
           const localSeq = event.itemSeq;
-          const item: ItemRecord = { nodeId: event.nodeId, seq: localSeq, turnId: event.turnId, ts: event.itemTs, item: event.item };
+          const item: ItemRecord = { nodeId: event.nodeId, seq: localSeq, turnId: event.turnId, ts: event.itemTs, item: event.item, ...(event.rolledBack ? { rolledBack: true } : {}) };
           this.db.prepare("INSERT INTO items VALUES (?, ?, ?, ?) ON CONFLICT(node_id, seq) DO UPDATE SET data=excluded.data").run(event.nodeId, localSeq, runId, JSON.stringify(item));
           break;
         }

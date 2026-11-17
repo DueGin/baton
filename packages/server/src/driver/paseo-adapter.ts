@@ -72,11 +72,22 @@ function parsePersistence(value: JsonValue, expectedProvider: string): AgentPers
 }
 export class PaseoDriverSession implements DriverSession {
     supportsLongToolCalls(): boolean { return this.session.supportsLongToolCalls?.() ?? false; }
+    /** Present only when the provider session can rewind natively (DESIGN §4.13); else the kernel replays. */
+    rewindPoint?: () => JsonValue | null;
+    rewindConversation?: (point: JsonValue) => Promise<void>;
     private listeners = new Set<(event: DriverEvent) => void>();
     private turnId: string | null = null;
     private closed = false;
     private unsubscribe: () => void;
     constructor(private session: AgentSession, private onClose: () => void = () => { }) {
+        const point = session.rewindPoint?.bind(session), rewind = session.rewindConversation?.bind(session);
+        if (point && rewind) {
+            this.rewindPoint = () => point();
+            this.rewindConversation = async value => {
+                if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid rewind point");
+                await rewind(Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string | number | boolean | null] => entry[1] === null || ["string", "number", "boolean"].includes(typeof entry[1]))));
+            };
+        }
         this.unsubscribe = session.subscribe(event => {
             if (event.type === "turn_started")
                 this.turnId = event.turnId;

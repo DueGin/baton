@@ -70,7 +70,7 @@ export class RunStore {
       if (event.item.type === "user_message" && this.state.messageActions[key]) patch.messageActions = { ...this.state.messageActions, [key]: { ...this.state.messageActions[key], error: undefined, ...(event.item.delivery !== "queued" ? { steerUnsupported: false } : {}) } };
     }
     if (event.type === "item" && this.state.itemStatus[event.nodeId]) {
-      const row: ItemRecord = { seq: event.itemSeq, nodeId: event.nodeId, turnId: event.turnId, ts: event.itemTs, item: event.item };
+      const row: ItemRecord = { seq: event.itemSeq, nodeId: event.nodeId, turnId: event.turnId, ts: event.itemTs, item: event.item, ...(event.rolledBack ? { rolledBack: true } : {}) };
       patch.items = { ...this.state.items, [event.nodeId]: mergeItems(this.state.items[event.nodeId] ?? [], [row]) };
     }
     this.update(patch);

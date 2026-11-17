@@ -3,11 +3,12 @@ import pino from "pino";
 import { mkdir, mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { AgentClient, AgentImageRef, AgentPersistenceHandle, AgentPromptInput, AgentSessionConfig, AgentUsage, ClientOptions, ProviderCatalog } from "../agent-sdk-types.js";
+import type { AgentClient, AgentImageRef, AgentPersistenceHandle, AgentPromptInput, AgentRewindPoint, AgentSessionConfig, AgentUsage, ClientOptions, ProviderCatalog } from "../agent-sdk-types.js";
 import { OrderedTasks, imageNote, promptImages, promptText, readPromptImage, saveProviderImages } from "../images.js";
 import { ProviderSession, record, text, errorText } from "../session.js";
 import { JsonlRpcProcess } from "./jsonl-rpc-process.js";
 import { mapToolDetail, parseToolArgs, parseToolResult, splitPiToolResultImages, type PiTrackedToolCall } from "./pi/tool-call-mapper.js";
+import { parsePiRewindPoint, piLeaf, revertPiConversation } from "./pi/rewind.js";
 const THINKING = ["off", "minimal", "low", "medium", "high", "xhigh", "max"].map(id => ({ id, label: id }));
 /** Pi RPC prompt payload: images ride along base64 when the model takes image input (Paseo
  * convertPromptInput); the text keeps a "[图片 name]" marker where each one was. Otherwise each
@@ -72,6 +73,9 @@ class PiSession extends ProviderSession {
     /** The session model accepts image input (get_state model.input includes "image"). */
     private imageInput = false;
     private inbound = new OrderedTasks();
+    /** Rewind bookkeeping (baton): the leaf before the current prompt, and the get_entries cursor. */
+    private turnPoint: AgentRewindPoint | null = null;
+    private entryCursor: string | null = null;
     private constructor(config: AgentSessionConfig) { super("pi", config); }
     static async open(options: ClientOptions, config: AgentSessionConfig, handle?: AgentPersistenceHandle): Promise<PiSession> {
         const session = new PiSession(config);
@@ -161,7 +165,20 @@ class PiSession extends ProviderSession {
         }
     }
     override getPersistence(): AgentPersistenceHandle | null { const handle = super.getPersistence(); return handle && this.sessionFile ? { ...handle, sessionFile: this.sessionFile } : null; }
+    rewindPoint(): AgentRewindPoint | null { return this.turnPoint; }
+    async rewindConversation(value: AgentRewindPoint): Promise<void> {
+        if (this.activeTurn) throw new Error("Cannot rewind the Pi conversation while a turn is active");
+        const forked = await revertPiConversation(command => this.process.request(command), parsePiRewindPoint(value), this.sessionFile);
+        // The host closes this process and resumes the forked session file for the next message.
+        this.sessionFile = forked.sessionFile; this.sessionId = forked.sessionId; this.entryCursor = null;
+    }
     protected async launchTurn(prompt: AgentPromptInput): Promise<void> {
+        // The prompt becomes a user entry under the current leaf: remember it as the rewind point.
+        this.turnPoint = null;
+        if (this.sessionFile) {
+            try { const leaf = await piLeaf(command => this.process.request(command), this.entryCursor); this.entryCursor = leaf.cursor; this.turnPoint = { sessionFile: this.sessionFile, leafId: leaf.leafId }; }
+            catch { this.entryCursor = null; }
+        }
         const payload = await piPromptPayload(prompt, this.imageInput);
         this.streamedText = false;
         this.streamedThinking = false;
