@@ -7,6 +7,7 @@ import type {
   ProjectRecord, ProjectSummary, CreateProjectRequest, PatchProjectRequest, ListDirsResponse,
   PullRequestRecord, ListPullRequestsResponse, LinkPullRequestRequest, PullRequestFeedbackRequest,
   SendMessageResponse, SendMode, DeliverMessageRequest, EditMessageRequest, ReorderQueueRequest, ReorderQueueResponse, InboxItem, AnswerQuestionRequest, ResolveEscalationRequest, PermissionRule, CreatePermissionRuleRequest,
+  AttachmentRecord,
 } from "@baton/protocol";
 
 /** The server may attach availability warnings to successful preset mutations. */
@@ -67,6 +68,12 @@ export interface BatonClient {
   permissionRules(): Promise<PermissionRule[]>;
   createPermissionRule(request: CreatePermissionRuleRequest): Promise<void>;
   deletePermissionRule(id: string): Promise<void>;
+  /** Store an image (raw bytes, Content-Type = its MIME type) for use as an `attachment:<id>` marker. */
+  uploadAttachment(file: Blob, name: string): Promise<AttachmentRecord>;
+  /** The bytes of a stored attachment; `<img>` cannot send the Bearer header, so callers use object URLs. */
+  attachmentBlob(id: string): Promise<Blob>;
+  /** A local image an agent referred to by absolute path. */
+  localImageBlob(path: string): Promise<Blob>;
   /** A connection lasts until aborted or disconnected. The store owns reconnects. */
   events(runId: string, after: number, onEvent: (event: RunEventEnvelope) => void, signal: AbortSignal): Promise<void>;
 }
@@ -91,14 +98,24 @@ export class ApiClient implements BatonClient {
       method, headers: { Authorization: `Bearer ${this.token}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-    if (!response.ok) {
-      const message = await response.text();
-      let detail = message;
-      try { const parsed: unknown = JSON.parse(message); if (typeof parsed === "object" && parsed && "error" in parsed) detail = JSON.stringify(parsed.error); } catch { /* plain-text server error */ }
-      throw new HttpError(response.status, detail || response.statusText);
-    }
+    if (!response.ok) throw await httpError(response);
     return response.status === 204 ? undefined as T : await response.json() as T;
   }
+  private async blob(path: string): Promise<Blob> {
+    const response = await fetch(`/api${path}`, { headers: { Authorization: `Bearer ${this.token}` } });
+    if (!response.ok) throw await httpError(response);
+    return await response.blob();
+  }
+  uploadAttachment = async (file: Blob, name: string): Promise<AttachmentRecord> => {
+    const response = await fetch("/api/attachments", {
+      method: "POST", body: file,
+      headers: { Authorization: `Bearer ${this.token}`, "Content-Type": file.type || "application/octet-stream", ...(name ? { "X-Attachment-Name": encodeURIComponent(name) } : {}) },
+    });
+    if (!response.ok) throw await httpError(response);
+    return await response.json() as AttachmentRecord;
+  };
+  attachmentBlob = (id: string) => this.blob(`/attachments/${encodeURIComponent(id)}`);
+  localImageBlob = (path: string) => this.blob(`/files/image?path=${encodeURIComponent(path)}`);
 
   agents = (refresh = false) => this.request<AgentEntry[]>(`/agents${refresh ? "/refresh" : ""}`, refresh ? "POST" : "GET");
   runs = (projectId?: string) => this.request<RunSummary[]>(`/runs${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`);
@@ -174,6 +191,13 @@ export class ApiClient implements BatonClient {
       parser.push(decoder.decode());
     } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
   }
+}
+
+async function httpError(response: Response): Promise<HttpError> {
+  const message = await response.text();
+  let detail = message;
+  try { const parsed: unknown = JSON.parse(message); if (typeof parsed === "object" && parsed && "error" in parsed) detail = JSON.stringify(parsed.error); } catch { /* plain-text server error */ }
+  return new HttpError(response.status, detail || response.statusText);
 }
 
 export class HttpError extends Error {

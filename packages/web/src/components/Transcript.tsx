@@ -1,7 +1,6 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
-import type { ItemRecord, NodeRecord, QuestionRecord, RunSnapshot, ToolCallDetail } from "@baton/protocol";
+import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import type { AgentEntry, ItemRecord, NodeRecord, QuestionRecord, RunSnapshot, ToolCallDetail } from "@baton/protocol";
 import { activeTurn, conversationPhase, conversationRows, messageActionKey, queuedRows, nodeIsLive, inFlightMessage, type OutgoingMessage, type MessageActionState, type MessageAction } from "../lib/conversation.js";
-import { composerHeight } from "../lib/run-layout.js";
 import { clock, displayStatus, treeOrder } from "../lib/derive.js";
 import { AgentMark, Empty, Icon, Status } from "./common.js";
 import type { RunStore } from "../store.js";
@@ -23,6 +22,9 @@ import { DeliveryIcon, EditedMarker, MessageActionIcons } from "./MessageActions
 import { turnFooters } from "../lib/turns.js";
 import { TurnFooter, TurnIndicator } from "./TurnIndicator.js";
 import { markdownPlainText } from "../lib/markdown.js";
+import { ToolImages } from "./Images.js";
+import { ImageContext } from "../lib/images.js";
+import { AttachImageButton, LazyComposer, type ComposerHandle, type ComposerStatus } from "./composer-shell.js";
 export { Markdown } from "./Markdown.js";
 
 export function ToolDetail({ detail }: { detail: ToolCallDetail }) {
@@ -76,7 +78,7 @@ export function TranscriptRow({ row, node, snapshot, inspect, client, streaming 
   const card = toolAgentCard(row, node, snapshot);
   if (card) return <div className="agent-message-stack"><AgentMessageCard card={card} inspect={inspect} /></div>;
   if (item.type === "reasoning") return <ReasoningRow id={reasoningBlockId(row.nodeId, row.seq)} text={item.text} streaming={streaming} />;
-  if (item.type === "tool_call") return <><details className={`tool-row tool-${item.status}`}><summary><span className="tool-type">{item.detail.type === "unknown" ? "tool" : item.detail.type}</span><span className="tool-summary">{toolSummary(item.detail, item.name)}</span><span className="tool-state">{item.status === "completed" ? "✓" : item.status === "running" ? "◌" : "✗"}</span></summary><div className="tool-body"><ToolDetail detail={item.detail} />{item.error && <Markdown text={item.error} />}</div></details>{snapshot && pullRequestsAtRow(snapshot, row).map(pr => <InlinePullRequest key={pr.id} pr={pr} snapshot={snapshot} client={client} inspect={inspect} />)}</>;
+  if (item.type === "tool_call") return <><details className={`tool-row tool-${item.status}`}><summary><span className="tool-type">{item.detail.type === "unknown" ? "tool" : item.detail.type}</span><span className="tool-summary">{toolSummary(item.detail, item.name)}</span><span className="tool-state">{item.status === "completed" ? "✓" : item.status === "running" ? "◌" : "✗"}</span></summary><div className="tool-body"><ToolDetail detail={item.detail} />{item.error && <Markdown text={item.error} />}</div></details>{item.images?.length ? <ToolImages images={item.images} /> : null}{snapshot && pullRequestsAtRow(snapshot, row).map(pr => <InlinePullRequest key={pr.id} pr={pr} snapshot={snapshot} client={client} inspect={inspect} />)}</>;
   if (item.type === "notice" || item.type === "error") return <div className={`notice-row ${item.type === "error" ? "error" : item.level}`}>{item.type === "error" ? "✗ " : "↳ "}<Markdown text={item.message} /></div>;
   if (item.type === "todo") return <div className="todo-row">{item.items.map((todo, index) => <div key={index}><span>{todo.status === "completed" ? "✓" : todo.status === "in_progress" ? "◉" : "○"}</span><Markdown text={todo.text} /></div>)}</div>;
   const delivery = item.type === "user_message" ? item.delivery ?? outgoing?.delivery : undefined;
@@ -97,15 +99,18 @@ function QuestionMarker({ question, jump }: { question: QuestionRecord; jump: (i
   const prompts = questionPrompts(question);
   return <button type="button" className="question-marker" onClick={() => jump(question.id)} title="跳到输入框上方的问题卡片"><i aria-hidden="true" /><strong>等你回答</strong><span>{markdownPlainText(prompts[0]?.question ?? question.question)}{prompts.length > 1 ? ` 等 ${prompts.length} 个问题` : ""}</span><small>在输入框上方作答 ↓</small></button>;
 }
-export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNodeId, now, inspect, projectName, answer, decline, busy, stopRun, resumeRun }: {
-  answer: HumanActions["answer"]; decline?: HumanActions["decline"]; busy: boolean; projectName?: string; stopRun?: () => void; resumeRun?: () => void; snapshot: RunSnapshot; store: RunStore; items: Record<string, ItemRecord[]>; itemStatus: Record<string, string>;
+export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNodeId, now, inspect, projectName, answer, decline, busy, stopRun, resumeRun, agents = [] }: {
+  agents?: AgentEntry[]; answer: HumanActions["answer"]; decline?: HumanActions["decline"]; busy: boolean; projectName?: string; stopRun?: () => void; resumeRun?: () => void; snapshot: RunSnapshot; store: RunStore; items: Record<string, ItemRecord[]>; itemStatus: Record<string, string>;
   nodeId: string; setNodeId: (id: string) => void; now: number; inspect: (id: string) => void;
 }) {
-  const [draft, setDraft] = useState(""); const [follow, setFollow] = useState(true); const bottom = useRef<HTMLDivElement>(null);
-  const input = useRef<HTMLTextAreaElement>(null);
+  const [follow, setFollow] = useState(true); const bottom = useRef<HTMLDivElement>(null);
+  const composer = useRef<ComposerHandle>(null);
+  const [composerStatus, setComposerStatus] = useState<ComposerStatus>({ empty: true, uploading: false, failed: false });
   const scroll = useRef<HTMLDivElement>(null); const node = snapshot.nodes.find(entry => entry.id === nodeId) ?? snapshot.nodes[0];
   const state = store.getSnapshot();
-  useEffect(() => { if (node) { void store.loadItems(node.id); setDraft(""); setFollow(true); } }, [node?.id, store]);
+  // Relative image paths in this node's messages resolve against its working directory.
+  const imageContext = useMemo(() => ({ client: store.client, cwd: node?.cwd }), [store.client, node?.cwd]);
+  useEffect(() => { if (node) { void store.loadItems(node.id); setFollow(true); } }, [node?.id, store]);
   const rows = items[node?.id ?? nodeId] ?? [];
   const messages = conversationRows(rows, state.outgoing, node?.id ?? nodeId);
   const entries = inlineQuestionEntries(messages, snapshot.questions, node?.id ?? nodeId);
@@ -127,36 +132,28 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
     const observer = new ResizeObserver(() => bottom.current?.scrollIntoView({ block: "end" }));
     observer.observe(content); return () => observer.disconnect();
   }, [follow, node?.id]);
-  useLayoutEffect(() => {
-    const textarea = input.current; if (!textarea) return;
-    const resize = () => {
-      const style = getComputedStyle(textarea);
-      const lineHeight = Number.parseFloat(style.lineHeight) || 20;
-      const padding = (Number.parseFloat(style.paddingTop) || 0) + (Number.parseFloat(style.paddingBottom) || 0);
-      textarea.style.height = "auto";
-      textarea.style.height = `${composerHeight(textarea.scrollHeight, lineHeight, padding)}px`;
-    };
-    resize();
-    let width = textarea.clientWidth;
-    const observer = new ResizeObserver(() => {
-      if (width !== textarea.clientWidth) { width = textarea.clientWidth; resize(); }
-    });
-    observer.observe(textarea); return () => observer.disconnect();
-  }, [draft, node?.id]);
   // Empty composer + agents still working anywhere in this run → the send button becomes 停止 (pause the
   // whole run: every running turn is interrupted and nothing restarts on its own); a paused run offers 继续.
   const terminal = ["completed", "failed", "canceled"].includes(snapshot.run.status);
   const runWorking = !terminal && snapshot.run.status !== "paused" && snapshot.nodes.some(entry => nodeIsLive(snapshot, entry));
-  const composerAction: "send" | "stop" | "resume" = draft.trim() ? "send" : runWorking && stopRun ? "stop" : snapshot.run.status === "paused" && resumeRun ? "resume" : "send";
-  const submit = (): void => { const text = draft.trim(); if (!text || !node) return; setDraft(""); setFollow(true); void store.sendMessage(node.id, text); };
+  // The draft is a Markdown document; any text or image in it turns the button back into 发送.
+  const composerAction: "send" | "stop" | "resume" = !composerStatus.empty ? "send" : runWorking && stopRun ? "stop" : snapshot.run.status === "paused" && resumeRun ? "resume" : "send";
+  const send = (markdown: string): void => { if (!node) return; setFollow(true); void store.sendMessage(node.id, markdown); };
+  const agent = agents.find(entry => entry.id === node?.agentId);
+  const imagesEnabled = agent?.capabilities.images === true;
+  const closed = node ? ["canceled", "replaced"].includes(node.status) : false;
   if (!node) return <Empty>等待根节点创建…</Empty>;
-  return <div className="transcript-view"><div className="view-toolbar conversation-toolbar"><div className="transcript-selector"><AgentMark agent={node.agentId} small /><select aria-label="选择会话节点" value={node.id} onChange={event => setNodeId(event.target.value)}>{treeOrder(snapshot.nodes).map(entry => <option key={entry.id} value={entry.id}>{"　".repeat(entry.depth)}{snapshot.run.status === "paused" && !["canceled", "completed", "failed", "replaced"].includes(entry.status) ? "⏸ " : nodeIsLive(snapshot, entry) ? "◉ " : ""}{entry.title} · {entry.agentId}{nodeIsLive(snapshot, entry) ? " · 运行中" : ""}</option>)}</select><Status status={displayStatus(node, snapshot)} /></div><div className="conversation-toolbar-actions"><span className="muted">{messages.length} items</span><button className="text-button" onClick={() => inspect(node.id)} title="查看当前节点详情">节点详情 ↗</button></div></div>
+  return <ImageContext value={imageContext}><div className="transcript-view"><div className="view-toolbar conversation-toolbar"><div className="transcript-selector"><AgentMark agent={node.agentId} small /><select aria-label="选择会话节点" value={node.id} onChange={event => setNodeId(event.target.value)}>{treeOrder(snapshot.nodes).map(entry => <option key={entry.id} value={entry.id}>{"　".repeat(entry.depth)}{snapshot.run.status === "paused" && !["canceled", "completed", "failed", "replaced"].includes(entry.status) ? "⏸ " : nodeIsLive(snapshot, entry) ? "◉ " : ""}{entry.title} · {entry.agentId}{nodeIsLive(snapshot, entry) ? " · 运行中" : ""}</option>)}</select><Status status={displayStatus(node, snapshot)} /></div><div className="conversation-toolbar-actions"><span className="muted">{messages.length} items</span><button className="text-button" onClick={() => inspect(node.id)} title="查看当前节点详情">节点详情 ↗</button></div></div>
     <div className="transcript-scroll" ref={scroll} onScroll={() => { const el = scroll.current; if (el) setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 100); }}><div className="transcript-content">{itemStatus[node.id] === "loading" && <div className="loading-line">正在加载会话…</div>}{itemStatus[node.id] === "error" && <button className="button" onClick={() => { void store.loadItems(node.id, true); }}>重试加载会话</button>}{entries.map((entry, index) => <Fragment key={entry.type === "question" ? entry.question.id : entry.entry.outgoing?.clientId ?? entry.entry.row.seq}>{entry.type === "question" ? entry.question.status === "pending" ? <QuestionMarker question={entry.question} jump={jumpQuestion} /> : <QuestionCard inline compact question={entry.question} answer={answer} busy={busy} /> : (() => { const { row, outgoing } = entry.entry; return <TranscriptRow client={store.client} row={row} node={node} snapshot={snapshot} inspect={inspect} outgoing={outgoing} actionState={state.messageActions[messageActionKey(node.id, row.seq)]} act={action => { void store.actOnMessage(node.id, row.seq, action); }} retry={outgoing ? () => { void store.sendMessage(node.id, outgoing.text, outgoing.clientId); } : undefined} streaming={live && inTurn(row) && (row.item.type === "reasoning" || (row.seq === latestText?.seq && phase?.kind === "reply"))} />; })()}{footers.get(index)?.map(turn => <TurnFooter key={turn.id} turn={turn} />)}</Fragment>)}{!entries.length && itemStatus[node.id] === "ready" && <Empty>这个节点还没有消息。</Empty>}{phase && <TurnIndicator key={node.id} phase={phase} snapshot={snapshot} now={now} inspect={inspect} jumpQuestion={jumpQuestion} />}<div ref={bottom} /></div></div>
     <div className="composer-stack">{dockQuestions.length > 0 && <div className="question-dock" aria-label="待回答的问题">{dockQuestions.map(question => <QuestionCard key={question.id} inline compact question={question} answer={answer} decline={decline} busy={busy} />)}</div>}
     <div className="composer-tools"><BackgroundPopover projectName={projectName} key={snapshot.run.id} snapshot={snapshot} now={now} client={store.client} /><PullRequestPopover key={`pr:${snapshot.run.id}`} snapshot={snapshot} client={store.client} inspect={inspect} /></div>
     <QueueDock key={node.id} entries={queue} actions={state.messageActions} pending={queueState?.pending} error={queueState?.error} reorder={order => { void store.reorderQueue(node.id, order); }} act={(seq, action) => store.actOnMessage(node.id, seq, action)} edit={(seq, text) => store.editMessage(node.id, seq, text)} />
-    <form className="composer" onSubmit={event => { event.preventDefault(); submit(); }}><textarea ref={input} aria-label="消息" placeholder={`向 ${node.agentId} 发送消息…${live ? "（运行中也可发送）" : ""}`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); submit(); } }} disabled={["canceled", "replaced"].includes(node.status)} rows={2} /><div className="composer-footer"><span title="送达方式会显示在消息旁">{snapshot.run.status === "paused" ? "会话已暂停，消息会在继续后送达" : live ? "运行中 · 发送后排队，可在消息上改为引导或立即发送" : "发送到当前节点"} · ⌘ / Ctrl + Enter</span>{composerAction === "stop" ? <button type="button" className="button composer-stop" disabled={busy} title="停止本会话中所有正在工作的 agent（可继续）" onClick={() => stopRun?.()}><Icon name="stop" size={13} />停止</button>
+    <form className="composer" onSubmit={event => { event.preventDefault(); composer.current?.submit(); }}
+      onDragOver={event => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
+      onDrop={event => { if (event.defaultPrevented || !event.dataTransfer.types.includes("Files")) return; event.preventDefault(); composer.current?.attach([...event.dataTransfer.files]); }}>
+      <LazyComposer key={node.id} ref={composer} nodeId={node.id} client={store.client} placeholder={`向 ${node.agentId} 发送消息…${live ? "（运行中也可发送）" : ""}`} disabled={closed} imagesEnabled={imagesEnabled} onSend={send} onStatus={setComposerStatus} />
+      <div className="composer-footer">{composerStatus.hint ? <span className="composer-hint" role="status">{composerStatus.hint}</span> : <span title="送达方式会显示在消息旁">{snapshot.run.status === "paused" ? "会话已暂停，消息会在继续后送达" : live ? "运行中 · 发送后排队，可在消息上改为引导或立即发送" : "发送到当前节点"} · ⌘ / Ctrl + Enter</span>}<div className="composer-actions"><AttachImageButton enabled={imagesEnabled} disabled={closed} attach={files => composer.current?.attach(files)} />{composerAction === "stop" ? <button type="button" className="button composer-stop" disabled={busy} title="停止本会话中所有正在工作的 agent（可继续）" onClick={() => stopRun?.()}><Icon name="stop" size={13} />停止</button>
       : composerAction === "resume" ? <button type="button" className="button primary composer-resume" disabled={busy} title="继续本会话" onClick={() => resumeRun?.()}><Icon name="play" size={13} />继续</button>
-      : <button className="button primary" disabled={!draft.trim() || ["canceled", "replaced"].includes(node.status)}><Icon name="arrow" size={15} />发送</button>}</div></form></div>
-  </div>;
+      : <button className="button primary" disabled={composerStatus.empty || closed || composerStatus.uploading} title={composerStatus.uploading ? "图片上传中…" : composerStatus.failed ? "有图片上传失败" : undefined}><Icon name="arrow" size={15} />发送</button>}</div></div></form></div>
+  </div></ImageContext>;
 }
