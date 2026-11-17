@@ -19,7 +19,7 @@ import type { PullRequestRecord, ListPullRequestsResponse, LinkPullRequestReques
 import { demoNoticePrompt, demoBriefPrompt, demoResultsPrompt } from "./prompts.js";
 import { snapshotInbox, sortInbox, permissionPattern } from "../lib/inbox.js";
 import { matchPermissionRule } from "../lib/permission-rules.js";
-import { activeMembers, cleanMember, defaultAgentSpec, pendingProposals, validateMembers, validatePreset } from "../lib/teams.js";
+import { activeMembers, cleanCandidate, cleanMember, defaultAgentSpec, pendingProposals, validateMembers, validatePreset } from "../lib/teams.js";
 import { questionPrompts } from "../lib/questions.js";
 import type { RunRecord, TurnTrigger, AttachmentRecord } from "@baton/protocol";
 import { demoAttachments, demoLocalImages, drawDemoImage } from "./images.js";
@@ -66,13 +66,15 @@ export class DemoClient implements BatonClient {
     };
     this.data.set(previous.run.id, { snapshot: previous, log: archived.events, remaining: [] });
     const ts = new Date(now()).toISOString();
-    this.presets.set("preset-product", { id: "preset-product", name: "产品交付小队", description: "Lead 协调，Codex 实现，pi 独立审查。", lead: defaultAgentSpec(demoAgents, "claude"), members: [{ role: "engineer", ...defaultAgentSpec(demoAgents, "codex"), responsibilities: "代码实现和测试" }, { role: "reviewer", ...defaultAgentSpec(demoAgents, "pi"), responsibilities: "只读审查与边界验证" }], createdAt: ts, updatedAt: ts });
+    this.presets.set("preset-product", { id: "preset-product", name: "产品交付小队", description: "Lead 协调，Codex 实现，pi 独立审查；需要时从候选中招人。", lead: defaultAgentSpec(demoAgents, "claude"), members: [{ role: "engineer", ...defaultAgentSpec(demoAgents, "codex"), responsibilities: "代码实现和测试" }, { role: "reviewer", ...defaultAgentSpec(demoAgents, "pi"), responsibilities: "只读审查与边界验证" }], candidates: [{ agentId: "codex", model: "gpt-5.3-codex", thinking: "high", description: "前端、CSS 动画与交互细节" }, { agentId: "claude", model: "claude-sonnet-4-6", thinking: "high", description: "架构评审、迁移方案与长文档" }, { agentId: "pi", model: "gemini-2.5-pro", thinking: "medium", description: "便宜快速，适合跑测试和批量检查" }], createdAt: ts, updatedAt: ts });
+    this.presets.set("preset-pool", { id: "preset-pool", name: "按需招人", description: "不设固定角色，由 lead 按任务从候选中招人。", lead: defaultAgentSpec(demoAgents, "claude"), members: [], candidates: [{ agentId: "codex", model: "gpt-5.3-codex", thinking: "high", description: "实现与重构，适合较大的改动" }, { agentId: "pi", model: "gemini-2.5-pro", description: "便宜快速，适合跑测试" }, { agentId: "qwen", model: "qwen-default", description: "中文文档与界面文案" }], createdAt: ts, updatedAt: ts });
     this.rules.set("rule-demo-read", { id: "rule-demo-read", toolName: "read", pattern: "src/**", decision: "allow", scope: "global", agentId: "codex", createdAt: ts, hits: 1, lastHitAt: ts });
     // Keep a second live Run at the approval gate until the human decides.
     void this.createRun({ projectId: "project-atlas", agent: "claude", cwd: "/workspace/atlas", title: "待确认团队 · 实现登录流程", prompt: "实现登录流程，并独立审查会话安全。", policy: { mode: "dynamic", teamApproval: true } });
     this.setupHumanDemo();
     this.setupConversationDemo();
     this.setupQuestionDemo();
+    this.setupCandidateDemo();
     const gallery = agentMessageDemo(now());
     const galleryData: DemoRun = { snapshot: { ...gallery.snapshot, lastSeq: 0 }, log: [], remaining: [] };
     this.data.set(gallery.snapshot.run.id, galleryData);
@@ -255,16 +257,18 @@ export class DemoClient implements BatonClient {
     this.emit(data, { type: "node.updated", nodeId: rootNodeId, patch: { status: "idle", activity: "等待下一条消息" } });
     this.emit(data, { type: "turn.updated", turnId: `${id}:t1`, patch: { status: "completed", endedAt: ts } });
     this.emit(data, { type: "run.updated", patch: { status: "idle" } });
+    const candidates = (preset?.candidates ?? []).map((candidate, index) => ({ ...cleanCandidate(candidate), id: `c${index + 1}` }));
+    const pool = candidates.length ? { candidates } : {};
     if (mode !== "solo") {
       const specs = preset?.members ?? request.team;
       if (specs?.length) {
         const issues = validateMembers(specs); if (issues.length) throw new Error(issues.join("；"));
         this.checkTeamSize(data, specs.length);
         const members = specs.map(spec => this.member(spec, preset ? "preset" : "human", "由创建 Run 时指定"));
-        const team: TeamRecord = { source: preset ? "preset" : "dynamic", ...(preset ? { presetId: preset.id, presetName: preset.name } : {}), members, proposals: [], changes: [], updatedAt: ts };
+        const team: TeamRecord = { source: preset ? "preset" : "dynamic", ...(preset ? { presetId: preset.id, presetName: preset.name } : {}), members, proposals: [], changes: [], ...pool, updatedAt: ts };
         this.teamUpdate(data, team, { kind: "formed", by: preset ? "preset" : "human", at: ts, reason: "创建 Run 时带入名单" });
       } else if (!preset) this.proposeTeam(id, [{ role: "engineer", ...defaultAgentSpec(demoAgents, "codex"), responsibilities: "实现功能与测试" }, ...((request.policy?.maxTeamSize ?? 5) > 1 ? [{ role: "reviewer", ...defaultAgentSpec(demoAgents, "pi"), responsibilities: "独立检查安全和边界" }] : [])], "实现与审查分开，由成员推进；名单确认后开工。");
-      else this.teamUpdate(data, { source: "preset", presetId: preset.id, presetName: preset.name, members: [], proposals: [], changes: [], updatedAt: ts }, { kind: "formed", by: "preset", at: ts, reason: "使用无成员预设，由 lead 处理任务" });
+      else this.teamUpdate(data, { source: "preset", presetId: preset.id, presetName: preset.name, members: [], proposals: [], changes: [], ...pool, updatedAt: ts }, { kind: "formed", by: "preset", at: ts, reason: candidates.length ? "预设只有候选成员，由主导者按任务招人" : "使用无成员预设，由 lead 处理任务" });
     }
     this.prompts.set(id, request.prompt);
     if (!request.title && this.titleSettings.titleModel?.enabled) this.titleJobs.set(id, { at: this.now() + 1500, force: false });
@@ -273,19 +277,24 @@ export class DemoClient implements BatonClient {
   teams = async (): Promise<TeamPreset[]> => structuredClone([...this.presets.values()]);
   async createTeam(request: TeamPresetInput): Promise<TeamPresetResult> {
     const warnings = this.checkPreset(request); const ts = new Date(this.now()).toISOString(); const id = `preset-${++this.serial}`;
-    const preset = { ...structuredClone(request), id, createdAt: ts, updatedAt: ts };
+    const preset = { ...this.cleanPreset(request), id, createdAt: ts, updatedAt: ts };
     this.presets.set(id, preset); return { ...structuredClone(preset), warnings };
   }
   async updateTeam(id: string, request: TeamPresetInput): Promise<TeamPresetResult> {
     const warnings = this.checkPreset(request); const old = this.presets.get(id); if (!old) throw new Error("预设不存在");
-    const preset = { ...structuredClone(request), id, createdAt: old.createdAt, updatedAt: new Date(this.now()).toISOString() };
+    const preset = { ...this.cleanPreset(request), id, createdAt: old.createdAt, updatedAt: new Date(this.now()).toISOString() };
     this.presets.set(id, preset); return { ...structuredClone(preset), warnings };
   }
   deleteTeam = async (id: string): Promise<void> => { this.presets.delete(id); };
+  /** Like the daemon: blank candidate fields are dropped and an empty candidate list is omitted. */
+  private cleanPreset(request: TeamPresetInput): TeamPresetInput {
+    const { candidates, ...rest } = structuredClone(request); const pool = (candidates ?? []).map(cleanCandidate);
+    return { ...rest, ...(pool.length ? { candidates: pool } : {}) };
+  }
   private checkPreset(request: TeamPresetInput): string[] {
     const issues = validatePreset(request); if (issues.length) throw new Error(issues.join("；"));
     const warnings: string[] = [];
-    for (const id of new Set([request.lead.agentId, ...request.members.map(member => member.agentId)])) {
+    for (const id of new Set([request.lead.agentId, ...request.members.map(member => member.agentId), ...(request.candidates ?? []).map(candidate => candidate.agentId)])) {
       const agent = demoAgents.find(entry => entry.id === id); if (!agent) throw new Error(`Unknown agent id: ${id}`);
       if (agent.status !== "ready" || !agent.enabled) warnings.push(`${agent.label} 当前不可用，启动使用此预设的 Run 前需恢复可用状态。`);
     }
@@ -318,7 +327,8 @@ export class DemoClient implements BatonClient {
   }
   async saveTeam(id: string, request: SaveTeamPresetRequest): Promise<TeamPresetResult> {
     const data = this.get(id); const root = data.snapshot.nodes.find(node => node.id === data.snapshot.run.rootNodeId)!;
-    return this.createTeam({ ...request, lead: { agentId: root.agentId, model: root.model, modeId: root.modeId, thinking: root.thinking }, members: activeMembers(this.teamFor(data)).map(cleanMember) });
+    const candidates = (data.snapshot.run.team?.candidates ?? []).map(({ id: _id, ...candidate }) => candidate);
+    return this.createTeam({ ...request, lead: { agentId: root.agentId, model: root.model, modeId: root.modeId, thinking: root.thinking }, members: activeMembers(this.teamFor(data)).map(cleanMember), ...(candidates.length ? { candidates } : {}) });
   }
   async reassign(id: string, request: ReassignRequest): Promise<void> {
     const old = await this.delegation(id); const data = this.get(old.runId); const team = this.teamFor(data);
@@ -368,6 +378,18 @@ export class DemoClient implements BatonClient {
     const proposal: TeamProposal = { id: `proposal-${++this.serial}`, kind: "replacement", status: "pending", by: "lead", nodeId: data.snapshot.run.rootNodeId, proposedAt: ts, rationale: reason, replace: { memberId, with: cleanMember(spec), reassignActive, reason } };
     this.teamUpdate(data, { ...team, proposals: [...team.proposals, proposal] }, { kind: "proposed", by: "lead", at: ts, proposalId: proposal.id, reason });
     this.notice(data, proposal.nodeId, `已提交换人提案：${spec.role} → ${spec.agentId}，等待确认。`);
+  }
+  /** Exposed only on the browser demo: the lead hires a preset candidate under a role it names — no roster approval. */
+  hireCandidate(id: string, candidateId: string, role: string, brief: DelegationRecord["brief"]): { member: TeamMember; delegationId: string } {
+    const data = this.get(id); const team = this.teamFor(data); const name = role.trim();
+    const candidate = team.candidates?.find(entry => entry.id === candidateId); if (!candidate) throw new Error(`候选不存在：${candidateId}`);
+    if (!name) throw new Error("请为招入的候选命名角色");
+    if (activeMembers(team).some(member => member.role === name)) throw new Error(`角色已存在：${name}`);
+    this.checkTeamSize(data, activeMembers(team).length + 1);
+    const member: TeamMember = { ...this.member({ role: name, agentId: candidate.agentId, model: candidate.model, modeId: candidate.modeId, thinking: candidate.thinking, responsibilities: candidate.description }, "lead", `从预设候选 ${candidate.id} 招入`), candidateId: candidate.id };
+    this.teamUpdate(data, { ...team, members: [...team.members, member] }, { kind: "member_added", by: "lead", at: member.addedAt, memberId: member.id, reason: member.reason });
+    const delegationId = `delegation-${++this.serial}`; this.queueTask(data, member, brief, undefined, data.snapshot.run.rootNodeId, delegationId);
+    return { member, delegationId };
   }
   private queueTask(data: DemoRun, member: TeamMemberSpec, brief: DelegationRecord["brief"], blockedByProposal?: string, parentId = data.snapshot.run.rootNodeId, id = `delegation-${++this.serial}`, replaces?: string): void {
     const ts = new Date(this.now()).toISOString(); const nodeId = `node-${++this.serial}`;
@@ -801,6 +823,18 @@ export class DemoClient implements BatonClient {
     this.emit(data, { type: "escalation", escalation: stall });
     this.emit(data, { type: "escalation", escalation: { id: "demo-round-limit", runId: data.snapshot.run.id, nodeId: edges[1]!.toNodeId, delegationId: edges[1]!.id, kind: "round_limit", detail: "tester 已达到 3 轮，需要你决定是否继续。", pendingMessage: "请补充归档数据的回归测试。", status: "pending", createdAt: new Date(this.now()).toISOString() } });
     this.emit(data, { type: "delegation.updated", delegationId: edges[1]!.id, patch: { round: 3 } });
+  }
+  /** A preset run whose lead matches the task to a candidate's model and description and hires it. */
+  private setupCandidateDemo(): void {
+    void this.createRun({ projectId: "project-atlas", teamPresetId: "preset-product", cwd: "/workspace/atlas", title: "候选成员 · 主导者按需招人", prompt: "给设置页的主题切换加上过渡动画，并补充回归测试。" });
+    const data = this.get(`run-local-${this.counter}`); const root = data.snapshot.run.rootNodeId;
+    this.append(data, root, { type: "assistant_message", text: "过渡动画是前端交互细节：候选 **c1**（codex · gpt-5.3-codex · high，擅长前端、CSS 动画）最匹配，招入为 `motion` 角色；回归测试交给固定角色 `engineer`。" });
+    const brief = { title: "主题切换过渡动画", task: "为设置页的主题切换加入颜色过渡动画，尊重 prefers-reduced-motion。", acceptance: ["切换无闪烁", "减少动态效果时无动画"] };
+    const { delegationId } = this.hireCandidate(data.snapshot.run.id, "c1", "motion", brief);
+    const edge = data.snapshot.delegations.find(entry => entry.id === delegationId)!;
+    this.append(data, root, { type: "tool_call", callId: "hire-c1", name: "mcp__baton__delegate", status: "completed", detail: { type: "baton", tool: "delegate", input: { candidate: "c1", role: "motion", ...brief }, output: { delegationId, nodeId: edge.toNodeId, status: "queued" } } });
+    const engineer = activeMembers(data.snapshot.run.team).find(member => member.role === "engineer")!;
+    this.queueTask(data, engineer, { title: "主题切换回归测试", task: "补充主题切换的回归测试，覆盖亮色、暗色和跟随系统。" });
   }
   private setupQuestionDemo(): void {
     const scenario = createScenario(this.now() - 120_000, "run-questions"); const seed = scenario.events.reduce(applyEvent, scenario.initial);
