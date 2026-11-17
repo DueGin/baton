@@ -27,6 +27,10 @@ describe("images in Markdown", () => {
     expect(html).toContain(">相对</span>"); // no cwd → no guess
     const noClient = renderToStaticMarkup(<Markdown text="![截图](attachment:att_1)" />); expect(noClient).toContain(">截图</span>"); expect(noClient).not.toContain("<img");
   });
+  it("renders an image inside a link as a plain image, so the link stays the only control", () => {
+    const html = render("[![CI](https://example.com/badge.png)](https://ci.example.com)");
+    expect(html).toContain('href="https://ci.example.com"'); expect(html).toContain('src="https://example.com/badge.png"'); expect(html).not.toContain("<button");
+  });
   it("never turns raw HTML into an image", () => {
     const html = render('<img src="https://example.com/x.png" onerror="alert(1)">\n\n<p><img src=x></p> `![code](https://example.com/c.png)`');
     expect(html).not.toContain("<img"); expect(html).toContain("&lt;img"); expect(html).not.toContain("onerror=\"");

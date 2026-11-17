@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { AttachmentRef } from "@baton/protocol";
 import { imageSource, useImageContext, useImageUrl, type ImageSource } from "../lib/images.js";
@@ -23,7 +23,8 @@ export function ImageLightbox({ url, alt, close }: { url: string; alt: string; c
 }
 
 /** A clickable thumbnail; while an authenticated fetch is in flight it reserves the space. */
-export function ImageThumb({ source, alt, fallback, width, height, className = "" }: { source: ImageSource; alt: string; fallback: ReactNode; width?: number; height?: number; className?: string }) {
+/** `linked` images sit inside a Markdown link: no button or lightbox of their own, the link is the action. */
+export function ImageThumb({ source, alt, fallback, width, height, className = "", linked = false }: { source: ImageSource; alt: string; fallback: ReactNode; width?: number; height?: number; className?: string; linked?: boolean }) {
   const { client } = useImageContext();
   const state = useImageUrl(source, client);
   const [broken, setBroken] = useState<string | null>(null);
@@ -31,6 +32,7 @@ export function ImageThumb({ source, alt, fallback, width, height, className = "
   const ratio = width && height ? { aspectRatio: `${width} / ${height}` } : undefined;
   if (state.status === "failed" || (state.status === "ready" && broken === state.url)) return <>{fallback}</>;
   if (state.status === "loading") return <span className={`image-thumb is-loading ${className}`} style={ratio} role="img" aria-label={`${alt || "图片"}（加载中）`} />;
+  if (linked) return <span className={`image-thumb is-linked ${className}`}><img src={state.url} alt={alt} loading="lazy" decoding="async" referrerPolicy="no-referrer" width={width} height={height} onError={() => setBroken(state.url)} /></span>;
   return <>
     <button type="button" className={`image-thumb ${className}`} title={alt || "查看图片"} aria-label={`查看图片${alt ? `：${alt}` : ""}`} onClick={() => setOpen(true)}>
       <img src={state.url} alt={alt} loading="lazy" decoding="async" referrerPolicy="no-referrer" width={width} height={height} onError={() => setBroken(state.url)} />
@@ -45,12 +47,16 @@ function imageFallback(src: string | undefined, alt: string): ReactNode {
   return link ? <a href={link} target="_blank" rel="noopener noreferrer">{alt || "图片"}</a> : <span className="image-fallback" title={alt || undefined}>{alt || "图片"}</span>;
 }
 
+/** Set inside Markdown links: an image there must not add a button of its own. */
+export const InsideLink = createContext(false);
+
 /** `img` for parsed Markdown image nodes only; raw HTML never reaches this. */
 export function MarkdownImage({ src, alt = "", cwd }: { src?: string; alt?: string; cwd?: string }) {
   const context = useImageContext();
+  const linked = useContext(InsideLink);
   const source = imageSource(src, cwd ?? context.cwd);
-  const fallback = imageFallback(src, alt);
-  return source ? <ImageThumb source={source} alt={alt} fallback={fallback} className="markdown-image" /> : <>{fallback}</>;
+  const fallback = linked ? <span className="image-fallback">{alt || "图片"}</span> : imageFallback(src, alt);
+  return source ? <ImageThumb source={source} alt={alt} fallback={fallback} className="markdown-image" linked={linked} /> : <>{fallback}</>;
 }
 
 /** Screenshots and image reads a tool returned, shown under its row even while the row is collapsed. */

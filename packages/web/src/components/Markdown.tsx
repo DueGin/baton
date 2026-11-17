@@ -8,7 +8,7 @@ import rehypeHighlight from "rehype-highlight";
 import { codeFences, fixBareUrls, remarkBrTags, safeLink } from "../lib/markdown.js";
 import { useColorTheme } from "../lib/theme.js";
 import { MermaidBlock } from "./MermaidBlock.js";
-import { MarkdownImage } from "./Images.js";
+import { InsideLink, MarkdownImage } from "./Images.js";
 
 import { CopyButton } from "./CopyButton.js";
 
@@ -29,7 +29,8 @@ export const Markdown = memo(function Markdown({ text: source, streaming = false
   useEffect(() => { const timer = setTimeout(() => setStableText(text), 500); return () => clearTimeout(timer); }, [text]);
   const fences = useMemo(() => codeFences(text), [text]);
   const components = useMemo<Components>(() => ({
-    a: ({ href, children }) => safeLink(href ?? "") ? <a href={href} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span>,
+    // An image inside a link renders as a plain image so no button nests inside the anchor.
+    a: ({ href, children }) => safeLink(href ?? "") ? <a href={href} target="_blank" rel="noopener noreferrer"><InsideLink value>{children}</InsideLink></a> : <span>{children}</span>,
     img: ({ src, alt }) => <MarkdownImage src={typeof src === "string" ? src : undefined} alt={alt} cwd={cwd} />,
     table: ({ children }) => <div className="markdown-table-scroll"><table>{children}</table></div>,
     pre: ({ node, children }) => {
