@@ -31,7 +31,7 @@ export function validateCandidates(candidates: TeamCandidateSpec[]): string[] {
   candidates.forEach((candidate, index) => {
     if (!candidate.agentId.trim()) { errors.push(`候选 ${index + 1}：请选择 agent`); return; }
     const key = candidateKey(candidate);
-    if (seen.has(key)) errors.push(`候选重复：${candidate.agentId} · ${candidate.model?.trim() || "默认模型"}（agent、模型和思考级别都相同）`);
+    if (seen.has(key)) errors.push(`候选 ${index + 1} 重复：${candidateConfig(cleanCandidate(candidate))}（agent、模型和思考级别都与前面的候选相同）`);
     seen.add(key);
   });
   return errors;

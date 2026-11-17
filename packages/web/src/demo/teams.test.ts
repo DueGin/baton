@@ -163,7 +163,7 @@ describe("browser demo teams and approval gate", () => {
     const saved = await client.createTeam({ name: "Only candidates", lead: { agentId: "claude" }, members: [], candidates: [{ agentId: "codex", model: "gpt-5.3-codex", description: "  " }, { agentId: "gemini" }] });
     expect(saved.candidates).toEqual([{ agentId: "codex", model: "gpt-5.3-codex" }, { agentId: "gemini" }]); expect(saved.warnings![0]).toContain("Gemini");
     await expect(client.createTeam({ name: "Bad", lead: { agentId: "claude" }, members: [], candidates: [{ agentId: "unknown" }] })).rejects.toThrow("Unknown agent id");
-    await expect(client.createTeam({ name: "Dup", lead: { agentId: "claude" }, members: [], candidates: [{ agentId: "codex" }, { agentId: "codex", description: "same" }] })).rejects.toThrow("候选重复");
+    await expect(client.createTeam({ name: "Dup", lead: { agentId: "claude" }, members: [], candidates: [{ agentId: "codex" }, { agentId: "codex", description: "same" }] })).rejects.toThrow("候选 2 重复：codex · 默认模型");
     expect((await client.updateTeam(saved.id, { name: "Roles", lead: { agentId: "claude" }, members: [], candidates: [] })).candidates).toBeUndefined();
   });
 });

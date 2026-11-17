@@ -108,9 +108,9 @@ export class Teams {
     const result: Record<string, unknown> = { ...team, members: team.members.map((m) => ({ ...m, delegations: s.delegations.filter((d) => d.memberId === m.id) })) };
     if (team.candidates?.length) {
       const catalog = await this.registry.detect();
-      result.candidates = team.candidates.map((c) => {
-        const agent = catalog.find((a) => a.id === c.agentId), hires = team.members.filter((m) => m.candidateId === c.id);
-        return { ...c, available: agent?.status === "ready" && agent.enabled && !!this.registry.get(c.agentId), timesHired: hires.length, hiredAs: hires.map((m) => ({ role: m.role, memberId: m.id, status: m.status })) };
+      result.candidates = team.candidates.map(({ id, ...c }) => {
+        const agent = catalog.find((a) => a.id === c.agentId), hires = team.members.filter((m) => m.candidateId === id);
+        return { id, ...c, available: agent?.status === "ready" && agent.enabled && !!this.registry.get(c.agentId), timesHired: hires.length, hiredAs: hires.map((m) => ({ role: m.role, memberId: m.id, status: m.status })) };
       });
       result.hiring = 'Hire a candidate with delegate({ candidate: "<id>", role: "<new role name>", title, task, … }). No roster approval is needed; a candidate can be hired into several roles.';
     }

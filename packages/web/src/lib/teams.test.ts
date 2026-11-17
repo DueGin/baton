@@ -36,7 +36,7 @@ describe("teams projections and form validation", () => {
   });
   it("validates candidates without roles: candidates-only presets pass, missing agents and duplicate configurations fail", () => {
     expect(validatePreset({ name: "Pool", lead: { agentId: "claude" }, members: [], candidates: [{ agentId: "codex", model: "gpt-x", thinking: "high" }, { agentId: "codex", model: "gpt-x" }] })).toEqual([]);
-    expect(validateCandidates([{ agentId: "" }, { agentId: "codex", model: "m" }, { agentId: "codex", model: " m ", description: "other words" }])).toEqual(["候选 1：请选择 agent", "候选重复：codex · m（agent、模型和思考级别都相同）"]);
+    expect(validateCandidates([{ agentId: "" }, { agentId: "codex", model: "m" }, { agentId: "codex", model: " m ", description: "other words" }])).toEqual(["候选 1：请选择 agent", "候选 3 重复：codex · m（agent、模型和思考级别都与前面的候选相同）"]);
     expect(validatePreset({ name: "Pool", lead: { agentId: "claude" }, members: [], candidates: [{ agentId: "" }] })).toEqual(["候选 1：请选择 agent"]);
     expect(cleanCandidate({ agentId: " codex ", model: " ", thinking: "", description: " 前端 " })).toEqual({ agentId: "codex", description: "前端" });
     const team = { source: "preset" as const, members: [{ role: "ui", agentId: "codex", id: "m1", status: "active" as const, addedBy: "lead" as const, addedAt: "2026-11-10T07:00:00Z", candidateId: "c1" }], changes: [], proposals: [], candidates: [{ id: "c1", agentId: "codex" }, { id: "c2", agentId: "pi" }], updatedAt: "2026-11-10T07:00:00Z" };
