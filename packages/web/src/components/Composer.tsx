@@ -32,9 +32,15 @@ function draftImages(doc: JSONContent | undefined): DraftImage[] {
 function imageFiles(list: FileList | null | undefined): File[] {
   return [...(list ?? [])].filter(file => file.type.startsWith("image/"));
 }
-/** A slice that merges into the paragraph around the caret when its edges are paragraphs. */
+/**
+ * A slice that merges into the paragraph around the caret when its edges are paragraphs. Content ending
+ * in another block (a code block, list, quote) gets an empty paragraph after it, so the caret lands
+ * after the pasted block (as in Typora) instead of inside it.
+ */
 function sliceFor(schema: Schema, json: JSONContent): Slice {
-  const doc = schema.nodeFromJSON(json);
+  const blocks = json.content ?? [];
+  const last = blocks.at(-1);
+  const doc = schema.nodeFromJSON(last && last.type !== "paragraph" ? { ...json, content: [...blocks, { type: "paragraph" }] } : json);
   const open = (node: PMNode | null) => node?.type.name === "paragraph" ? 1 : 0;
   return new Slice(doc.content, open(doc.firstChild), open(doc.lastChild));
 }

@@ -5,6 +5,7 @@ import { TextSelection } from "@tiptap/pm/state";
 import { NodeViewWrapper, ReactNodeViewRenderer, type NodeViewProps } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
+import { Code } from "@tiptap/extension-code";
 import { Placeholder } from "@tiptap/extensions";
 import { IMAGE_NODE, RAW_NODE } from "../lib/composer-markdown.js";
 import { composerUploads } from "../lib/composer-uploads.js";
@@ -129,7 +130,9 @@ function submitKeys(submit: () => void): AnyExtension {
 
 export function composerExtensions(options: { placeholder: () => string; submit: () => void }): AnyExtension[] {
   return [
-    StarterKit.configure({ underline: false, link: { openOnClick: false, autolink: true, linkOnPaste: true, defaultProtocol: "https", HTMLAttributes: { target: null, rel: "noopener noreferrer" } } }),
+    // Typing right after `code` leaves the code span (TipTap's mark is inclusive by default).
+    Code.extend({ inclusive: false }),
+    StarterKit.configure({ underline: false, code: false, link: { openOnClick: false, autolink: true, linkOnPaste: true, defaultProtocol: "https", HTMLAttributes: { target: null, rel: "noopener noreferrer" } } }),
     TaskList,
     TaskItem.configure({ nested: true }),
     ComposerImage,
