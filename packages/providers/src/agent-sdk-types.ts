@@ -323,12 +323,21 @@ export interface AgentSession {
     respondToPermission(id: string, response: AgentPermissionResponse): Promise<void>;
     pendingPermissions(): AgentPermissionRequest[];
     subscribe(listener: (event: AgentStreamEvent) => void): () => void;
+    /**
+     * baton (DESIGN §4.13): a JSON marker for "just before the prompt of the turn startTurn just
+     * started", or null when unknown. Sessions without native conversation rewind omit both methods.
+     */
+    rewindPoint?(): AgentRewindPoint | null;
+    /** Rewind the provider conversation to a rewindPoint() marker; getPersistence() then names the session to resume (null = start fresh). */
+    rewindConversation?(point: AgentRewindPoint): Promise<void>;
     runtimeInfo(): Promise<{
         model?: string | null;
         modeId?: string | null;
     }>;
     close(): Promise<void>;
 }
+/** baton: opaque, JSON-serializable rewind marker (stored by the host between restarts). */
+export type AgentRewindPoint = Record<string, string | number | boolean | null>;
 export interface AgentClient {
     readonly provider: AgentProvider;
     readonly capabilities: AgentCapabilities;

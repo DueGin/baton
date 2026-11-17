@@ -5,12 +5,14 @@ import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { terminateWithTreeKill } from "../tree-kill.js";
-import type { AgentClient, AgentImageRef, AgentPersistenceHandle, AgentPromptInput, AgentSessionConfig, AgentUsage, ClientOptions, ProviderCatalog } from "../agent-sdk-types.js";
+import type { AgentClient, AgentImageRef, AgentPersistenceHandle, AgentPromptInput, AgentRewindPoint, AgentSessionConfig, AgentUsage, ClientOptions, ProviderCatalog } from "../agent-sdk-types.js";
 import { findImageBlocks, imageNote, promptText, readPromptImage, saveProviderImages } from "../images.js";
 import { ProviderSession, record, text, errorText } from "../session.js";
 import { externalEnv, spawnProcess } from "../process.js";
 import { mapClaudeCompletedToolCall, mapClaudeFailedToolCall, mapClaudeRunningToolCall } from "./claude/tool-call-mapper.js";
+import { claudeConfigDir, claudeTranscriptPath, lastAssistantEntry, parseClaudeRewindPoint, realClaudeRewindSdk, revertClaudeConversation, type ClaudeRewindSdk } from "./claude/rewind.js";
 export type ClaudeQueryFactory = typeof query;
+type ClaudeClientOptions = ClientOptions & { queryFactory?: ClaudeQueryFactory; rewindSdk?: ClaudeRewindSdk };
 type ClaudeBlock = { type: "text"; text: string } | { type: "image"; source: { type: "base64"; media_type: "image/png" | "image/jpeg" | "image/gif" | "image/webp"; data: string } };
 type ClaudeContent = string | ClaudeBlock[];
 /** The Messages API caps an image at 5 MB; base64 inflates by 4/3, so stay at 3.75 MB of file.
@@ -66,9 +68,7 @@ class PromptQueue implements AsyncIterable<SDKUserMessage> {
 export class ClaudeAgentClient implements AgentClient {
     readonly provider = "claude" as const;
     readonly capabilities = { steer: true, resume: true, reasoning: true, mcp: true, images: true };
-    constructor(private options: ClientOptions & {
-        queryFactory?: ClaudeQueryFactory;
-    }) { }
+    constructor(private options: ClaudeClientOptions) { }
     async createSession(config: AgentSessionConfig): Promise<ClaudeSession> { return new ClaudeSession(this.options, config); }
     async resumeSession(handle: AgentPersistenceHandle, config: AgentSessionConfig): Promise<ClaudeSession> { return new ClaudeSession(this.options, config, handle); }
     async fetchCatalog(): Promise<ProviderCatalog> {
@@ -104,9 +104,10 @@ class ClaudeSession extends ProviderSession {
         name: string;
         input: unknown;
     }>();
-    constructor(private options: ClientOptions & {
-        queryFactory?: ClaudeQueryFactory;
-    }, config: AgentSessionConfig, handle?: AgentPersistenceHandle) {
+    /** Rewind bookkeeping (baton): the last main-chain assistant entry seen, and the point of the current turn. */
+    private lastAssistant: string | null = null;
+    private turnPoint: AgentRewindPoint | null = null;
+    constructor(private options: ClaudeClientOptions, config: AgentSessionConfig, handle?: AgentPersistenceHandle) {
         super("claude", config);
         if (handle)
             this.sessionId = handle.sessionId;
@@ -147,7 +148,27 @@ class ClaudeSession extends ProviderSession {
             clearTimeout(timer);
         }
     }
-    protected async launchTurn(prompt: AgentPromptInput): Promise<void> { const content = typeof prompt === "string" ? prompt : await claudePromptContent(prompt); this.canceling = false; this.sawText = false; this.streamedBlocks.clear(); this.unstartedMessages.add(this.queue.push(content)); }
+    private transcriptPath(sessionId: string): Promise<string> {
+        return claudeTranscriptPath({ cwd: this.config.cwd, sessionId, configDir: claudeConfigDir({ ...process.env, ...this.options.env, ...this.config.env }) });
+    }
+    /** "Just before this prompt": fork at the last assistant entry so far (a resumed session reads it from its transcript). */
+    private async pointBeforePrompt(): Promise<AgentRewindPoint | null> {
+        if (!this.sessionId) return { sessionId: null, forkAt: null };
+        if (!this.lastAssistant) {
+            try { this.lastAssistant = await lastAssistantEntry(await this.transcriptPath(this.sessionId)); }
+            catch { return null; }
+        }
+        return { sessionId: this.sessionId, forkAt: this.lastAssistant };
+    }
+    rewindPoint(): AgentRewindPoint | null { return this.turnPoint; }
+    async rewindConversation(point: AgentRewindPoint): Promise<void> {
+        if (this.activeTurn) throw new Error("Cannot rewind the Claude conversation while a turn is active");
+        const target = parseClaudeRewindPoint(point);
+        const sessionId = await revertClaudeConversation({ sdk: this.options.rewindSdk ?? realClaudeRewindSdk, point: target, transcriptPath: id => this.transcriptPath(id) });
+        // The host closes this session and resumes the fork (or opens a fresh one) for the next message.
+        this.sessionId = sessionId; this.lastAssistant = target.forkAt;
+    }
+    protected async launchTurn(prompt: AgentPromptInput): Promise<void> { this.turnPoint = await this.pointBeforePrompt(); const content = typeof prompt === "string" ? prompt : await claudePromptContent(prompt); this.canceling = false; this.sawText = false; this.streamedBlocks.clear(); this.unstartedMessages.add(this.queue.push(content)); }
     async steerActiveTurn(prompt: AgentPromptInput): Promise<boolean> { if (!this.activeTurn)
         return false; if (this.canceling) return false; const content = typeof prompt === "string" ? prompt : await claudePromptContent(prompt); if (!this.activeTurn || this.canceling || this.closed) return false; this.unstartedMessages.add(this.queue.push(content, "next")); this.timeline({ type: "user_message", text: promptText(prompt) }); return true; }
     private async pump(): Promise<void> {
@@ -201,6 +222,7 @@ class ClaudeSession extends ProviderSession {
             return;
         }
         if (message.type === "assistant") {
+            if (typeof message.uuid === "string" && message.isSidechain !== true) this.lastAssistant = message.uuid;
             const content = record(message.message).content;
             if (Array.isArray(content))
                 for (const block of content.map(record)) {

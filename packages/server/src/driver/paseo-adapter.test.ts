@@ -41,6 +41,9 @@ describe("Paseo driver registry", () => {
         expect(events.find(event => event.type === "item" && event.item.type === "tool_call" && event.item.status === "completed")).toMatchObject({ turnId, item: { detail: { type: "shell", command: "echo hello" } } });
         expect(events.find(event => event.type === "turn_completed")).toMatchObject({ usage: { inputTokens: 10 } });
         expect(await session.runtimeInfo()).toEqual({ model: "fake-model", modeId: "default" });
+        // Codex rewinds natively: the driver exposes the provider's rewind point and fork.
+        expect(session.rewindPoint?.()).toEqual({ threadId: "fake-session", turnId: null, index: -1 });
+        expect(typeof session.rewindConversation).toBe("function");
         const persistence = session.persistence()!;
         await session.close();
         expect(session.processIds?.()).toEqual([]);
@@ -54,6 +57,8 @@ describe("Paseo driver registry", () => {
         const acp = await registry.get("fake-acp")!.open({ cwd: home, mcpServers: {} });
         expect(acp.supportsLongToolCalls?.()).toBe(false);
         expect(await acp.steer("idle")).toBe("unsupported");
+        // ACP agents have no native rewind: rollback replays the transcript into a fresh session.
+        expect(acp.rewindConversation).toBeUndefined();
         const codex = await registry.get("fake-codex")!.open({ cwd: home, mcpServers: {} });
         const events = collect(codex);
         await codex.startTurn("hold");
