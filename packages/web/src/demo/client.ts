@@ -510,8 +510,9 @@ export class DemoClient implements BatonClient {
     const rows = demoRows(data.log, nodeId), target = rows.find(row => row.seq === checkpoint.itemSeq), conversation = request.mode !== "files";
     if (conversation && target?.rolledBack) throw new HttpError(409, "这条消息已经回退过了");
     await new Promise(resolve => setTimeout(resolve, 200));
-    if (data.snapshot.turns.some(turn => turn.nodeId === nodeId && turn.status === "running")) {
-      this.interruptTurn(data, nodeId);
+    const node = data.snapshot.nodes.find(entry => entry.id === nodeId);
+    if (node && ["running", "starting", "waiting_permission"].includes(node.status)) {
+      this.interruptTurn(data, nodeId, "interrupted by rollback");
       this.emit(data, { type: "node.updated", nodeId, patch: { status: "idle", activity: "Interrupted by rollback", updatedAt: new Date(this.now()).toISOString() } });
     }
     if (conversation) for (const row of rows.filter(row => row.seq >= checkpoint.itemSeq && !row.rolledBack)) {
@@ -547,7 +548,7 @@ export class DemoClient implements BatonClient {
     });
     return { order: [...order] };
   }
-  private interruptTurn(data: DemoRun, nodeId: string): void {
+  private interruptTurn(data: DemoRun, nodeId: string, reason = "interrupted by human message"): void {
     const ts = new Date(this.now()).toISOString();
     const turnIds = new Set(data.snapshot.turns.filter(turn => turn.nodeId === nodeId && turn.status === "running").map(turn => turn.id));
     data.remaining = data.remaining.filter(event => {
@@ -558,7 +559,7 @@ export class DemoClient implements BatonClient {
       if (event.type === "delegation.updated" && data.snapshot.delegations.some(edge => edge.id === event.delegationId && edge.toNodeId === nodeId)) return false;
       return true;
     });
-    for (const id of turnIds) this.emit(data, { type: "turn.updated", turnId: id, patch: { status: "canceled", error: "interrupted by human message", endedAt: ts } });
+    for (const id of turnIds) this.emit(data, { type: "turn.updated", turnId: id, patch: { status: "canceled", error: reason, endedAt: ts } });
     for (const span of data.snapshot.toolSpans) if (span.nodeId === nodeId && span.status === "running") this.emit(data, { type: "tool.span", span: { ...span, status: "canceled", endedAt: ts } });
     for (const question of data.snapshot.questions.filter(question => question.nodeId === nodeId && question.status === "pending" && question.delivery === "inline")) this.emit(data, { type: "question", question: question.source === "native" ? { ...question, status: "canceled", cancelReason: data.snapshot.run.status === "paused" ? "会话已暂停" : "回合已中断", answeredAt: ts } : { ...question, delivery: "async" } });
   }

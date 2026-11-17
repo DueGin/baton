@@ -54,14 +54,14 @@ function RollbackPanel({ row, client, nodeId, rows, rollback, done, close }: Rol
     client.checkpointChanges(snapshotId).then(response => { if (live) setChanges({ status: "ready", files: response.files }); }, (reason: unknown) => { if (live) setChanges({ status: "error", message: errorText(reason) }); });
     return () => { live = false; };
   }, [client, snapshotId]);
-  // Open upwards when the transcript has no room below (the last messages).
+  // Open upwards when the transcript has no room below for the menu and its file list (the last messages).
   useLayoutEffect(() => {
-    const element = panel.current, scroll = element?.closest(".transcript-scroll");
-    if (!element || !scroll) return;
-    const box = element.getBoundingClientRect(), bounds = scroll.getBoundingClientRect();
-    if (box.bottom > bounds.bottom && box.top - bounds.top > bounds.bottom - box.top) element.classList.add("opens-up");
+    const element = panel.current, anchor = element?.parentElement, scroll = element?.closest(".transcript-scroll");
+    if (!element || !anchor || !scroll) return;
+    const box = anchor.getBoundingClientRect(), bounds = scroll.getBoundingClientRect(), below = bounds.bottom - box.bottom, above = box.top - bounds.top;
+    if (below < 340 && above > below) element.classList.add("opens-up");
     element.focus({ preventScroll: true });
-  }, [checkpoints, changes, confirm]);
+  }, []);
   const run = async () => {
     if (!checkpoint || !confirm) return;
     setBusy(true); setError(undefined);

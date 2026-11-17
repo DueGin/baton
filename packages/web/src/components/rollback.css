@@ -22,7 +22,7 @@
 .rollback-files { margin: 0 5px 6px; border-top: 1px solid var(--border); padding: 6px 4px 0; }
 .rollback-files > summary { cursor: pointer; color: var(--text-secondary); font-size: 11px; padding: 3px 4px; border-radius: 4px; }
 .rollback-files > summary:hover { color: var(--text); }
-.rollback-files > ul { list-style: none; margin: 4px 0 2px; padding: 0 4px; max-height: 180px; overflow: auto; }
+.rollback-files > ul { list-style: none; margin: 4px 0 2px; padding: 0 4px; max-height: 132px; overflow: auto; }
 .rollback-files li { display: flex; align-items: baseline; gap: 7px; padding: 2px 0; min-width: 0; }
 .rollback-files code { font-size: 10.5px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
 .rollback-file-status { flex: none; font-size: 10px; width: 26px; color: var(--text-dim); }
