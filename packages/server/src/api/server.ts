@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile, chmod, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { PullRequestFeedbackRequest, CreateProjectRequest, PatchProjectRequest, CreatePermissionRuleRequest, ResolveEscalationRequest, ApproveTeamProposalRequest, AddMemberRequest, ReplaceMemberRequest, ReassignRequest, SaveTeamPresetRequest, TeamPresetInput, CreateRunRequest, PatchRunRequest, PermissionDecision, RunEventEnvelope, SendMessageResponse, UpdateSettingsRequest, TestTitleModelRequest } from "@baton/protocol";
+import { ATTACHMENT_MAX_BYTES, ATTACHMENT_MIME_TYPES, type PullRequestFeedbackRequest, CreateProjectRequest, PatchProjectRequest, CreatePermissionRuleRequest, ResolveEscalationRequest, ApproveTeamProposalRequest, AddMemberRequest, ReplaceMemberRequest, ReassignRequest, SaveTeamPresetRequest, TeamPresetInput, CreateRunRequest, PatchRunRequest, PermissionDecision, RunEventEnvelope, SendMessageResponse, UpdateSettingsRequest, TestTitleModelRequest } from "@baton/protocol";
 import type { DriverRegistry } from "../driver/types.js";
 import { FakeDriverRegistry } from "../driver/fake.js";
 import { Store } from "../store/index.js";
@@ -17,6 +17,7 @@ import { Titles, type TitleGenerator } from "../titles/index.js";
 import { BackgroundRegistry, type BackgroundOptions } from "../background/index.js";
 import { Projects, ProjectError } from "../projects/index.js";
 import { PullRequests, type PullRequestOptions } from "../pull-requests/index.js";
+import { AttachmentError, Attachments, isAttachmentMimeType, readLocalImage } from "../attachments/index.js";
 export interface StartServerOptions {
   home?: string; port?: number; registry?: DriverRegistry; fake?: boolean; webDist?: string;
   maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; askTimeoutMinutes?: number; notifier?: Notifier; notificationCoalesceMs?: number;
@@ -32,7 +33,7 @@ export interface StartServerOptions {
   portBase?: number;
 }
 export interface BatonServer {
-  home: string; port: number; token: string; url: string; server: Server; store: Store; kernel: Kernel; background: BackgroundRegistry; pullRequests: PullRequests;
+  home: string; port: number; token: string; url: string; server: Server; store: Store; kernel: Kernel; background: BackgroundRegistry; pullRequests: PullRequests; attachments: Attachments;
   close(): Promise<void>;
 }
 class HttpError extends Error { constructor(readonly status: number, message: string) { super(message); } }
@@ -47,6 +48,24 @@ async function body(request: IncomingMessage): Promise<unknown> {
     if (length > 1024 * 1024) throw new HttpError(413, "Request body too large"); parts.push(part);
   }
   try { return JSON.parse(Buffer.concat(parts).toString("utf8")) as unknown; } catch { throw new HttpError(400, "Invalid JSON body"); }
+}
+/** Raw request bytes up to `limit`. An oversized body is drained (within reason) before the 413 so
+ * the client can read the response. */
+async function rawBody(request: IncomingMessage, limit: number): Promise<Buffer> {
+  const declared = Number(request.headers["content-length"]);
+  const tooLarge = (): HttpError => new HttpError(413, `Request body exceeds ${limit} bytes`);
+  if (Number.isFinite(declared) && declared > limit) { request.resume(); throw tooLarge(); }
+  const parts: Buffer[] = []; let length = 0;
+  for await (const chunk of request) {
+    const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array); length += part.length;
+    if (length <= limit) parts.push(part);
+    else if (length > limit * 2) { request.destroy(); throw tooLarge(); }
+  }
+  if (length > limit) throw tooLarge();
+  return Buffer.concat(parts);
+}
+function image(response: ServerResponse, bytes: Buffer, mimeType: string, cacheControl: string, name?: string): void {
+  response.writeHead(200, { "content-type": mimeType, "content-length": bytes.length, "cache-control": cacheControl, "x-content-type-options": "nosniff", ...(name ? { "content-disposition": `inline; filename*=UTF-8''${encodeURIComponent(name)}` } : {}) }).end(bytes);
 }
 function record(value: unknown): Record<string, unknown> { if (!value || typeof value !== "object" || Array.isArray(value)) throw new HttpError(400, "Expected a JSON object"); return value as Record<string, unknown>; }
 function sequence(value: string | null | undefined): number {
@@ -65,9 +84,11 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
   }
   if (!/^[a-f0-9]{64}$/i.test(token)) throw new Error("Invalid daemon token file");
   await chmod(join(home, "token"), 0o600);
-  let registry = options.registry;
-  if (!registry) registry = options.fake ? new FakeDriverRegistry() : (await import("../driver/paseo-adapter.js")).createPaseoDriverRegistry({ home });
   const store = new Store(join(home, "baton.db"));
+  const attachments = new Attachments(store, join(home, "attachments"));
+  let registry: DriverRegistry;
+  try { registry = options.registry ?? (options.fake ? new FakeDriverRegistry() : (await import("../driver/paseo-adapter.js")).createPaseoDriverRegistry({ home, saveImage: (data, mimeType, name) => attachments.saveImage(data, mimeType, name) })); }
+  catch (error) { store.close(); throw error; }
   try {
     const projects = new Projects(store); await projects.migrate();
     if (options.fake) { const path = join(home, "demo-project"); await mkdir(path, { recursive: true }); await projects.create({ path, name: "Demo project" }); }
@@ -88,7 +109,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
     void route(request, response).catch((error: unknown) => {
       if (response.headersSent) { response.end(); return; }
       const message = error instanceof Error ? error.message : String(error);
-      const status = error instanceof HttpError || error instanceof ProjectError || error instanceof MessageError ? error.status : /not found/i.test(message) ? 404 : 400;
+      const status = error instanceof HttpError || error instanceof ProjectError || error instanceof MessageError || error instanceof AttachmentError ? error.status : /not found/i.test(message) ? 404 : 400;
       json(response, status, { error: { code: `HTTP_${status}`, message } });
     });
   });
@@ -120,6 +141,28 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
     if (path.startsWith("/api/")) {
       const provided = request.headers.authorization?.startsWith("Bearer ") ? request.headers.authorization.slice(7) : (method === "GET" && path.endsWith("/events") ? url.searchParams.get("token") : null);
       if (!provided || Buffer.byteLength(provided) !== Buffer.byteLength(token) || !timingSafeEqual(Buffer.from(provided), Buffer.from(token))) throw new HttpError(401, "Bearer token required");
+      if (method === "POST" && path === "/api/attachments") {
+        const type = request.headers["content-type"]?.split(";")[0]?.trim().toLowerCase() ?? "";
+        if (!isAttachmentMimeType(type)) { request.resume(); throw new HttpError(415, `Unsupported attachment type: ${type || "none"}; expected ${ATTACHMENT_MIME_TYPES.join(", ")}`); }
+        const header = request.headers["x-attachment-name"];
+        let name: string | undefined;
+        if (typeof header === "string" && header) { try { name = decodeURIComponent(header); } catch { request.resume(); throw new HttpError(400, "Malformed X-Attachment-Name header"); } }
+        json(response, 201, await attachments.save(await rawBody(request, ATTACHMENT_MAX_BYTES), type, name)); return;
+      }
+      const attachmentRoute = /^\/api\/attachments\/([^/]+)$/.exec(path);
+      if (method === "GET" && attachmentRoute) {
+        const found = await attachments.read(segment(attachmentRoute[1]!));
+        if (!found) throw new HttpError(404, "Attachment not found");
+        // Ids are content-immutable, so clients may cache them indefinitely.
+        image(response, found.bytes, found.record.mimeType, "private, max-age=31536000, immutable", found.record.name); return;
+      }
+      if (method === "GET" && path === "/api/files/image") {
+        const target = url.searchParams.get("path");
+        if (!target) throw new HttpError(400, "path query parameter is required");
+        const local = await readLocalImage(target);
+        if (!local) throw new HttpError(404, "Image not found");
+        image(response, local.bytes, local.mimeType, "private, no-cache"); return;
+      }
       if (path === "/api/projects") {
         if (method === "GET") { json(response, 200, await kernel.projects.list(url.searchParams.get("archived") === "1")); return; }
         if (method === "POST") { json(response, 201, await kernel.projects.create(record(await body(request)) as unknown as CreateProjectRequest)); return; }
@@ -308,12 +351,12 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
   } catch (error) { notifications.close(); store.close(); await registry.shutdown(); throw error; }
   const address = server.address(); if (!address || typeof address === "string") throw new Error("Invalid server address"); port = address.port;
   const url = `http://127.0.0.1:${port}`;
-  kernel = new Kernel(store, registry, { ...options, baseUrl: url, titles }); kernel.recover();
+  kernel = new Kernel(store, registry, { ...options, baseUrl: url, titles, attachments }); kernel.recover();
   background = new BackgroundRegistry(store, () => kernel.processSources(), { platform, ...options.background });
   pullRequests = new PullRequests(store, settings, { queue: (id, text) => kernel.queueFeedback(id, text), notify }, options.pullRequests);
   await writeFile(join(home, "daemon.json"), JSON.stringify({ url, port, pid: process.pid, startedAt: new Date().toISOString(), version: "0.1.0", spawnedBy: process.env.BATON_SPAWNED_BY === "desktop" ? "desktop" : "cli" }), { mode: 0o600 });
   let closing: Promise<void> | undefined;
-  return { home, token, port, url, server, store, kernel, background, pullRequests, close() {
+  return { home, token, port, url, server, store, kernel, background, pullRequests, attachments, close() {
     closing ??= (async () => {
       shuttingDown = true; notifications.close(); hub.close();
       for (const stream of streams) stream.end();

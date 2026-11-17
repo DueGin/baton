@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { applyEvent, type PullRequestRecord, type ProjectRecord, type BackgroundProcess, type ItemRecord, type RunEvent, type RunEventEnvelope, type RunSnapshot, type RunSummary, type TeamPreset, type PermissionRule, type InboxItem, type QuestionRecord, type EscalationRecord, type TurnTrigger } from "@baton/protocol";
+import { applyEvent, type AttachmentRecord, type PullRequestRecord, type ProjectRecord, type BackgroundProcess, type ItemRecord, type RunEvent, type RunEventEnvelope, type RunSnapshot, type RunSummary, type TeamPreset, type PermissionRule, type InboxItem, type QuestionRecord, type EscalationRecord, type TurnTrigger } from "@baton/protocol";
 export interface HeldPrompt { text: string; trigger: TurnTrigger; humanSeq?: number }
 
 const tables = ["nodes", "delegations", "turns", "tool_spans", "permissions", "questions", "escalations", "background_processes", "pull_requests"] as const;
@@ -18,7 +18,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS team_presets (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, data TEXT NOT NULL, seq INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS events (run_id TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(run_id, seq));
-      CREATE TABLE IF NOT EXISTS items (node_id TEXT NOT NULL, seq INTEGER NOT NULL, run_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(node_id, seq));`);
+      CREATE TABLE IF NOT EXISTS items (node_id TEXT NOT NULL, seq INTEGER NOT NULL, run_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(node_id, seq));
+      CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE, data TEXT NOT NULL);`);
     for (const table of tables) this.db.exec(`CREATE TABLE IF NOT EXISTS ${table} (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, data TEXT NOT NULL); CREATE INDEX IF NOT EXISTS ${table}_run ON ${table}(run_id);`);
   }
   subscribe(listener: (event: RunEventEnvelope) => void): () => void {
@@ -142,6 +143,13 @@ export class Store {
   project(id: string): ProjectRecord { const row = this.db.prepare("SELECT data FROM projects WHERE id=?").get(id); if (!row) throw new Error("Project not found"); return JSON.parse(String(row.data)) as ProjectRecord; }
   projectAt(path: string): ProjectRecord | undefined { const row = this.db.prepare("SELECT data FROM projects WHERE path=?").get(path); return row ? JSON.parse(String(row.data)) as ProjectRecord : undefined; }
   saveProject(project: ProjectRecord): void { this.db.prepare("INSERT INTO projects VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET path=excluded.path, data=excluded.data").run(project.id, project.path, JSON.stringify(project)); }
+  attachment(id: string): AttachmentRecord | undefined { const row = this.db.prepare("SELECT data FROM attachments WHERE id=?").get(id); return row ? JSON.parse(String(row.data)) as AttachmentRecord : undefined; }
+  attachmentBySha(sha256: string): AttachmentRecord | undefined { const row = this.db.prepare("SELECT data FROM attachments WHERE sha256=?").get(sha256); return row ? JSON.parse(String(row.data)) as AttachmentRecord : undefined; }
+  /** Inserts unless the same content is already stored; returns the stored record. */
+  insertAttachment(record: AttachmentRecord, sha256: string): AttachmentRecord {
+    this.db.prepare("INSERT INTO attachments VALUES (?, ?, ?) ON CONFLICT DO NOTHING").run(record.id, sha256, JSON.stringify(record));
+    return this.attachmentBySha(sha256) ?? record;
+  }
   close(): void { this.listeners.clear(); this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); this.db.close(); }
 }
 export function backgroundCount(processes: BackgroundProcess[] = []): number { return processes.filter((p) => p.status !== "exited" && !p.dismissed).length; }

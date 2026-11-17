@@ -1,7 +1,10 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { descendantProcessIds, terminateProcessIds } from "@baton/providers";
 import { BATON_TOOLS, LEAD_ONLY_TOOLS, emptyUsage, type AgentEntry, type AskHumanInput, type PermissionDecision, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionRequest, type PermissionResponse, type ReportResultInput, type FormTeamInput, type ReplaceMemberInput, type ReassignInput, type ReorderQueueResponse, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type SendMessageResponse, type SendMode, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
-import type { DriverEvent, DriverRegistry, DriverSession, OpenSessionSpec } from "../driver/types.js";
+import type { DriverEvent, DriverRegistry, DriverSession, OpenSessionSpec, PromptInput } from "../driver/types.js";
+import type { Attachments } from "../attachments/index.js";
+import { attachmentLabel, attachmentPrompt, attachmentText, type AttachmentFile } from "./images.js";
 import { Store } from "../store/index.js";
 import { briefPrompt, correctionPrompt, followupPrompt, noticePrompt, resultsPrompt, systemPrompt } from "./prompts.js";
 import { Teams, type ResolvedMember } from "./teams.js";
@@ -45,7 +48,7 @@ interface Runtime {
   interruptReason?: string;
   starting?: Promise<{ turnId: string }>;
 }
-export interface KernelOptions { baseUrl: string; maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; askTimeoutMinutes?: number; titles?: TitleNaming; platform?: NodeJS.Platform }
+export interface KernelOptions { baseUrl: string; maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; askTimeoutMinutes?: number; titles?: TitleNaming; platform?: NodeJS.Platform; attachments?: Attachments }
 export class Kernel {
   private runtimes = new Map<string, Runtime>();
   private identities = new Map<string, string>();
@@ -88,6 +91,18 @@ export class Kernel {
       release: (runId, proposalId) => this.releaseProposal(runId, proposalId),
       notify: (id, text) => this.enqueue(id, text),
     });
+  }
+  /** A stored attachment's file for delivery; undefined when the id or the file is gone. */
+  private attachmentFile = (attachmentId: string): AttachmentFile | undefined => {
+    const attachments = this.options.attachments, record = attachments?.get(attachmentId);
+    if (!attachments || !record) return undefined;
+    const path = attachments.path(record);
+    return existsSync(path) ? { path, mimeType: record.mimeType, ...(record.name ? { name: record.name } : {}) } : undefined;
+  };
+  /** What a driver receives for prompt text: attachment markers become image parts when the
+   * node's agent takes images, else path notes. The transcript keeps the markers. */
+  private promptFor(id: string, text: string): PromptInput {
+    return attachmentPrompt(text, this.attachmentFile, this.registry.get(this.store.node(id).agentId)?.capabilities.images === true);
   }
   private enqueue(id: string, text: string): void { this.store.queueNotice(randomUUID(), id, this.store.node(id).runId, text); this.scheduleDelivery(id); }
   private emit(runId: string, event: RunEvent): void { this.store.append(runId, event); }
@@ -182,11 +197,12 @@ export class Kernel {
     await this.available(agent); this.checkGlobalLimit();
     if (this.store.project(input.projectId).archived) throw new Error("Project is archived");
     const runId = randomUUID(), nodeId = randomUUID(), ts = now();
-    this.emit(runId, { type: "run.created", run: { id: runId, rootNodeId: nodeId, projectId: input.projectId, title: input.title || input.prompt.slice(0, 100), titleSource: input.title ? "human" : "prompt", cwd, status: "active", policy, createdAt: ts, updatedAt: ts, usage: emptyUsage() } });
-    this.emit(runId, { type: "node.created", node: { id: nodeId, runId, parentNodeId: null, delegationId: null, depth: 0, agentId: agent, model: input.model ?? leadDefaults?.model, modeId: input.modeId ?? leadDefaults?.modeId, thinking: input.thinking ?? leadDefaults?.thinking, title: input.title || input.prompt.slice(0, 100), cwd, status: "starting", createdAt: ts, updatedAt: ts, usage: emptyUsage(), turns: 0 } });
+    const promptTitle = attachmentLabel(input.prompt).slice(0, 100);
+    this.emit(runId, { type: "run.created", run: { id: runId, rootNodeId: nodeId, projectId: input.projectId, title: input.title || promptTitle, titleSource: input.title ? "human" : "prompt", cwd, status: "active", policy, createdAt: ts, updatedAt: ts, usage: emptyUsage() } });
+    this.emit(runId, { type: "node.created", node: { id: nodeId, runId, parentNodeId: null, delegationId: null, depth: 0, agentId: agent, model: input.model ?? leadDefaults?.model, modeId: input.modeId ?? leadDefaults?.modeId, thinking: input.thinking ?? leadDefaults?.thinking, title: input.title || promptTitle, cwd, status: "starting", createdAt: ts, updatedAt: ts, usage: emptyUsage(), turns: 0 } });
     if (preset || input.team) this.teams.initialize(runId, members, preset ? "preset" : "human", preset);
     try { await this.startTurn(nodeId, input.prompt, "user"); } catch (error) { this.failNode(nodeId, error); }
-    if (!input.title) void this.generateTitle(runId, input.prompt);
+    if (!input.title) void this.generateTitle(runId, attachmentLabel(input.prompt));
     return this.store.snapshot(runId);
   }
   firstPrompt(id: string): string {
@@ -196,7 +212,7 @@ export class Kernel {
   }
   async regenerateTitle(id: string): Promise<RunSnapshot["run"]> {
     this.store.snapshot(id);
-    await this.generateTitle(id, this.firstPrompt(id), true);
+    await this.generateTitle(id, attachmentLabel(this.firstPrompt(id)), true);
     return this.store.snapshot(id).run;
   }
   private async generateTitle(id: string, prompt: string, force = false): Promise<void> {
@@ -308,7 +324,7 @@ export class Kernel {
     if (n.delegationId) this.patchDelegation(n.delegationId, { status: "running", startedAt: now(), endedAt: undefined, ...(n.status === "completed" || n.status === "failed" ? { deliveredAt: undefined, deliveredVia: undefined, result: undefined } : {}) });
     this.updateRun(n.runId); this.armStall(id);
     try {
-      const starting = session.startTurn(text); rt.starting = starting;
+      const starting = session.startTurn(this.promptFor(id, text)); rt.starting = starting;
       const started = await starting;
       if (rt.turnId !== turnId) return "turn";
       rt.driverTurnId = started.turnId;
@@ -406,7 +422,7 @@ export class Kernel {
     if (mode === "interrupt" && turnId) return this.interruptForMessage(id, row);
     if (mode === "steer" && turnId && !rt.interrupting) {
       let outcome: Awaited<ReturnType<DriverSession["steer"]>> | undefined;
-      try { outcome = await rt.session?.steer(row.item.text); }
+      try { outcome = await rt.session?.steer(this.promptFor(id, row.item.text)); }
       catch (error) { this.log(this.store.node(id).runId, error, id); }
       if (!rt.pendingMessages.has(row.seq)) return { delivery: "queued", itemSeq: row.seq };
       const interrupted = this.interruptedTurn(id, turnId);
@@ -481,7 +497,7 @@ export class Kernel {
     if (rt.interrupting || this.paused(n.runId)) { this.queuePrompts(id, [{ text, trigger }]); return; }
     if (rt.turnId) {
       const turnId = rt.turnId;
-      const outcome = await rt.session?.steer(text);
+      const outcome = await rt.session?.steer(this.promptFor(id, text));
       if (outcome === "steered" && !this.interruptedTurn(id, turnId)) { this.addItem(id, { type: "user_message", text }); return; }
       this.queuePrompts(id, [{ text, trigger }]); return;
     }
@@ -577,7 +593,8 @@ export class Kernel {
         if (["completed", "failed", "canceled", "replaced"].includes(node.status)) throw new Error("Node is terminal");
         const session = this.runtime(nodeId).session;
         const result = this.human.ask(node, input as unknown as AskHumanInput, this.questionAnchor(nodeId, "ask_human"), (this.options.askTimeoutMinutes ?? 60) * 60000, session?.supportsLongToolCalls?.() !== true);
-        this.armStall(nodeId); return result;
+        // An inline answer travels back as MCP tool text: images in it become path notes.
+        this.armStall(nodeId); return result.then((value) => this.textAttachments(value));
       }
       case "get_team": return this.teams.get(node.runId);
       case "form_team": {
@@ -629,6 +646,12 @@ export class Kernel {
       }
       case "wait": return this.wait(nodeId, input);
     }
+  }
+  private textAttachments(value: unknown): unknown {
+    if (typeof value === "string") return attachmentText(value, this.attachmentFile);
+    if (Array.isArray(value)) return value.map((entry) => this.textAttachments(entry));
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, this.textAttachments(entry)]));
+    return value;
   }
   private async sendFollowup(id: string, message: string): Promise<void> {
     const d = this.store.delegation(id); this.budget(d.runId);
@@ -902,7 +925,7 @@ export class Kernel {
       // same results. A failed/unsupported steer releases the reservation.
       for (const d of pending) this.delivered(d, "steer");
       let outcome: Awaited<ReturnType<DriverSession["steer"]>> | undefined;
-      try { outcome = await rt.session?.steer(text); }
+      try { outcome = await rt.session?.steer(this.promptFor(parentId, text)); }
       catch (error) { for (const d of pending) this.patchDelegation(d.id, { deliveredAt: undefined, deliveredVia: undefined }); throw error; }
       if (outcome !== "steered" || this.interruptedTurn(parentId, turnId)) {
         for (const d of pending) this.patchDelegation(d.id, { deliveredAt: undefined, deliveredVia: undefined });

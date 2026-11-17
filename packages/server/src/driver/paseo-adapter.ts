@@ -1,10 +1,12 @@
 /** The only server module that imports @baton/providers. */
-import { ProviderRegistry, type AgentClient, type AgentSession, type AgentStreamEvent, type AgentTimelineItem, type AgentPersistenceHandle } from "@baton/providers";
+import { ProviderRegistry, type AgentClient, type AgentSession, type AgentStreamEvent, type AgentTimelineItem, type AgentPersistenceHandle, type SaveImage } from "@baton/providers";
 import type { AgentEntry, JsonValue, TimelineItem, PermissionResponse } from "@baton/protocol";
-import type { AgentDriver, DriverEvent, DriverRegistry, DriverSession, SteerOutcome } from "./types.js";
+import type { AgentDriver, DriverEvent, DriverRegistry, DriverSession, PromptInput, SteerOutcome } from "./types.js";
 export interface PaseoDriverRegistryOptions {
     home: string;
     logger?: ConstructorParameters<typeof ProviderRegistry>[0]["logger"];
+    /** Stores images agents return (tool output, generated images) as attachments. */
+    saveImage?: SaveImage;
 }
 export function createPaseoDriverRegistry(options: PaseoDriverRegistryOptions): DriverRegistry {
     const providers = new ProviderRegistry(options);
@@ -90,11 +92,11 @@ export class PaseoDriverSession implements DriverSession {
     get sessionId(): string | null { return this.session.sessionId; }
     processIds(): number[] { return this.session.processIds?.() ?? []; }
     persistence(): JsonValue | null { const handle = this.session.getPersistence(); return handle ? { ...handle } : null; }
-    async startTurn(prompt: string): Promise<{
+    async startTurn(prompt: PromptInput): Promise<{
         turnId: string;
     }> { if (this.closed)
         throw new Error("Session closed"); return this.session.startTurn(prompt); }
-    async steer(prompt: string): Promise<SteerOutcome> {
+    async steer(prompt: PromptInput): Promise<SteerOutcome> {
         if (!this.session.steerActiveTurn)
             return "unsupported";
         if (!this.turnId)
@@ -148,7 +150,7 @@ function mapTimelineItem(item: AgentTimelineItem): TimelineItem | null {
     if (item.type === "tool_call") {
         if (item.detail.type === "worktree_setup")
             return null;
-        return { type: "tool_call", callId: item.callId, name: item.name, status: item.status, detail: item.detail, ...(item.status === "failed" ? { error: typeof item.error === "string" ? item.error : JSON.stringify(item.error) ?? "Tool failed" } : {}) };
+        return { type: "tool_call", callId: item.callId, name: item.name, status: item.status, detail: item.detail, ...(item.images?.length ? { images: item.images } : {}), ...(item.status === "failed" ? { error: typeof item.error === "string" ? item.error : JSON.stringify(item.error) ?? "Tool failed" } : {}) };
     }
     return item;
 }
