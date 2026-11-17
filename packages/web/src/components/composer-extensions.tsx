@@ -1,5 +1,7 @@
 import { createContext, useContext, useSyncExternalStore } from "react";
-import { Extension, markInputRule, Node, type AnyExtension } from "@tiptap/core";
+import { Extension, InputRule, markInputRule, Node, type AnyExtension } from "@tiptap/core";
+import type { Node as PMNode } from "@tiptap/pm/model";
+import { TextSelection } from "@tiptap/pm/state";
 import { NodeViewWrapper, ReactNodeViewRenderer, type NodeViewProps } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
@@ -91,6 +93,29 @@ const CjkEmphasis = Extension.create({
   },
 });
 
+/** `- [ ] ` / `- [x] ` turns the bullet list into a task list, as in Typora (TipTap only knows `[ ] ` at a line start). */
+const BulletToTask = Extension.create({
+  name: "bulletToTask",
+  addInputRules() {
+    return [new InputRule({
+      find: /^\[([ xX])\]\s$/,
+      handler: ({ state, range, match }) => {
+        const { taskList, taskItem } = state.schema.nodes;
+        const $from = state.doc.resolve(range.from);
+        if (!taskList || !taskItem || $from.depth < 3 || $from.node(-1).type.name !== "listItem" || $from.node(-2).type.name !== "bulletList" || $from.index(-1) !== 0) return null;
+        const { tr } = state;
+        const listPos = $from.before(-2); const current = $from.index(-2);
+        tr.delete(range.from, range.to);
+        const list = tr.doc.nodeAt(listPos); if (!list) return null;
+        const items: PMNode[] = [];
+        list.forEach((item, _offset, index) => { items.push(taskItem.create({ checked: index === current && match[1]?.toLowerCase() === "x" }, item.content)); });
+        tr.replaceWith(listPos, listPos + list.nodeSize, taskList.create(null, items));
+        tr.setSelection(TextSelection.create(tr.doc, range.from));
+      },
+    })];
+  },
+});
+
 /** ⌘/Ctrl+Enter sends (never mid-IME composition); Enter and Shift+Enter keep their editor meaning. */
 function submitKeys(submit: () => void): AnyExtension {
   return Extension.create({
@@ -110,6 +135,7 @@ export function composerExtensions(options: { placeholder: () => string; submit:
     ComposerImage,
     RawMarkdown,
     CjkEmphasis,
+    BulletToTask,
     Placeholder.configure({ placeholder: () => options.placeholder(), showOnlyWhenEditable: false }),
     submitKeys(options.submit),
   ];
