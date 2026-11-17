@@ -85,7 +85,8 @@ describe("attachment markers", () => {
   it("builds ordered image parts, path notes, or missing notes", () => {
     const text = "before ![shot](attachment:att_known123) after";
     expect(attachmentPrompt("no images here", lookup, true)).toBe("no images here");
-    expect(attachmentPrompt(text, lookup, true)).toEqual([{ type: "text", text: "before " }, { type: "image", path: "/home/me/.baton/attachments/att_known123.png", mimeType: "image/png", name: "shot" }, { type: "text", text: " after" }]);
+    // Images-capable agents also get each image's path next to it, so they can forward it to another agent.
+    expect(attachmentPrompt(text, lookup, true)).toEqual([{ type: "text", text: "before " }, { type: "image", path: "/home/me/.baton/attachments/att_known123.png", mimeType: "image/png", name: "shot" }, { type: "text", text: "[图片 shot: /home/me/.baton/attachments/att_known123.png] after" }]);
     expect(attachmentPrompt(text, lookup, false)).toBe("before [图片 shot: /home/me/.baton/attachments/att_known123.png] after");
     expect(attachmentPrompt("x ![](attachment:att_known123)", lookup, false)).toBe("x [图片 stored.png: /home/me/.baton/attachments/att_known123.png]");
     expect(attachmentPrompt("x ![gone](attachment:att_missing1) y", lookup, true)).toBe("x [图片 gone: 附件 att_missing1 不存在] y");
@@ -206,8 +207,8 @@ describe("image delivery to agents", () => {
     const text = `看这里 ![截图](attachment:${shot.id}) 哪里不对`;
     const root = await start(text);
     await until(() => session()?.inputs.length === 1);
-    expect(session().inputs[0]).toEqual([{ type: "text", text: "看这里 " }, { type: "image", path, mimeType: "image/png", name: "截图" }, { type: "text", text: " 哪里不对" }]);
-    expect(session().prompts[0]).toBe("看这里 [image 截图] 哪里不对");
+    expect(session().inputs[0]).toEqual([{ type: "text", text: "看这里 " }, { type: "image", path, mimeType: "image/png", name: "截图" }, { type: "text", text: `[图片 截图: ${path}] 哪里不对` }]);
+    expect(session().prompts[0]).toBe(`看这里 [image 截图][图片 截图: ${path}] 哪里不对`);
     expect(server.store.items(root).find((row) => row.item.type === "user_message")?.item).toMatchObject({ text });
     expect(server.store.snapshot(server.store.node(root).runId).run.title).toBe("看这里 [图片 截图] 哪里不对");
   });
@@ -226,16 +227,35 @@ describe("image delivery to agents", () => {
     await until(() => server.store.node(root).status === "running" && session()?.inputs.length === 1);
     const image = { type: "image", path, mimeType: "image/png", name: "s" };
     expect(await server.kernel.message(root, `steer ![s](attachment:${shot.id})`, undefined, "steer")).toMatchObject({ delivery: "steered" });
-    expect(session().steeredInputs[0]).toEqual([{ type: "text", text: "steer " }, image]);
+    const note = { type: "text", text: `[图片 s: ${path}]` };
+    expect(session().steeredInputs[0]).toEqual([{ type: "text", text: "steer " }, image, note]);
     const queued = await server.kernel.message(root, "plain queued text");
     server.kernel.editMessage(root, queued.itemSeq, `edited ![s](attachment:${shot.id})`);
     expect(await server.kernel.message(root, `now ![s](attachment:${shot.id}) please`, undefined, "interrupt")).toMatchObject({ delivery: "turn" });
     await until(() => session().inputs.length === 2);
-    expect(session().inputs[1]).toEqual([{ type: "text", text: "now " }, image, { type: "text", text: " please" }]);
+    expect(session().inputs[1]).toEqual([{ type: "text", text: "now " }, image, { type: "text", text: `[图片 s: ${path}] please` }]);
     await until(() => session().inputs.length === 3);
-    expect(session().inputs[2]).toEqual([{ type: "text", text: "edited " }, image]);
+    expect(session().inputs[2]).toEqual([{ type: "text", text: "edited " }, image, note]);
   });
 
+  it("passes images between agents: a local image path in a brief reaches an images-capable delegate as an image", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "baton-img-")); const shotPath = join(dir, "screen shot.png");
+    await writeFile(shotPath, PNG);
+    expect(parseAttachmentMarkers(`看 ![ui](${shotPath.replace(/ /g, "%20")}) 和 ![x](file:///nope/a.gif)`)).toMatchObject([{ type: "text", text: "看 " }, { type: "local", path: shotPath, name: "ui" }, { type: "text", text: " 和 " }, { type: "local", path: "/nope/a.gif" }]);
+    const local = (path: string) => path === shotPath ? { path, mimeType: "image/png" } : undefined;
+    expect(attachmentPrompt(`check ![ui](${shotPath.replace(/ /g, "%20")})`, undefined, true, local)).toEqual([{ type: "text", text: "check " }, { type: "image", path: shotPath, mimeType: "image/png", name: "ui" }, { type: "text", text: `[图片 ui: ${shotPath}]` }]);
+    // Agents without image input, and paths that are not readable images, keep the Markdown as written.
+    expect(attachmentPrompt(`check ![ui](${shotPath})`, undefined, false, local)).toBe(`check ![ui](${shotPath})`);
+    expect(attachmentPrompt("check ![x](/nope/a.gif)", undefined, true, local)).toBe("check ![x](/nope/a.gif)");
+    const { server, driver, start, session } = await setup();
+    const root = await start("lead");
+    await until(() => session()?.inputs.length === 1);
+    expect(parseAttachmentMarkers(`![ui](<${shotPath}>)`)).toMatchObject([{ type: "local", path: shotPath }]);
+    await server.kernel.delegate(root, { agent: "root", title: "Look at the UI", task: `这个按钮颜色对吗？ ![ui](<${shotPath}>)` });
+    const received = () => driver.sessions.slice(1).flatMap((x) => x.inputs).find((input) => Array.isArray(input) && input.some((part) => part.type === "image" && part.path === shotPath));
+    await until(() => Boolean(received()), 4000);
+    await rm(dir, { recursive: true, force: true });
+  });
   it("records images a tool returned as attachment refs on the tool call", async () => {
     let ref: AttachmentRef | undefined;
     const { server, start } = await setup({ script: async (c) => {

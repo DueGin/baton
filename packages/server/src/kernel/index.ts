@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { descendantProcessIds, terminateProcessIds } from "@baton/providers";
-import { BATON_TOOLS, LEAD_ONLY_TOOLS, emptyUsage, type AgentEntry, type AskHumanInput, type PermissionDecision, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionRequest, type PermissionResponse, type ReportResultInput, type FormTeamInput, type ReplaceMemberInput, type ReassignInput, type ReorderQueueResponse, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type SendMessageResponse, type SendMode, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
+import { ATTACHMENT_MAX_BYTES, BATON_TOOLS, LEAD_ONLY_TOOLS, emptyUsage, type AgentEntry, type AskHumanInput, type PermissionDecision, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionRequest, type PermissionResponse, type ReportResultInput, type FormTeamInput, type ReplaceMemberInput, type ReassignInput, type ReorderQueueResponse, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type SendMessageResponse, type SendMode, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
 import type { DriverEvent, DriverRegistry, DriverSession, OpenSessionSpec, PromptInput } from "../driver/types.js";
 import type { Attachments } from "../attachments/index.js";
 import { attachmentLabel, attachmentPrompt, attachmentText, type AttachmentFile } from "./images.js";
@@ -100,10 +100,15 @@ export class Kernel {
     const path = attachments.path(record);
     return existsSync(path) ? { path, mimeType: record.mimeType, ...(record.name ? { name: record.name } : {}) } : undefined;
   };
+  /** A local image an agent referred to as `![name](/abs/path.png)`: regular file, image type, size cap. */
+  private localImage = (path: string): AttachmentFile | undefined => {
+    const mimeType = ({ png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" } as Record<string, string>)[path.split(".").at(-1)!.toLowerCase()];
+    try { const stat = statSync(path); return mimeType && stat.isFile() && stat.size > 0 && stat.size <= ATTACHMENT_MAX_BYTES ? { path, mimeType } : undefined; } catch { return undefined; }
+  };
   /** What a driver receives for prompt text: attachment markers become image parts when the
    * node's agent takes images, else path notes. The transcript keeps the markers. */
   private promptFor(id: string, text: string): PromptInput {
-    return attachmentPrompt(text, this.attachmentFile, this.registry.get(this.store.node(id).agentId)?.capabilities.images === true);
+    return attachmentPrompt(text, this.attachmentFile, this.registry.get(this.store.node(id).agentId)?.capabilities.images === true, this.localImage);
   }
   private enqueue(id: string, text: string): void { this.store.queueNotice(randomUUID(), id, this.store.node(id).runId, text); this.scheduleDelivery(id); }
   private emit(runId: string, event: RunEvent): void { this.store.append(runId, event); }

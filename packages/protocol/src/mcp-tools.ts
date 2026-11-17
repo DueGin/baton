@@ -26,7 +26,7 @@ export const delegateInput = z.object({
   model: z.string().optional().describe("Override the member's / agent's model."),
   mode: z.string().optional().describe("Override the member's / agent's mode."),
   title: z.string().min(1).max(120).describe("Short title shown in the topology graph."),
-  task: z.string().min(1).describe("What the delegate must do. Self-contained: it cannot see your conversation."),
+  task: z.string().min(1).describe("What the delegate must do. Self-contained: it cannot see your conversation. To pass an image (a screenshot, a mockup, one the human sent you), include it as Markdown: ![name](/absolute/path.png) or ![name](attachment:<id>); the delegate receives the image itself."),
   context: z.string().optional().describe("Relevant facts, file paths, decisions, what was already tried."),
   acceptance: z.array(z.string()).optional().describe("Acceptance criteria the result must meet."),
   readonly: z.boolean().optional().describe("True when the delegate must not modify files."),
@@ -58,7 +58,7 @@ export const getResultInput = z.object({ delegationId: z.string() });
 
 export const sendInput = z.object({
   delegationId: z.string(),
-  message: z.string().min(1).describe("Follow-up instruction or answer for the delegate."),
+  message: z.string().min(1).describe("Follow-up instruction or answer for the delegate. Attach an image with Markdown: ![name](/absolute/path.png) or ![name](attachment:<id>)."),
 });
 
 export const cancelInput = z.object({
@@ -72,7 +72,7 @@ export const statusInput = z.object({
 
 export const reportResultInput = z.object({
   status: z.enum(["success", "partial", "failed"]),
-  summary: z.string().min(1).describe("What you did, what you found, what is left. Plain text."),
+  summary: z.string().min(1).describe("What you did, what you found, what is left. Plain text; attach a screenshot or image with Markdown: ![name](/absolute/path.png)."),
   result: z.unknown().optional().describe("Structured result; must match the brief's outputSchema if one was given."),
   artifacts: z
     .array(
