@@ -9,6 +9,7 @@ import { agentColors, cost, displayStatus, duration, terminal, tokens } from "..
 import type { HumanActions } from "./HumanActions.js";
 import { RosterStrip } from "./Teams.js";
 import { AgentMark, Icon, PermissionActions, Status, Toggle } from "./common.js";
+import { ModelIcon } from "./AgentIcon.js";
 
 interface GraphContextValue extends HumanActions { snapshot: RunSnapshot; now: number; decide: (id: string, response: PermissionResponse) => void; busy: boolean; reassign: (id: string) => void; inspect: (id: string) => void }
 const GraphContext = createContext<GraphContextValue | null>(null);
@@ -29,7 +30,7 @@ const AgentCard = memo(function AgentCard({ data, selected }: NodeProps<AgentNod
     <Handle type="target" position={Position.Top} />
     <div className="node-card-top"><AgentMark agent={node.agentId} small /><span className="node-agent">{node.agentId}</span><Status status={status} /></div>
     <div className="node-role-row">{snapshot.run.status === "paused" && !terminal(node.status) && <span className="node-paused"><Icon name="pause" size={11} />已暂停</span>}{background.count > 0 && <span className={`node-background-badge${background.hasPorts ? " has-ports" : ""}`} title="此节点启动的后台进程">后台 {background.count}</span>}{prs.entries.length > 0 && <span className={`node-pr-badge pr-tone-${prs.tone}`} title={`${prs.entries.length} 个关联 PR，${prs.count} 个 open / draft`}>⑂ PR {prs.entries.length}</span>}{node.role && <span className="role-badge">{node.role}</span>}{node.delegationId && !["canceled", "replaced"].includes(node.status) && !blocked && snapshot.run.policy.mode !== "solo" && <button className="text-button nodrag nopan" disabled={context.busy} onClick={event => { event.stopPropagation(); context.reassign(node.delegationId!); }}>改派 ↗</button>}</div><div className="node-title">{node.title}</div>
-    <div className="node-model">{node.model ?? "默认模型"}</div>
+    <div className="node-model"><ModelIcon model={node.model} />{node.model ?? "默认模型"}</div>
     <div className={`node-activity ${terminal(node.status) ? "muted" : ""}`}><span className={`activity-indicator ${snapshot.run.status !== "paused" && node.status === "running" ? "live" : ""}`} />{tool?.summary ?? node.activity ?? "等待活动"}</div>
     <div className="node-metrics"><span>{duration(node.createdAt, node.endedAt ?? now)}</span><span>{tokens(node.usage.inputTokens + node.usage.outputTokens)} tokens</span><span>{cost(node.usage.costUsd)}</span>{children.length > 0 && <span title="子委派">⑂ {children.length}</span>}</div>
     {permissions.length > 0 && <div className="node-permission"><span>⚑ {permissions[0]!.request.title ?? "需要授权"}</span><PermissionActions permission={permissions[0]!} decide={context.decide} busy={context.busy} /></div>}

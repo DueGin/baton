@@ -37,8 +37,9 @@ describe("compact agent message card", () => {
   });
 });
 describe("local vendor icon set", () => {
-  it("has each required SVG mark and a safe generic fallback", () => {
-    for (const agent of agentVendors) expect(renderToStaticMarkup(<AgentIcon agent={agent} />)).toContain(`data-agent-vendor="${agent}"`);
+  it("has a mark for every vendor and a safe generic fallback", () => {
+    for (const agent of agentVendors.filter(vendor => vendor !== "generic")) expect(renderToStaticMarkup(<AgentIcon agent={agent} />)).toContain(`data-agent-vendor="${agent}"`);
+    expect(renderToStaticMarkup(<AgentIcon agent="generic" />)).toContain('data-agent-vendor="baton"');
     expect(agentVendor("fake-claude")).toBe("claude"); expect(agentVendor("openai/gpt-6")).toBe("codex"); expect(agentVendor("moonshot/k2")).toBe("kimi");
     expect(agentVendor("unrecognized-provider")).toBe("generic"); expect(renderToStaticMarkup(<AgentIcon agent='<img src=x>' />)).not.toContain("<img");
   });

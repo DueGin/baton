@@ -9,3 +9,8 @@ licensed under the licenses provided by their respective copyright holders.
 
 The built-in ACP agent launch table is informed by acpx (https://github.com/openclaw/acpx),
 MIT License, Copyright (c) 2025 OpenClaw Team.
+
+Agent, vendor and model marks in packages/web/src/assets/vendors/ are taken from LobeHub Icons
+(https://github.com/lobehub/lobe-icons, MIT License, Copyright (c) 2023 LobeHub) or, where LobeHub
+has none, from the vendor's own website (Factory, Augment Code, iFlow, Coder). They are used only to
+identify the corresponding products; all such marks are trademarks of their respective owners.

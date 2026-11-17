@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { AgentCatalogRow, AgentsPage } from "./Agents.js";
 import { AgentOptions, AgentPicker } from "./AgentPicker.js";
 import { AgentFields, MembersEditor } from "./TeamForms.js";
-import { AgentIcon, agentVendor } from "./AgentIcon.js";
+import { AgentIcon, ModelIcon, agentVendor, agentVendors, modelVendor } from "./AgentIcon.js";
 import { demoAgents } from "../demo/agents.js";
 describe("expanded Agents UI", () => {
   it("renders four groups, search, install commands, capabilities, sources and version requirements", () => {
@@ -30,8 +30,14 @@ describe("expanded Agents UI", () => {
     const fields = renderToStaticMarkup(<AgentFields agents={demoAgents} value={{ agentId: "codex" }} onChange={() => undefined} />); expect(fields).toContain("searchable-agent-picker"); expect(fields).toContain('aria-label="Model"'); expect(fields).toContain('aria-label="Mode"'); expect(fields).toContain('aria-label="Thinking"');
     const members = renderToStaticMarkup(<MembersEditor agents={demoAgents} members={[{ role: "review", agentId: "pi" }]} onChange={() => undefined} />); expect(members).toContain("searchable-agent-picker"); expect(members).not.toContain("更多 agent");
   });
-  it("renders additional original vendor marks and preserves the generic fallback", () => {
-    for (const id of ["cline", "roo-code", "kiro", "augment", "mistral", "junie", "amp", "aider", "trae"]) { expect(agentVendor(id)).not.toBe("generic"); expect(renderToStaticMarkup(<AgentIcon agent={id} />)).toContain("<svg"); }
-    expect(agentVendor("unknown-acp")).toBe("generic");
+  it("renders each vendor's own logo for built-in agents and an initial for the rest", () => {
+    const expected: Record<string, string> = { claude: "claude", codex: "codex", pi: "pi", omp: "pi", gemini: "gemini", qwen: "qwen", kimi: "kimi", opencode: "opencode", copilot: "copilot", cursor: "cursor", goose: "goose", droid: "droid", hermes: "hermes", openclaw: "openclaw", kiro: "kiro", grok: "grok", traecli: "trae", devin: "devin", qoder: "qoder", amp: "amp", cline: "cline", kilo: "kilo", auggie: "augment", junie: "junie", codebuddy: "codebuddy", cortex: "snowflake", deepagents: "langchain", glm: "zhipu", mcode: "minimax", vibe: "mistral", "deepseek-harness": "deepseek", iflow: "iflow", mux: "coder", pool: "poolside" };
+    for (const [id, vendor] of Object.entries(expected)) { expect(agentVendor(id)).toBe(vendor); const html = renderToStaticMarkup(<AgentIcon agent={id} />); expect(html).toContain(`data-agent-vendor="${vendor}"`); expect(html).toContain("<svg"); }
+    expect(agentVendor("unknown-acp")).toBe("generic"); const monogram = renderToStaticMarkup(<AgentIcon agent="zeroclaw" />); expect(monogram).toContain("agent-monogram"); expect(monogram).toContain(">Z<");
+  });
+  it("ships sanitised vendor SVGs and maps model ids to their vendor", () => {
+    for (const vendor of agentVendors.filter(vendor => vendor !== "generic")) { const html = renderToStaticMarkup(<AgentIcon agent={vendor} />); expect(html).not.toMatch(/<style|<script|href="http/); }
+    expect(modelVendor("claude-sonnet-4-6")).toBe("anthropic"); expect(modelVendor("gpt-5.3-codex")).toBe("openai"); expect(modelVendor("gemini-2.5-pro")).toBe("google"); expect(modelVendor("openrouter/qwen/qwen3-coder")).toBe("qwen"); expect(modelVendor("deepseek-v4")).toBe("deepseek"); expect(modelVendor("some-local-model")).toBeUndefined();
+    expect(renderToStaticMarkup(<ModelIcon model="claude-opus-4-6" />)).toContain('data-agent-vendor="anthropic"'); expect(renderToStaticMarkup(<ModelIcon model="mystery" />)).toBe("");
   });
 });

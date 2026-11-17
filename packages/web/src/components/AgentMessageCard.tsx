@@ -2,7 +2,7 @@ import { useId, useState, useSyncExternalStore } from "react";
 import { agentCardPreferences } from "../lib/agent-card-preferences.js";
 import { outcomeIcons, type AgentCardData } from "../lib/agent-messages.js";
 import { clock, statusLabels } from "../lib/derive.js";
-import { AgentIcon } from "./AgentIcon.js";
+import { AgentIcon, ModelIcon } from "./AgentIcon.js";
 import { Icon, Toggle } from "./common.js";
 import { Markdown } from "./Markdown.js";
 
@@ -35,7 +35,7 @@ export function AgentMessageCard({ card, inspect }: { card: AgentCardData; inspe
     <div className="agent-card-row"><button type="button" className="agent-card-toggle" title={`${card.heading} · ${card.title}`} aria-labelledby={headingId} aria-expanded={open} aria-controls={bodyId} onClick={() => agentCardPreferences.toggle(card.id)} />
       <span className="agent-card-avatar"><AgentIcon agent={to.agentId} size={17} /><i className={`agent-card-state state-${to.status}`} title={statusLabels[to.status] ?? to.status} /></span>
       <span className="agent-card-direction" title={card.heading}>{card.heading}</span>
-      <button type="button" className="agent-card-counterpart" disabled={!to.nodeId || !inspect} title={`${to.title ?? to.role}\n${to.agentId}${to.model ? ` · ${to.model}` : ""}${to.nodeId ? " · 查看节点详情" : " · 节点尚未创建或不可用"}`} aria-label={`查看 ${to.role} 节点`} onClick={() => { if (to.nodeId) inspect?.(to.nodeId); }}><strong>{to.role}</strong><span>{to.agentId}{to.model ? ` · ${to.model}` : ""}</span></button>
+      <button type="button" className="agent-card-counterpart" disabled={!to.nodeId || !inspect} title={`${to.title ?? to.role}\n${to.agentId}${to.model ? ` · ${to.model}` : ""}${to.nodeId ? " · 查看节点详情" : " · 节点尚未创建或不可用"}`} aria-label={`查看 ${to.role} 节点`} onClick={() => { if (to.nodeId) inspect?.(to.nodeId); }}><strong>{to.role}</strong><span>{to.agentId}{to.model ? <> · <ModelIcon model={to.model} size={11} />{to.model}</> : ""}</span></button>
       <strong className="agent-card-title" id={headingId} title={card.title}>{card.title}</strong>
       {card.outcome && <span className={`agent-card-outcome outcome-${card.outcome}`} title={{ success: "完成", partial: "部分完成", failed: "失败" }[card.outcome]} aria-label={`结果：${card.outcome}`}>{outcomeIcons[card.outcome]}</span>}
       <button type="button" className="icon-button agent-card-copy" aria-label={copied === "copied" ? "已复制消息" : copied === "failed" ? "复制失败，重试" : "复制消息"} title={copied === "copied" ? "已复制" : copied === "failed" ? "复制失败，重试" : "复制消息"} onClick={copy}><Icon name={copied === "copied" ? "check" : "copy"} size={12} /></button>
