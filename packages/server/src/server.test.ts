@@ -153,17 +153,33 @@ describe("kernel over real HTTP MCP", () => {
     expect(server.store.delegation(first!.id).status).toBe("canceled");
     const registry = server.kernel.registry as FakeDriverRegistry; expect([...registry.drivers.values()].flatMap((d) => d.sessions).every((s) => s.closed)).toBe(true);
   });
-  it("recovers interrupted nodes and resumes using persisted handle", async () => {
+  it("pauses a run the daemon stopped mid-turn and resumes it with the persisted handle", async () => {
     const script: FakeScript = async (c) => { await c.sleep(10000); };
     const server = await setup({ root: script }); const run = await create(server); await delay(30);
     const persistence = server.store.node(run.run.rootNodeId).persistence;
     await server.close(); servers.splice(servers.indexOf(server), 1);
     const restored = await setup({ root: idle }, { home: server.home });
+    expect(restored.store.snapshot(run.run.id).run).toMatchObject({ status: "paused", pauses: [{ by: "restart" }] });
     expect(restored.store.node(run.run.rootNodeId).status).toBe("interrupted");
-    expect(restored.store.snapshot(run.run.id).turns[0]?.status).toBe("interrupted");
-    await restored.kernel.message(run.run.rootNodeId, "resume"); await until(() => restored.store.node(run.run.rootNodeId).status === "idle");
+    expect(restored.store.snapshot(run.run.id).turns[0]).toMatchObject({ status: "interrupted", error: "Daemon restarted" });
+    await restored.kernel.resumeRun(run.run.id); await until(() => restored.store.node(run.run.rootNodeId).status === "idle");
     const session = (restored.kernel.registry as FakeDriverRegistry).get("root")!.sessions[0]!;
     expect(session.persistence()).toMatchObject({ sessionId: (persistence as { sessionId: string }).sessionId });
+    expect(session.prompts.at(-1)).toContain("baton was restarted while you were working");
+    expect(restored.store.snapshot(run.run.id).run.status).not.toBe("paused");
+  });
+  it("after a crash with a delegate mid-turn, 继续 resumes the delegate and its result reaches the lead", async () => {
+    const lead: FakeScript = async (c) => { if (c.turn === 1) await c.call("delegate", { agent: "child", title: "Long task", task: "work" }); else c.text(`lead got: ${c.prompt.slice(0, 40)}`); };
+    const slow: FakeScript = async (c) => { if (c.turn === 1) await c.sleep(10000); else { c.text("finished after restart"); await c.call("report_result", { status: "success", summary: "done after restart" }); } };
+    const server = await setup({ root: lead, child: slow }); const run = await create(server);
+    await until(() => server.store.snapshot(run.run.id).delegations.some((d) => d.status === "running") && server.store.snapshot(run.run.id).turns.some((t) => t.status === "running" && t.nodeId !== run.run.rootNodeId));
+    await server.close(); servers.splice(servers.indexOf(server), 1);
+    const restored = await setup({ root: lead, child: slow }, { home: server.home });
+    const d = restored.store.snapshot(run.run.id).delegations[0]!;
+    expect(restored.store.snapshot(run.run.id).run.status).toBe("paused");
+    await restored.kernel.resumeRun(run.run.id);
+    await until(() => restored.store.delegation(d.id).status === "completed", 8000);
+    await until(() => restored.store.items(run.run.rootNodeId).some((r) => r.item.type === "user_message" && r.item.text.includes("done after restart")), 8000);
   });
 });
 

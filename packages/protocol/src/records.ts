@@ -292,7 +292,11 @@ export interface RunRecord {
   /** Present in dynamic runs once a team is formed, and in preset runs from the start. */
   team?: TeamRecord;
   /** Pause history (DESIGN §4.10); the last entry without resumedAt means the run is paused now. */
-  pauses?: Array<{ at: IsoTime; resumedAt?: IsoTime; by: "human" }>;
+  /**
+   * by "restart": the daemon stopped (crash, quit or update) while agents were working; on restart
+   * the run is paused instead of being left half-interrupted, so 继续 resumes every interrupted agent.
+   */
+  pauses?: Array<{ at: IsoTime; resumedAt?: IsoTime; by: "human" | "restart" }>;
   createdAt: IsoTime;
   updatedAt: IsoTime;
   endedAt?: IsoTime;

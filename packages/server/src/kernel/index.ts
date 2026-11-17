@@ -37,6 +37,7 @@ export class MessageError extends Error { readonly status = 409; }
 const HUMAN_INTERRUPT = "interrupted by human message";
 const PAUSE_REASON = "paused by human";
 const RESUME_PROMPT = noticePrompt("system", "The human paused this run and has now resumed it. Continue where you left off.");
+const RESTART_RESUME_PROMPT = noticePrompt("system", "baton was restarted while you were working, which interrupted your turn. The human has resumed the run. Check what you had already done (files, commands, delegations) and continue where you left off.");
 interface Runtime {
   token: string; session?: DriverSession; opening?: Promise<DriverSession>; unsubscribe?: () => void;
   turnId?: string; driverTurnId?: string; report?: ReportResultInput; finalText: string; corrections: number;
@@ -153,13 +154,19 @@ export class Kernel {
   }
   recover(): void {
     for (const notice of this.store.notices()) this.scheduleDelivery(notice.nodeId);
-    for (const run of this.store.list()) {
-      const s = this.store.snapshot(run.id);
+    for (const listed of this.store.list()) {
+      // Agents were working when the daemon stopped (crash, quit, update): pause the run rather than
+      // leave it half-interrupted, so 继续 resumes every interrupted agent from its saved session.
+      if (listed.status === "active" && this.store.snapshot(listed.id).turns.some((t) => t.status === "running")) {
+        this.emit(listed.id, { type: "run.updated", patch: { status: "paused", pauses: [...this.store.snapshot(listed.id).run.pauses ?? [], { at: now(), by: "restart" }], updatedAt: now() } });
+      }
+      const s = this.store.snapshot(listed.id), run = s.run;
+      const byRestart = run.status === "paused" && run.pauses?.at(-1)?.by === "restart" && !run.pauses.at(-1)?.resumedAt;
       const normalized = this.validatePolicy(s.run.policy);
       if (JSON.stringify(s.run.policy) !== JSON.stringify(normalized)) this.emit(run.id, { type: "run.updated", patch: { policy: normalized } });
-      for (const n of s.nodes) if (active(n.status)) { if (run.status === "paused" && s.turns.some((t) => t.nodeId === n.id && t.status === "running")) this.store.rememberPausedNode(run.id, n.id); this.patchNode(n.id, { status: "interrupted", activity: run.status === "paused" ? "Paused" : "Interrupted by daemon restart", error: "Daemon restarted" }); }
+      for (const n of s.nodes) if (active(n.status)) { if (run.status === "paused" && s.turns.some((t) => t.nodeId === n.id && t.status === "running")) this.store.rememberPausedNode(run.id, n.id); this.patchNode(n.id, { status: "interrupted", activity: run.status === "paused" ? "Paused" : "Interrupted by daemon restart", error: run.status === "paused" ? undefined : "Daemon restarted" }); }
       for (const d of s.delegations) if (active(d.status) && !d.blockedByProposal && !(run.status === "paused" && d.status === "queued")) this.patchDelegation(d.id, { status: "interrupted" });
-      for (const t of s.turns) if (t.status === "running") this.emit(run.id, { type: "turn.updated", turnId: t.id, patch: { status: run.status === "paused" ? "canceled" : "interrupted", endedAt: now(), error: run.status === "paused" ? PAUSE_REASON : "Daemon restarted" } });
+      for (const t of s.turns) if (t.status === "running") this.emit(run.id, { type: "turn.updated", turnId: t.id, patch: { status: run.status === "paused" && !byRestart ? "canceled" : "interrupted", endedAt: now(), error: run.status === "paused" && !byRestart ? PAUSE_REASON : "Daemon restarted" } });
       for (const p of s.permissions) if (p.status === "pending") this.emit(run.id, { type: "permission", permission: { ...p, status: "expired", resolvedAt: now() } });
       for (const span of s.toolSpans) if (span.status === "running") this.emit(run.id, { type: "tool.span", span: { ...span, status: "canceled", endedAt: now() } });
       for (const n of s.nodes) this.human.refreshActivity(n.id);
@@ -1023,12 +1030,13 @@ export class Kernel {
     const run = this.store.snapshot(id).run;
     if (run.status !== "paused") throw new MessageError("Run is not paused");
     const interrupted = new Set(this.store.pausedNodes(id)); this.resuming.add(id);
+    const resumePrompt = run.pauses?.at(-1)?.by === "restart" ? RESTART_RESUME_PROMPT : RESUME_PROMPT;
     this.emit(id, { type: "run.updated", patch: { status: "active", pauses: (run.pauses ?? []).map((pause, index, list) => index === list.length - 1 && !pause.resumedAt ? { ...pause, resumedAt: now() } : pause), updatedAt: now() } });
     try {
       for (const node of this.store.snapshot(id).nodes) {
         if (["canceled", "replaced"].includes(node.status)) { this.store.forgetPausedNode(node.id); continue; }
         const rt = this.runtime(node.id);
-        const prompts: QueuedPrompt[] = interrupted.has(node.id) ? [{ text: RESUME_PROMPT, trigger: "resume" }] : [];
+        const prompts: QueuedPrompt[] = interrupted.has(node.id) ? [{ text: resumePrompt, trigger: "resume" }] : [];
         const pending = this.store.snapshot(id).delegations.filter((d) => d.fromNodeId === node.id && done(d) && d.status !== "replaced" && d.result && !d.deliveredAt);
         const notices = this.store.notices(node.id);
         const content = [pending.length ? resultsPrompt(pending) : "", ...notices.map((notice) => notice.text)].filter(Boolean).join("\n\n");

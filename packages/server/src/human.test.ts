@@ -193,7 +193,9 @@ describe("human interaction recovery", () => {
     await s.close(); servers.splice(servers.indexOf(s), 1);
     const restored = await startServer({ home: s.home, port: 0, registry: new FakeDriverRegistry({ root: idle, child: idle }), deliveryDebounceMs: 5, notifier: () => {} }); servers.push(restored);
     expect(restored.store.question(q.id).status).toBe("pending"); expect(restored.store.rules()[0]?.id).toBe(rule.id); expect(restored.store.extraRounds(child.delegationId)).toBe(2);
+    expect(restored.store.snapshot(run.run.id).run.status).toBe("paused"); // stopped mid-turn → paused by the restart
     await api(restored, `/api/questions/${q.id}/answer`, "POST", { answer: "Restored" });
+    await restored.kernel.resumeRun(run.run.id);
     await until(() => restored.store.items(run.run.rootNodeId).some((r) => r.item.type === "user_message" && r.item.text.includes("Restored")));
   });
 });

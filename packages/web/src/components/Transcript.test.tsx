@@ -36,6 +36,7 @@ describe("safe agent content rendering", () => {
     const render = (snapshot: typeof live, actions = true) => renderToStaticMarkup(<Transcript snapshot={snapshot} store={store} items={{ [node.id]: [] }} itemStatus={{ [node.id]: "ready" }} nodeId={node.id} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} {...(actions ? { stopRun: () => undefined, resumeRun: () => undefined } : {})} />);
     const working = render(live); expect(working).toContain("composer-stop"); expect(working).toContain("停止"); expect(working).not.toContain(">发送<");
     const paused = render({ ...live, run: { ...live.run, status: "paused" } }); expect(paused).toContain("composer-resume"); expect(paused).toContain("继续");
+    const restarted = render({ ...live, run: { ...live.run, status: "paused", pauses: [{ at: live.run.createdAt, by: "restart" }] } }); expect(restarted).toContain("baton 重启时有 agent 正在工作"); expect(restarted).toContain("composer-resume");
     const done = render({ ...live, run: { ...live.run, status: "completed" } }); expect(done).not.toContain("composer-stop"); expect(done).toContain("发送");
     expect(render(live, false)).not.toContain("composer-stop");
   });
