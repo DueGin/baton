@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { terminateProcessIds } from "@baton/providers";
 import { setTimeout as delay } from "node:timers/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { dirname, resolve, sep } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { AgentEntry, AttachmentRef, BatonToolName, JsonValue, PermissionRequest, PermissionResponse, TimelineItem, Usage } from "@baton/protocol";
@@ -29,11 +31,13 @@ export interface FakeContext {
 }
 export type FakeSaveImage = (data: Uint8Array | string, mimeType: string, name?: string) => Promise<AttachmentRef>;
 export type FakeScript = (context: FakeContext) => Promise<void> | void;
-export interface FakeDriverOptions { script?: FakeScript; scripts?: FakeScript[]; steer?: boolean; label?: string; /** Accept image parts (default true). */ images?: boolean }
+export interface FakeDriverOptions { script?: FakeScript; scripts?: FakeScript[]; steer?: boolean; label?: string; /** Accept image parts (default true). */ images?: boolean; /** Native conversation rewind (default true); false exercises the replay fallback. */ rewind?: boolean }
 const capabilities = { steer: true, resume: true, reasoning: true, mcp: true, images: true };
 export class FakeDriver implements AgentDriver {
   readonly capabilities: AgentEntry["capabilities"];
   readonly sessions: FakeSession[] = [];
+  /** Native rewinds performed by this driver's sessions (points as given), for tests. */
+  readonly rewinds: JsonValue[] = [];
   saveImage?: FakeSaveImage;
   constructor(readonly agentId: string, readonly options: FakeDriverOptions = {}) { this.capabilities = { ...capabilities, steer: options.steer ?? true, images: options.images ?? true }; }
   async open(spec: OpenSessionSpec): Promise<FakeSession> {
@@ -60,7 +64,19 @@ export class FakeSession implements DriverSession {
   private client?: Client; private connecting?: Promise<Client>;
   private supervisor?: ChildProcess;
   private spawned = new Set<number>();
-  constructor(readonly driver: FakeDriver, readonly spec: OpenSessionSpec) {}
+  rewindPoint?: () => JsonValue | null;
+  rewindConversation?: (point: JsonValue) => Promise<void>;
+  constructor(readonly driver: FakeDriver, readonly spec: OpenSessionSpec) {
+    if (driver.options.rewind === false) return;
+    // "Just before the last prompt" = the number of turns before it; a rewind forks to a new session id.
+    this.rewindPoint = () => ({ turns: this.turns - 1, sessionId: this.sessionId });
+    this.rewindConversation = async (point) => {
+      const turns = point && typeof point === "object" && !Array.isArray(point) ? point.turns : undefined;
+      if (typeof turns !== "number" || turns < 0 || turns > this.turns) throw new Error("Fake rewind point is outside this conversation");
+      if (this.active) throw new Error("Fake session cannot rewind during a turn");
+      this.driver.rewinds.push(point); this.turns = turns; this.sessionId = randomUUID();
+    };
+  }
   processIds(): number[] { return this.supervisor?.pid && this.supervisor.exitCode === null && this.supervisor.signalCode === null ? [this.supervisor.pid] : []; }
   private async spawnChild(command: string, args: string[], detached: boolean): Promise<number> {
     if (!this.supervisor) {
@@ -172,7 +188,7 @@ export class FakeDriverRegistry implements DriverRegistry {
   /** Set by startServer: lets fake scripts store images through the attachment store. */
   set saveImage(save: FakeSaveImage) { for (const driver of this.drivers.values()) driver.saveImage = save; }
   constructor(scripts?: Record<string, FakeScript | FakeDriverOptions> | FakeDriver[]) {
-    const drivers = Array.isArray(scripts) ? scripts : Object.entries(scripts ?? { "fake-claude": { label: "Claude · demo" }, "fake-codex": { label: "Codex · demo" }, "fake-pi": { label: "Pi · demo" } }).map(([id, value]) => new FakeDriver(id, typeof value === "function" ? { script: value } : value));
+    const drivers = Array.isArray(scripts) ? scripts : Object.entries(scripts ?? { "fake-claude": { label: "Claude · demo" }, "fake-codex": { label: "Codex · demo" }, "fake-pi": { label: "Pi · demo", rewind: false } }).map(([id, value]) => new FakeDriver(id, typeof value === "function" ? { script: value } : value));
     this.drivers = new Map(drivers.map((d) => [d.agentId, d]));
   }
   async detect(): Promise<AgentEntry[]> {
@@ -216,7 +232,24 @@ async function legacyDemoScript(c: FakeContext): Promise<void> {
 }
 
 /** The default console demo deliberately stops at the human approval gate. */
+/** `write <path> <text>` / `delete <path>` lines make the demo agent change files in its cwd. */
+async function demoFileCommands(c: FakeContext): Promise<boolean> {
+  const commands = [...c.prompt.matchAll(/^(write|delete) +(\S+)(?: +(.*))?$/gm)];
+  if (!commands.length) return false;
+  for (const [, verb, path, content] of commands) {
+    const target = resolve(c.spec.cwd, path!);
+    if (target !== c.spec.cwd && !target.startsWith(c.spec.cwd + sep)) { c.text(`Refusing to touch ${path} outside the working directory.\n`); continue; }
+    const callId = randomUUID();
+    if (verb === "write") { await mkdir(dirname(target), { recursive: true }); await writeFile(target, `${content ?? ""}\n`); }
+    else await rm(target, { force: true });
+    c.item({ type: "tool_call", callId, name: verb === "write" ? "Write" : "Delete", status: "completed", detail: verb === "write" ? { type: "write", filePath: path!, content: content ?? "" } : { type: "shell", command: `rm ${path}`, cwd: c.spec.cwd } });
+    await c.sleep(150);
+  }
+  c.text(`Done: ${commands.map(([, verb, path]) => `${verb === "write" ? "wrote" : "deleted"} ${path}`).join(", ")}.`);
+  return true;
+}
 async function demoScript(c: FakeContext): Promise<void> {
+  if (await demoFileCommands(c)) return;
   if (c.images.length) c.text(`I received ${c.images.length === 1 ? "an image" : `${c.images.length} images`}: ${c.images.map((image) => `[image ${image.name ?? "unnamed"}]`).join(", ")}.\n\n`);
   if (c.prompt === "legacy demo" || c.spec.title === "legacy demo" || ["Review the implementation", "Research options", "Integration check", "Check test coverage"].includes(c.spec.title ?? "")) return legacyDemoScript(c);
   if (c.spec.systemPrompt?.includes("SOLO mode")) { c.text("I completed the demo request independently and verified the result."); return; }
