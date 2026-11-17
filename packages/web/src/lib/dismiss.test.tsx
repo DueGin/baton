@@ -37,22 +37,23 @@ function page() {
   root.body.append(project.details, bulk.details, marked.details, disclosure.details, textarea);
   return { project, bulk, marked, disclosure, textarea, doc: root as unknown as Document };
 }
+const at = (element: FakeElement) => element as unknown as Node;
 const key = (init: Partial<KeyboardEvent> = {}) => ({ key: "Escape", defaultPrevented: false, isComposing: false, preventDefault: vi.fn(), stopPropagation: vi.fn(), ...init }) as unknown as KeyboardEvent;
 
 describe("close on outside click", () => {
   it("knows inside from outside", () => {
     const { project, bulk } = page();
-    expect(isOutside(project.details, project.item)).toBe(false);
-    expect(isOutside(project.details, bulk.item)).toBe(true);
-    expect(isOutside(null, bulk.item)).toBe(false);
+    expect(isOutside(project.details, at(project.item))).toBe(false);
+    expect(isOutside(project.details, at(bulk.item))).toBe(true);
+    expect(isOutside(null, at(bulk.item))).toBe(false);
   });
   it("closes every open menu except the one that was clicked, and never touches inline disclosures", () => {
     const { project, bulk, marked, disclosure, doc } = page();
-    expect(closeMenusOutside(doc, project.item)).toBe(2);
+    expect(closeMenusOutside(doc, at(project.item))).toBe(2);
     expect([project.details.open, bulk.details.open, marked.details.open, disclosure.details.open]).toEqual([true, false, false, true]);
-    expect(closeMenusOutside(doc, root.body)).toBe(1);
+    expect(closeMenusOutside(doc, at(root.body))).toBe(1);
     expect(project.details.open).toBe(false); expect(disclosure.details.open).toBe(true);
-    expect(closeMenusOutside(doc, root.body)).toBe(0);
+    expect(closeMenusOutside(doc, at(root.body))).toBe(0);
   });
   it("Escape closes the menu holding focus first and returns focus to its summary", () => {
     const { project, bulk, marked, doc } = page();
