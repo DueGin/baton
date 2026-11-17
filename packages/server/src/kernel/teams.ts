@@ -1,11 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import type { AddMemberRequest, ApproveTeamProposalRequest, TeamProposal, DelegateInput, DelegationRecord, ReplaceMemberRequest, ReassignRequest, TeamActor, TeamChange, TeamMember, TeamMemberSpec, TeamPreset, TeamPresetInput, TeamRecord } from "@baton/protocol";
+import type { AddMemberRequest, ApproveTeamProposalRequest, TeamProposal, DelegateInput, DelegationRecord, ReplaceMemberRequest, ReassignRequest, TeamActor, TeamCandidate, TeamCandidateSpec, TeamChange, TeamMember, TeamMemberSpec, TeamPreset, TeamPresetInput, TeamRecord } from "@baton/protocol";
 import type { DriverRegistry } from "../driver/types.js";
 import type { Store } from "../store/index.js";
 import { noticePrompt } from "./prompts.js";
 const specSchema = z.object({ role: z.string().trim().min(1).max(40), agentId: z.string().min(1), model: z.string().optional(), modeId: z.string().optional(), thinking: z.string().optional(), responsibilities: z.string().optional() });
-const presetSchema = z.object({ name: z.string().trim().min(1).max(120), description: z.string().optional(), lead: specSchema.omit({ role: true, responsibilities: true }), members: z.array(specSchema).max(12) });
+/** Empty optional fields are dropped so "" and undefined are the same candidate. */
+const optional = (max: number) => z.string().trim().max(max).optional().transform((v) => v || undefined);
+const candidateSchema = z.object({ agentId: z.string().trim().min(1), model: optional(200), modeId: optional(200), thinking: optional(200), description: optional(500) });
+const presetSchema = z.object({ name: z.string().trim().min(1).max(120), description: z.string().optional(), lead: specSchema.omit({ role: true, responsibilities: true }), members: z.array(specSchema).max(12), candidates: z.array(candidateSchema).max(12).optional() });
+/** Two candidates with the same agent / model / mode / thinking are the same hire. */
+const candidateKey = (c: TeamCandidateSpec): string => JSON.stringify([c.agentId, c.model ?? "", c.modeId ?? "", c.thinking ?? ""]);
 const replacementSchema = specSchema.omit({ role: true }).extend({ reason: z.string().optional(), reassignActive: z.boolean().optional() });
 export interface ResolvedMember { member: TeamMember; model?: string; modeId?: string; thinking?: string; proposalId?: string }
 export interface TeamHooks {
@@ -47,9 +52,18 @@ export class Teams {
     if (new Set(entries.map((m) => m.role)).size !== entries.length) throw new Error("Duplicate active roles; use replace_member to change a role");
     await Promise.all(entries.map((m) => this.ready(m.agentId))); return entries;
   }
+  /** Normalizes preset candidates (no empty optional fields) and rejects duplicate configurations. */
+  private candidates(specs: TeamCandidateSpec[] | undefined): TeamCandidateSpec[] {
+    const entries = z.array(candidateSchema).max(12).parse(specs ?? []).map((c) => Object.fromEntries(Object.entries(c).filter(([, v]) => v !== undefined)) as unknown as TeamCandidateSpec);
+    const keys = entries.map(candidateKey);
+    const repeated = entries.find((_, i) => keys.indexOf(keys[i]!) !== i);
+    if (repeated) throw new Error(`Duplicate preset candidate: ${repeated.agentId}${repeated.model ? ` / ${repeated.model}` : ""}; candidates must differ by agent, model, mode or thinking`);
+    return entries;
+  }
   initialize(runId: string, specs: TeamMemberSpec[], by: TeamActor, preset?: TeamPreset): TeamRecord {
     const ts = new Date().toISOString();
-    const team: TeamRecord = { source: preset ? "preset" : "dynamic", presetId: preset?.id, presetName: preset?.name, members: specs.map((s) => ({ ...s, id: randomUUID(), status: "active", addedBy: by, addedAt: ts })), changes: [], proposals: [], updatedAt: ts };
+    const candidates: TeamCandidate[] = (preset?.candidates ?? []).map((c, i) => ({ ...c, id: `c${i + 1}` }));
+    const team: TeamRecord = { source: preset ? "preset" : "dynamic", presetId: preset?.id, presetName: preset?.name, members: specs.map((s) => ({ ...s, id: randomUUID(), status: "active", addedBy: by, addedAt: ts })), changes: [], proposals: [], ...(candidates.length ? { candidates } : {}), updatedAt: ts };
     return this.change(runId, team, { kind: "formed", by, reason: preset ? `Preset: ${preset.name}` : "Initial team" });
   }
   form(runId: string, specs: Array<TeamMemberSpec & { reason?: string }>, rationale: string, nodeId: string): Promise<TeamRecord | { status: "pending_approval"; proposalId: string }> {
@@ -83,16 +97,50 @@ export class Teams {
   }
   member(runId: string, idOrRole: string): TeamMember {
     const team = this.team(runId), member = team.members.find((m) => m.status === "active" && (m.id === idOrRole || m.role === idOrRole));
-    if (!member) throw new Error(`Active team member not found: ${idOrRole}. Available roles: ${team.members.filter((m) => m.status === "active").map((m) => m.role).join(", ") || "(none)"}`);
+    if (!member) throw new Error(`Active team member not found: ${idOrRole}. Available roles: ${team.members.filter((m) => m.status === "active").map((m) => m.role).join(", ") || "(none)"}${this.candidateHint(team)}`);
     return member;
   }
-  get(runId: string): unknown {
-    const team = this.team(runId), s = this.store.snapshot(runId);
-    return { ...team, members: team.members.map((m) => ({ ...m, delegations: s.delegations.filter((d) => d.memberId === m.id) })) };
+  private candidateHint(team?: TeamRecord): string {
+    return team?.candidates?.length ? `. Candidates the lead can hire (delegate with candidate + a new role): ${team.candidates.map((c) => `${c.id} (${c.agentId}${c.model ? ` / ${c.model}` : ""})`).join(", ")}` : "";
   }
-  async resolve(runId: string, input: Pick<DelegateInput, "role" | "agent" | "model" | "mode"> & { thinking?: string; nodeId?: string; human?: boolean; /** Reassignment: role and responsibilities the ad-hoc member continues. */ basis?: { role: string; responsibilities?: string } }): Promise<ResolvedMember> {
+  async get(runId: string): Promise<unknown> {
+    const team = this.team(runId), s = this.store.snapshot(runId);
+    const result: Record<string, unknown> = { ...team, members: team.members.map((m) => ({ ...m, delegations: s.delegations.filter((d) => d.memberId === m.id) })) };
+    if (team.candidates?.length) {
+      const catalog = await this.registry.detect();
+      result.candidates = team.candidates.map((c) => {
+        const agent = catalog.find((a) => a.id === c.agentId), hires = team.members.filter((m) => m.candidateId === c.id);
+        return { ...c, available: agent?.status === "ready" && agent.enabled && !!this.registry.get(c.agentId), timesHired: hires.length, hiredAs: hires.map((m) => ({ role: m.role, memberId: m.id, status: m.status })) };
+      });
+      result.hiring = 'Hire a candidate with delegate({ candidate: "<id>", role: "<new role name>", title, task, … }). No roster approval is needed; a candidate can be hired into several roles.';
+    }
+    return result;
+  }
+  /** The lead hires a preset candidate as a new active member under a role it names (DESIGN §4.14). */
+  private hire(runId: string, candidateId: string, role: string | undefined): Promise<TeamMember> {
+    return this.locked(runId, async () => {
+      const candidate = this.team(runId).candidates?.find((c) => c.id === candidateId);
+      if (!candidate) throw new Error(`Unknown candidate: ${candidateId}. Available candidates: ${this.team(runId).candidates?.map((c) => c.id).join(", ") || "(none)"}`);
+      const name = (role ?? "").trim();
+      if (!name || name.length > 40) throw new Error("Name the role you hire the candidate into: role is required (1-40 characters)");
+      await this.ready(candidate.agentId);
+      const team = this.team(runId);
+      if (team.members.some((m) => m.status === "active" && m.role === name) || team.proposals.some((p) => p.status === "pending" && (p.members?.some((m) => m.role === name) || p.replace?.with.role === name))) throw new Error(`Role "${name}" already exists; delegate to it by role, or hire the candidate under a new role name`);
+      this.checkSize(runId, 1);
+      const member: TeamMember = { role: name, agentId: candidate.agentId, ...(candidate.model ? { model: candidate.model } : {}), ...(candidate.modeId ? { modeId: candidate.modeId } : {}), ...(candidate.thinking ? { thinking: candidate.thinking } : {}), ...(candidate.description ? { responsibilities: candidate.description } : {}), id: randomUUID(), status: "active", addedBy: "lead", addedAt: new Date().toISOString(), reason: `Hired from preset candidate ${candidate.id}`, candidateId: candidate.id };
+      this.change(runId, { ...team, members: [...team.members, member] }, { kind: "member_added", by: "lead", memberId: member.id, reason: member.reason });
+      return member;
+    });
+  }
+  async resolve(runId: string, input: Pick<DelegateInput, "role" | "agent" | "model" | "mode" | "candidate"> & { thinking?: string; nodeId?: string; human?: boolean; /** Reassignment: role and responsibilities the ad-hoc member continues. */ basis?: { role: string; responsibilities?: string } }): Promise<ResolvedMember> {
     const run = this.store.snapshot(runId).run;
     if (run.policy.mode === "solo") throw new Error("Solo runs cannot delegate");
+    if (input.candidate !== undefined) {
+      if (input.agent) throw new Error("Specify either candidate (with role) or agent, not both");
+      if (input.nodeId && input.nodeId !== run.rootNodeId) throw new Error("Only the lead can hire candidates");
+      const member = await this.hire(runId, input.candidate, input.role);
+      return { member, model: input.model ?? member.model, modeId: input.mode ?? member.modeId, thinking: input.thinking ?? member.thinking };
+    }
     if (input.role && input.agent) throw new Error("Specify either role or agent, not both");
     let member: TeamMember;
     if (input.role) {
@@ -106,7 +154,7 @@ export class Teams {
       member = this.member(runId, input.role);
     }
     else {
-      if (run.policy.mode === "preset") throw new Error(`Preset runs require a role at every depth. Available roles: ${run.team?.members.filter((m) => m.status === "active").map((m) => m.role).join(", ") || "(none)"}`);
+      if (run.policy.mode === "preset") throw new Error(`Preset runs require a role at every depth. Available roles: ${run.team?.members.filter((m) => m.status === "active").map((m) => m.role).join(", ") || "(none)"}${this.candidateHint(run.team)}`);
       if (!input.agent) throw new Error("Specify a team role or agent");
       await this.ready(input.agent);
       // A reassigned task keeps its role lineage ("renderer" → "renderer-claude") and responsibilities.
@@ -225,19 +273,22 @@ export class Teams {
     });
   }
   async savePreset(input: TeamPresetInput, id?: string): Promise<TeamPreset & { warnings: string[] }> {
-    const valid = presetSchema.parse(input), catalog = await this.registry.detect();
+    const { candidates: rawCandidates, ...valid } = presetSchema.parse(input), catalog = await this.registry.detect();
     if (new Set(valid.members.map((m) => m.role)).size !== valid.members.length) throw new Error("Duplicate roles in preset");
+    const candidates = this.candidates(rawCandidates);
     const warnings: string[] = [];
-    for (const agentId of new Set([valid.lead.agentId, ...valid.members.map((m) => m.agentId)])) {
+    for (const agentId of new Set([valid.lead.agentId, ...valid.members.map((m) => m.agentId), ...candidates.map((c) => c.agentId)])) {
       const entry = catalog.find((a) => a.id === agentId); if (!entry) throw new Error(`Unknown agent id: ${agentId}`);
       if (entry.status !== "ready" || !entry.enabled) warnings.push(`${agentId} is currently ${entry.status}${!entry.enabled ? " and disabled" : ""}; it must be ready to start a run`);
     }
     const ts = new Date().toISOString(), old = id ? this.store.preset(id) : undefined;
-    const preset: TeamPreset = { ...valid, id: id ?? randomUUID(), createdAt: old?.createdAt ?? ts, updatedAt: ts };
+    const preset: TeamPreset = { ...valid, ...(candidates.length ? { candidates } : {}), id: id ?? randomUUID(), createdAt: old?.createdAt ?? ts, updatedAt: ts };
     this.store.savePreset(preset); return { ...preset, warnings };
   }
   async saveRun(runId: string, input: { name: string; description?: string }): Promise<TeamPreset> {
     const s = this.store.snapshot(runId), root = s.nodes.find((n) => n.id === s.run.rootNodeId)!;
-    return this.savePreset({ ...input, lead: { agentId: root.agentId, model: root.model, modeId: root.modeId, thinking: root.thinking }, members: (s.run.team?.members ?? []).filter((m) => m.status === "active").map(({ role, agentId, model, modeId, thinking, responsibilities }) => ({ role, agentId, model, modeId, thinking, responsibilities })) });
+    // Active members (including roles hired from candidates) become fixed roles; candidates stay candidates.
+    const candidates = s.run.team?.candidates?.map(({ id: _id, ...spec }) => spec);
+    return this.savePreset({ ...input, lead: { agentId: root.agentId, model: root.model, modeId: root.modeId, thinking: root.thinking }, members: (s.run.team?.members ?? []).filter((m) => m.status === "active").map(({ role, agentId, model, modeId, thinking, responsibilities }) => ({ role, agentId, model, modeId, thinking, responsibilities })), ...(candidates?.length ? { candidates } : {}) });
   }
 }

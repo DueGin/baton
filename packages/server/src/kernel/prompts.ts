@@ -1,4 +1,4 @@
-import type { AgentEntry, DelegationRecord, NodeRecord, RunPolicy, TeamRecord } from "@baton/protocol";
+import type { AgentEntry, DelegationRecord, NodeRecord, RunPolicy, TeamCandidate, TeamRecord } from "@baton/protocol";
 
 /** Machine-readable tags the console parses (see packages/web transcript rendering). */
 export const ASSIGNMENT_TAG = "baton-assignment";
@@ -20,6 +20,12 @@ function describeAgent(agent: AgentEntry): string {
   return parts.join(" — ");
 }
 
+function describeCandidate(c: TeamCandidate, agents: AgentEntry[]): string {
+  const config = [c.model ?? "default model", c.thinking ? `thinking ${c.thinking}` : "", c.modeId ? `mode ${c.modeId}` : ""].filter(Boolean).join(", ");
+  const unavailable = agents.length > 0 && !agents.some((a) => a.id === c.agentId) ? " (currently unavailable)" : "";
+  return `- ${c.id}: ${c.agentId} / ${config}${unavailable} — ${c.description ?? "no description"}`;
+}
+
 export function systemPrompt(
   node: Pick<NodeRecord, "id" | "depth" | "parentNodeId" | "agentId" | "role" | "memberId">,
   policy: RunPolicy,
@@ -31,6 +37,7 @@ export function systemPrompt(
   const mode = policy.mode ?? "dynamic";
   if (mode === "solo") return "You are running inside baton in SOLO mode. Work alone: inspect, implement, verify and answer the human yourself. Only the baton ask_human tool is available: investigate first, then ask for human judgment calls or missing decisions. A blocking ask_human waits in the tool call; use its answer and continue in the same turn. If it returns no_answer_yet, work on something else or end your turn; the answer will arrive later. Load mcp__baton__ask_human with tool search if needed. Do not delegate or form a team. " + BACKGROUND_GUIDANCE + " " + PR_GUIDANCE;
   const roster = (team?.members ?? []).filter((m) => m.status === "active").map((m) => `- ${m.role}: ${m.agentId}${m.model ? ` / ${m.model}` : ""}. Responsibilities and file ownership: ${m.responsibilities ?? "See assignment"}`).join("\n");
+  const candidates = isRoot && canDelegate && mode === "preset" ? team?.candidates ?? [] : [];
   const lines = [
     "You are running inside baton, a local multi-agent workspace. Other coding agents on this machine — including agents from other vendors — can take work from you through the `baton` MCP tools.",
     BACKGROUND_GUIDANCE,
@@ -69,7 +76,9 @@ export function systemPrompt(
       "1. Inspect enough to plan the architecture and shared interfaces. Define contracts yourself when parallel parts depend on them.",
       mode === "dynamic"
         ? "2. Call form_team first: choose the smallest team that parallelizes the work, pick agents and models by their strengths from list_agents, and give every role responsibilities, deliverables and exclusive file ownership. Then delegate by role in parallel."
-        : "2. Use the preset roster below. Delegate only by role, at every depth; direct agent delegation is not allowed.",
+        : candidates.length
+          ? "2. Use the preset roster below and hire preset candidates into roles you name where they fit. Delegate only by role, at every depth; direct agent delegation is not allowed."
+          : "2. Use the preset roster below. Delegate only by role, at every depth; direct agent delegation is not allowed.",
       `Team size limit: ${policy.maxTeamSize ?? 5}. Reuse existing members first before adding another role. Write responsibilities as routing contracts: "Send me: …; don't send me: …".`,
       "3. Coordinate while members work. Never assign overlapping files. End your turn when waiting; results arrive automatically.",
       "4. If a member fails, stalls, or is a poor fit, use replace_member or reassign proactively. Integrate the returned work, verify the whole, and use send for fixes. Answer the human with what was done by whom.",
@@ -82,6 +91,12 @@ export function systemPrompt(
   }
   if (policy.teamApproval !== false) lines.push("", 'Roster approval is required: agent-proposed formation, additions and replacements return pending_approval plus proposalId. After proposing, end your turn and wait for the human\'s decision in a <baton-notice kind="team">; do not submit a second proposal. Any tasks assigned to pending roles remain queued until approval. The human can edit or reject your roster; use the approved specs and feedback.');
   if (roster) lines.push("", "Current team roster (respect file ownership):", roster);
+  if (candidates.length) lines.push(
+    "",
+    "Preset candidates you may hire (the human approved them in the preset; hiring needs no roster approval):",
+    ...candidates.map((c) => describeCandidate(c, agents)),
+    'Choose a candidate by matching the task to its model and description. To hire, call delegate with candidate: "<id>" and role: "<a new role name>" plus the usual title/task; it joins the team under that role and gets the task. Send later tasks to that role by role alone. A candidate can be hired into several roles; hires count toward the team size limit. get_team shows candidates and who was hired.',
+  );
   if (mode === "preset") lines.push("Preset rule: all delegation at every depth requires a team role. Use get_team for the current roster.");
   if (!isRoot && node.role) lines.push("", `Your team role: ${node.role}.`, `Your responsibilities: ${team?.members.find((m) => m.id === node.memberId)?.responsibilities ?? "Follow your assignment."}`, "Other roles own the files and responsibilities in the roster above; avoid file clashes.");
   if (isRoot) {
