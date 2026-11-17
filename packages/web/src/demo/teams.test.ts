@@ -139,4 +139,31 @@ describe("browser demo teams and approval gate", () => {
     expect(after.delegations.some(edge => edge.status === "replaced" && edge.memberId === member.id)).toBe(true);
     expect(after.delegations.some(edge => edge.status === "running" && edge.memberId === replacement.id)).toBe(true);
   });
+  it("copies preset candidates into runs; the lead hires one under a new role without approval", async () => {
+    const client = new DemoClient(() => base);
+    const run = await client.createRun({ projectId: "project-atlas", teamPresetId: "preset-pool", prompt: "Pool work" });
+    expect(run.run.policy).toMatchObject({ mode: "preset", teamApproval: true });
+    expect(activeMembers(run.run.team)).toHaveLength(0); expect(run.run.team!.candidates!.map(candidate => [candidate.id, candidate.agentId])).toEqual([["c1", "codex"], ["c2", "pi"], ["c3", "qwen"]]);
+    const { member, delegationId } = client.hireCandidate(run.run.id, "c2", "tester", { title: "Tests", task: "Run tests" });
+    client.hireCandidate(run.run.id, "c2", "linter", { title: "Lint", task: "Run lint" });
+    expect(() => client.hireCandidate(run.run.id, "c1", "tester", { title: "x", task: "x" })).toThrow("角色已存在");
+    expect(() => client.hireCandidate(run.run.id, "c9", "new", { title: "x", task: "x" })).toThrow("候选不存在");
+    const after = await client.run(run.run.id);
+    expect(member).toMatchObject({ role: "tester", agentId: "pi", model: "gemini-2.5-pro", responsibilities: "便宜快速，适合跑测试", addedBy: "lead", candidateId: "c2" });
+    expect(pendingProposals(after.run.team)).toHaveLength(0);
+    expect(after.delegations.find(edge => edge.id === delegationId)).toMatchObject({ status: "running", role: "tester", memberId: member.id });
+    expect(activeMembers(after.run.team).map(entry => [entry.role, entry.candidateId])).toEqual([["tester", "c2"], ["linter", "c2"]]);
+    await client.saveTeam(run.run.id, { name: "Pool copy" });
+    const saved = (await client.teams()).find(entry => entry.name === "Pool copy")!;
+    expect(saved.candidates).toEqual((await client.teams()).find(entry => entry.id === "preset-pool")!.candidates);
+    expect(saved.members.map(entry => entry.role)).toEqual(["tester", "linter"]);
+  });
+  it("validates preset candidates like the daemon", async () => {
+    const client = new DemoClient(() => base);
+    const saved = await client.createTeam({ name: "Only candidates", lead: { agentId: "claude" }, members: [], candidates: [{ agentId: "codex", model: "gpt-5.3-codex", description: "  " }, { agentId: "gemini" }] });
+    expect(saved.candidates).toEqual([{ agentId: "codex", model: "gpt-5.3-codex" }, { agentId: "gemini" }]); expect(saved.warnings![0]).toContain("Gemini");
+    await expect(client.createTeam({ name: "Bad", lead: { agentId: "claude" }, members: [], candidates: [{ agentId: "unknown" }] })).rejects.toThrow("Unknown agent id");
+    await expect(client.createTeam({ name: "Dup", lead: { agentId: "claude" }, members: [], candidates: [{ agentId: "codex" }, { agentId: "codex", description: "same" }] })).rejects.toThrow("候选 2 重复：codex · 默认模型");
+    expect((await client.updateTeam(saved.id, { name: "Roles", lead: { agentId: "claude" }, members: [], candidates: [] })).candidates).toBeUndefined();
+  });
 });

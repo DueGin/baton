@@ -127,6 +127,83 @@ describe("teams over actual HTTP MCP", () => {
   });
 });
 
+describe("preset candidates", () => {
+  const pool = [{ agentId: "worker", model: "fast", thinking: "high", description: "前端、CSS 动画" }, { agentId: "replacement", description: "独立审查" }];
+  const project = async (s: BatonServer): Promise<string> => (await s.kernel.projects.create({ path: tmpdir() })).id;
+  it("validates candidates on create/update: candidates-only is valid, unknown agents and duplicates are rejected", async () => {
+    const s = await setup();
+    const preset = await api<TeamPreset>(s, "/api/teams", "POST", { name: "Pool", lead: { agentId: "lead" }, members: [], candidates: [{ agentId: "worker", model: "fast", thinking: "low", description: " 便宜快速，适合跑测试 " }, { agentId: "worker", model: "deep", modeId: "", description: "" }] });
+    expect(preset.members).toEqual([]);
+    expect(preset.candidates).toEqual([{ agentId: "worker", model: "fast", thinking: "low", description: "便宜快速，适合跑测试" }, { agentId: "worker", model: "deep" }]);
+    expect(s.store.preset(preset.id).candidates).toEqual(preset.candidates);
+    await expect(api(s, "/api/teams", "POST", { name: "Bad", lead: { agentId: "lead" }, members: [], candidates: [{ agentId: "ghost" }] })).rejects.toThrow(/Unknown agent id: ghost/);
+    await expect(api(s, `/api/teams/${preset.id}`, "PUT", { name: "Dup", lead: { agentId: "lead" }, members: [], candidates: [{ agentId: "worker", model: "m" }, { agentId: "worker", model: "m", description: "same config, other words" }] })).rejects.toThrow(/Duplicate preset candidate: worker \/ m/);
+    await expect(api(s, "/api/teams", "POST", { name: "Blank", lead: { agentId: "lead" }, members: [], candidates: [{ agentId: " " }] })).rejects.toThrow();
+    const updated = await api<TeamPreset>(s, `/api/teams/${preset.id}`, "PUT", { name: "Roles only", lead: { agentId: "lead" }, members: [member()] });
+    expect(updated.candidates).toBeUndefined();
+  });
+  it("copies candidates into the run; the lead hires them by delegate without approval, into several roles", async () => {
+    const s = await setup();
+    const preset = await s.kernel.teams.savePreset({ name: "Pool", lead: { agentId: "lead" }, members: [], candidates: pool });
+    const run = await s.kernel.createRun({ projectId: await project(s), teamPresetId: preset.id, cwd: tmpdir(), prompt: "hire" });
+    const root = run.run.rootNodeId;
+    expect(run.run.policy).toMatchObject({ mode: "preset", teamApproval: true });
+    expect(run.run.team).toMatchObject({ source: "preset", members: [], candidates: [{ id: "c1", ...pool[0] }, { id: "c2", ...pool[1] }] });
+    const hired = await s.kernel.tool(root, "delegate", { candidate: "c1", role: "frontend", title: "UI", task: "Build the UI" }) as { delegationId: string; nodeId: string; status: string };
+    expect(hired.status).toBe("queued");
+    let team = s.store.snapshot(run.run.id).run.team!;
+    const frontend = team.members[0]!;
+    expect(frontend).toMatchObject({ role: "frontend", agentId: "worker", model: "fast", thinking: "high", responsibilities: "前端、CSS 动画", addedBy: "lead", candidateId: "c1", status: "active" });
+    expect(team.proposals).toHaveLength(0);
+    expect(team.changes.at(-1)).toMatchObject({ kind: "member_added", by: "lead", memberId: frontend.id });
+    expect(s.store.node(hired.nodeId)).toMatchObject({ role: "frontend", memberId: frontend.id, agentId: "worker", model: "fast", thinking: "high" });
+    expect(s.store.delegation(hired.delegationId)).toMatchObject({ role: "frontend", memberId: frontend.id });
+    await s.kernel.tool(root, "delegate", { candidate: "c1", role: "animation", title: "Animate", task: "Animate the UI" });
+    await expect(s.kernel.tool(root, "delegate", { candidate: "c2", role: "frontend", title: "Dup", task: "x" })).rejects.toThrow(/Role "frontend" already exists/);
+    await expect(s.kernel.tool(root, "delegate", { candidate: "c9", role: "qa", title: "x", task: "x" })).rejects.toThrow(/Unknown candidate: c9\. Available candidates: c1, c2/);
+    await expect(s.kernel.tool(root, "delegate", { candidate: "c2", title: "x", task: "x" })).rejects.toThrow(/role is required/);
+    await expect(s.kernel.tool(root, "delegate", { candidate: "c2", agent: "worker", role: "qa", title: "x", task: "x" })).rejects.toThrow(/not both/);
+    await expect(s.kernel.tool(root, "delegate", { role: "qa", title: "x", task: "x" })).rejects.toThrow(/Candidates the lead can hire .*c1 \(worker \/ fast\), c2 \(replacement\)/);
+    await expect(s.kernel.tool(hired.nodeId, "delegate", { candidate: "c2", role: "qa", title: "x", task: "x" })).rejects.toThrow(/Only the lead/);
+    await s.kernel.tool(root, "delegate", { role: "frontend", title: "UI follow-up", task: "Polish" });
+    const view = await s.kernel.tool(root, "get_team", {}) as { candidates: unknown[]; hiring: string };
+    expect(view.candidates).toEqual([
+      { id: "c1", ...pool[0], available: true, timesHired: 2, hiredAs: [{ role: "frontend", memberId: frontend.id, status: "active" }, { role: "animation", memberId: expect.any(String), status: "active" }] },
+      { id: "c2", ...pool[1], available: true, timesHired: 0, hiredAs: [] },
+    ]);
+    expect(view.hiring).toContain('delegate({ candidate: "<id>", role: "<new role name>"');
+    team = s.store.snapshot(run.run.id).run.team!;
+    expect(team.members.map((m) => [m.role, m.candidateId])).toEqual([["frontend", "c1"], ["animation", "c1"]]);
+    expect(s.store.snapshot(run.run.id).delegations.map((d) => d.role)).toEqual(["frontend", "animation", "frontend"]);
+    await until(() => s.store.snapshot(run.run.id).delegations.every((d) => d.status === "completed")); await delay(80);
+    const snapshot = s.store.snapshot(run.run.id);
+    expect(s.store.events(run.run.id).reduce(applyEvent, { ...snapshot, nodes: [], delegations: [], turns: [], toolSpans: [], permissions: [], lastSeq: 0 })).toEqual(snapshot);
+  });
+  it("counts hires toward maxTeamSize and rejects candidates outside preset runs", async () => {
+    const s = await setup();
+    const preset = await s.kernel.teams.savePreset({ name: "Pool", lead: { agentId: "lead" }, members: [member()], candidates: pool });
+    const run = await s.kernel.createRun({ projectId: await project(s), teamPresetId: preset.id, cwd: tmpdir(), prompt: "size", policy: { maxTeamSize: 2 } });
+    await s.kernel.tool(run.run.rootNodeId, "delegate", { candidate: "c2", role: "review", title: "Review", task: "x" });
+    await expect(s.kernel.tool(run.run.rootNodeId, "delegate", { candidate: "c1", role: "frontend", title: "UI", task: "x" })).rejects.toThrow(/maxTeamSize \(2\)/);
+    expect(s.store.snapshot(run.run.id).run.team!.members.filter((m) => m.status === "active")).toHaveLength(2);
+    const dynamic = await s.kernel.createRun({ projectId: await project(s), agent: "lead", cwd: tmpdir(), prompt: "dynamic", policy: { teamApproval: false } });
+    expect(dynamic.run.team).toBeUndefined();
+    await expect(s.kernel.tool(dynamic.run.rootNodeId, "delegate", { candidate: "c1", role: "frontend", title: "UI", task: "x" })).rejects.toThrow(/Unknown candidate: c1\. Available candidates: \(none\)/);
+  });
+  it("save-preset keeps the run's candidates and its active roles", async () => {
+    const s = await setup();
+    const preset = await s.kernel.teams.savePreset({ name: "Pool", lead: { agentId: "lead", model: "lead-model" }, members: [], candidates: pool });
+    const run = await s.kernel.createRun({ projectId: await project(s), teamPresetId: preset.id, cwd: tmpdir(), prompt: "save" });
+    await s.kernel.tool(run.run.rootNodeId, "delegate", { candidate: "c2", role: "review", title: "Review", task: "x" });
+    const saved = await api<TeamPreset>(s, `/api/runs/${run.run.id}/team/save-preset`, "POST", { name: "Saved" });
+    expect(saved.candidates).toEqual(pool);
+    expect(saved.members).toEqual([{ role: "review", agentId: "replacement", responsibilities: "独立审查" }]);
+    const again = await s.kernel.createRun({ projectId: await project(s), teamPresetId: saved.id, cwd: tmpdir(), prompt: "again" });
+    expect(again.run.team!.candidates!.map((c) => c.id)).toEqual(["c1", "c2"]);
+    expect(again.run.team!.members.map((m) => [m.role, m.addedBy])).toEqual([["review", "preset"]]);
+  });
+});
+
 describe("team approval gate", () => {
   async function proposed(): Promise<{ s: BatonServer; runId: string; root: string; proposalId: string }> {
     const s = await setup({ lead: async (c) => {

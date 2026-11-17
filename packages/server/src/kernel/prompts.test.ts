@@ -40,6 +40,22 @@ describe("systemPrompt", () => {
     expect(delegate).toContain("Your team role: builder"); expect(delegate).toContain("Own src/builder.ts"); expect(delegate).toContain("reviewer: claude");
     expect(systemPrompt(root, { ...policy, teamApproval: false })).not.toContain("Roster approval is required");
   });
+  it("offers preset candidates to the lead only, and only when the preset has some", () => {
+    const ts = "2026-11-10T00:00:00.000Z";
+    const team: TeamRecord = { source: "preset", members: [], changes: [], proposals: [], updatedAt: ts, candidates: [{ id: "c1", agentId: "codex", model: "gpt-x", thinking: "high", description: "前端、CSS 动画" }, { id: "c2", agentId: "pi" }] };
+    const preset = { ...policy, mode: "preset" as const };
+    const lead = systemPrompt(root, preset, [agent("codex", "gpt-x")], team);
+    expect(lead).toContain("hire preset candidates into roles you name");
+    expect(lead).toContain("- c1: codex / gpt-x, thinking high — 前端、CSS 动画");
+    expect(lead).toContain("- c2: pi / default model (currently unavailable) — no description");
+    expect(lead).toContain("matching the task to its model and description");
+    expect(lead).toContain('call delegate with candidate: "<id>" and role: "<a new role name>"');
+    expect(lead).toContain("hiring needs no roster approval");
+    const without = systemPrompt(root, preset, [], { ...team, candidates: undefined });
+    expect(without).not.toContain("candidate"); expect(without).toContain("2. Use the preset roster below. Delegate only by role");
+    expect(systemPrompt({ ...child, role: "builder" }, preset, [], team)).not.toContain("candidate");
+    expect(systemPrompt(root, policy, [], team)).not.toContain("Preset candidates");
+  });
   it("tells agents at the depth limit to do the work themselves", () => {
     const text = systemPrompt({ ...child, depth: 3 }, policy);
     expect(text).toContain("maximum delegation depth (3)");
