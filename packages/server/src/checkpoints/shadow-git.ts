@@ -156,10 +156,14 @@ export class ShadowGit {
   }
   private async baseExcludes(work: string): Promise<string[]> {
     const lines = ["# baton shadow checkpoint excludes (regenerated)"];
-    // The project's own .git/info/exclude (read only; never written).
-    const project = await this.git(["rev-parse", "--git-path", "info/exclude"], { gitDir: null, cwd: work }).then((out) => out.trim(), () => "");
-    if (project) {
-      const content = await readFile(isAbsolute(project) ? project : join(work, project), "utf8").catch(() => "");
+    // Inside a project repository, ask it (read only) what it ignores under the cwd: every .gitignore
+    // up to the repository root and its .git/info/exclude apply, even when the cwd is a subdirectory.
+    const ignored = await this.git(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"], { gitDir: null, cwd: work, maxEntries: 20_000 }).catch(() => undefined);
+    if (ignored !== undefined) lines.push(...ignored.split("\0").filter(Boolean).map(literalExclude));
+    else {
+      // Not a repository (or too many ignored paths): the project's info/exclude file, if any.
+      const project = await this.git(["rev-parse", "--git-path", "info/exclude"], { gitDir: null, cwd: work }).then((out) => out.trim(), () => "");
+      const content = project ? await readFile(isAbsolute(project) ? project : join(work, project), "utf8").catch(() => "") : "";
       if (content) lines.push(...content.split(/\r?\n/));
     }
     for (const path of [...this.options.exclude, this.options.root]) {
@@ -184,7 +188,7 @@ export class ShadowGit {
     return changes.sort((a, b) => a.path.localeCompare(b.path));
   }
   private git(args: string[], options: { gitDir: string | null; work?: string; cwd?: string; literal?: boolean; okCodes?: number[]; maxEntries?: number }): Promise<string> {
-    const config = ["-c", "core.fsmonitor=false", "-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "-c", "core.quotepath=false", "-c", "gc.auto=0", "-c", "commit.gpgsign=false", "-c", "advice.addEmbeddedRepo=false", "-c", `core.hooksPath=${join(this.options.root, "no-hooks")}`, "-c", "maintenance.auto=false"];
+    const config = ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "-c", "core.quotepath=false", "-c", "gc.auto=0", "-c", "commit.gpgsign=false", "-c", "advice.addEmbeddedRepo=false", "-c", `core.hooksPath=${join(this.options.root, "no-hooks")}`, "-c", "maintenance.auto=false"];
     const location = options.gitDir ? [`--git-dir=${options.gitDir}`, `--work-tree=${options.work}`] : [];
     const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_AUTHOR_NAME: "baton", GIT_AUTHOR_EMAIL: "baton@localhost", GIT_COMMITTER_NAME: "baton", GIT_COMMITTER_EMAIL: "baton@localhost", LC_ALL: "C" };
     for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES", "GIT_PREFIX"]) delete env[key];

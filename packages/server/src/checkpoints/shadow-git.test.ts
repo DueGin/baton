@@ -95,6 +95,26 @@ describe("shadow git checkpoints", () => {
     expect((await readdir(root)).some((name) => name.endsWith(".git"))).toBe(true);
   });
 
+  it("applies a parent repository's ignore rules to a subdirectory cwd", async () => {
+    const { base, git: shadow } = await setup();
+    const repo = join(base, "mono"), cwd = join(repo, "packages", "web");
+    await mkdir(join(cwd, "node_modules", "dep"), { recursive: true });
+    git(repo, "init", "-q");
+    await writeFile(join(repo, ".gitignore"), "node_modules/\n*.tmp\n");
+    await writeFile(join(cwd, "index.ts"), "v1");
+    await writeFile(join(cwd, "node_modules", "dep", "x.js"), "dep");
+    const snapshot = ref(await shadow.snapshot(cwd));
+    await writeFile(join(cwd, "scratch.tmp"), "ignored");
+    await writeFile(join(cwd, "node_modules", "dep", "y.js"), "dep");
+    await writeFile(join(cwd, "index.ts"), "v2");
+    expect(await shadow.changes(cwd, snapshot)).toEqual([{ path: "index.ts", status: "modified" }]);
+    await shadow.restore(cwd, snapshot);
+    expect(existsSync(join(cwd, "scratch.tmp"))).toBe(true);
+    expect(existsSync(join(cwd, "node_modules", "dep", "y.js"))).toBe(true);
+    expect(await readFile(join(cwd, "index.ts"), "utf8")).toBe("v1");
+    expect(git(repo, "status", "--porcelain")).toBe("?? .gitignore\n?? packages/\n");
+  });
+
   it("leaves oversized files and the baton home out of snapshots", async () => {
     const { cwd, git: shadow } = await setup({ maxFileBytes: 1024 });
     const home = join(cwd, ".baton-home");
