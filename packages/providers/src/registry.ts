@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import pLimit from "p-limit";
 import { z } from "zod";
 import type { Logger } from "pino";
-import type { AgentCapabilities, AgentClient, AgentProvider, ProviderCatalog } from "./agent-sdk-types.js";
+import type { AgentCapabilities, AgentClient, AgentProvider, ProviderCatalog, SaveImage } from "./agent-sdk-types.js";
 import { ACPAgentClient } from "./providers/acp-agent.js";
 import { ClaudeAgentClient } from "./providers/claude-agent.js";
 import { CodexAppServerAgentClient } from "./providers/codex-agent.js";
@@ -57,6 +57,8 @@ export interface ProviderRegistryOptions {
     home: string;
     logger?: Logger;
     timeoutMs?: number;
+    /** Passed to every client: stores images agents return. */
+    saveImage?: SaveImage;
 }
 export class ProviderRegistry {
     private cache?: Promise<DetectedAgent[]>;
@@ -75,7 +77,7 @@ export class ProviderRegistry {
         return {
             id: definition.id, label: definition.label, kind: definition.provider === "acp" ? "acp" : "native", status: "unavailable", enabled: definition.enabled,
             command: definition.command, installHint: definition.spec?.installHint ?? `Install ${definition.label} and put ${definition.command[0]} on PATH.`, homepage: definition.spec?.homepage, minVersion: definition.spec?.minVersion, source: definition.source ?? "builtin", models: definition.models ?? [], modes: [], notes: definition.notes, checkedAt: new Date().toISOString(),
-            capabilities: { steer: definition.provider !== "acp", resume: true, reasoning: true, mcp: definition.spec?.mcp.http ?? true }, ...(diagnostic ? { diagnostic } : {}),
+            capabilities: { steer: definition.provider !== "acp", resume: true, reasoning: true, mcp: definition.spec?.mcp.http ?? true, images: definition.provider === "acp" ? definition.spec?.images ?? false : true }, ...(diagnostic ? { diagnostic } : {}),
         };
     }
     private async definitions(): Promise<Definition[]> {

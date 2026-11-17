@@ -9,7 +9,28 @@ const send = frame => process.stdout.write(JSON.stringify(frame) + '\n');
 const notify = (method, params) => send({ jsonrpc: '2.0', method, params });
 const sessionId = 'fake-session';
 const model = { id: 'fake-model', model: 'fake-model', displayName: 'Fake model', isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: 'high' }], defaultReasoningEffort: 'high' };
+// 1×1 PNG returned by the "images" scenario (tool output, view_image, image generation).
+const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+const promptText = blocks => (blocks ?? []).filter(block => block.type === 'text').map(block => block.text).join('');
 const reply = (message, result = {}) => kind === 'pi' ? send({ type: 'response', id: message.id, command: message.type, success: true, data: result }) : send({ jsonrpc: '2.0', id: message.id, result });
+function images() {
+ if (kind === 'codex') {
+  const ids = { threadId: sessionId, turnId: `turn-${turn}` };
+  notify('item/completed', { ...ids, item: { id: 'mcp-1', type: 'mcpToolCall', server: 'browser', tool: 'screenshot', arguments: {}, status: 'completed', result: { content: [{ type: 'text', text: 'captured' }, { type: 'image', data: png, mimeType: 'image/png' }] }, error: null } });
+  notify('item/completed', { ...ids, item: { id: 'view-1', type: 'imageView', path: process.env.FAKE_IMAGE_PATH } });
+  notify('item/started', { ...ids, item: { id: 'gen-1', type: 'imageGeneration', status: 'inProgress' } });
+  notify('item/completed', { ...ids, item: { id: 'gen-1', type: 'imageGeneration', status: 'completed', revisedPrompt: 'a red dot', result: png } });
+ } else if (kind === 'pi') {
+  send({ type: 'tool_execution_start', toolCallId: 'shot-1', toolName: 'screenshot', args: {} });
+  send({ type: 'tool_execution_end', toolCallId: 'shot-1', toolName: 'screenshot', result: { content: [{ type: 'text', text: 'captured' }, { type: 'image', data: png, mimeType: 'image/png' }] }, isError: false });
+ } else {
+  const update = u => notify('session/update', { sessionId, update: u });
+  update({ sessionUpdate: 'tool_call', toolCallId: 'shot-1', title: 'Screenshot', kind: 'other', status: 'in_progress' });
+  update({ sessionUpdate: 'tool_call_update', toolCallId: 'shot-1', status: 'completed', content: [{ type: 'content', content: { type: 'image', data: png, mimeType: 'image/png' } }] });
+  update({ sessionUpdate: 'agent_message_chunk', content: { type: 'image', data: png, mimeType: 'image/png' } });
+ }
+ complete();
+}
 function complete() {
  if (kind === 'codex') {
   notify('item/reasoning/summaryTextDelta', { threadId: sessionId, turnId: `turn-${turn}`, itemId: 'thinking', delta: 'thinking' });
@@ -55,16 +76,16 @@ createInterface({ input: process.stdin }).on('line', line => {
  if (permissions.has(message.id)) { const callback = permissions.get(message.id); permissions.delete(message.id); callback(); return; }
  if (kind === 'pi') {
   switch (message.type) {
-   case 'get_state': return reply(message, { sessionId, sessionFile: `${process.env.BATON_HOME}/pi-session.jsonl`, model: { provider: 'fake', id: 'fake-model' } });
+   case 'get_state': return reply(message, { sessionId, sessionFile: `${process.env.BATON_HOME}/pi-session.jsonl`, model: { provider: 'fake', id: 'fake-model', input: process.env.FAKE_IMAGE_INPUT === '1' ? ['text', 'image'] : ['text'] } });
    case 'get_available_models': return reply(message, { models: [{ provider: 'fake', id: 'fake-model', name: 'Fake', reasoning: true }] });
    case 'get_commands': return reply(message, { commands: process.env.FAKE_MCP === 'none' ? [] : [{ name: 'mcp', source: 'extension', sourceInfo: { path: process.env.FAKE_MCP === 'adapter' ? '/extensions/pi-mcp-adapter/index.ts' : 'builtin:mcp' } }] });
-   case 'prompt': turn++; reply(message); if (message.message.includes('hold')) return; if (message.message.includes('permission')) return askPermission(); if (message.message.includes('exit')) return process.exit(3); return complete();
+   case 'prompt': turn++; reply(message); if (message.message.includes('images')) return images(); if (message.message.includes('hold')) return; if (message.message.includes('permission')) return askPermission(); if (message.message.includes('exit')) return process.exit(3); return complete();
    case 'steer': reply(message); return complete();
    case 'abort': reply(message); return send({ type: 'agent_end', messages: [] });
    default: return reply(message);
   }
  }
- if (message.method === 'initialize') return reply(message, kind === 'acp' ? { protocolVersion: 1, _meta: { models: { currentModelId: 'fake-model', availableModels: [{ modelId: 'fake-model', name: 'Fake model' }] } }, agentInfo: { name: 'fake', version: '1' }, agentCapabilities: { loadSession: true, mcpCapabilities: { http: true, sse: true } } } : {});
+ if (message.method === 'initialize') return reply(message, kind === 'acp' ? { protocolVersion: 1, _meta: { models: { currentModelId: 'fake-model', availableModels: [{ modelId: 'fake-model', name: 'Fake model' }] } }, agentInfo: { name: 'fake', version: '1' }, agentCapabilities: { loadSession: true, mcpCapabilities: { http: true, sse: true }, promptCapabilities: { image: process.env.FAKE_IMAGE_INPUT === '1' } } } : {});
  if (message.method === 'cursor/list_available_models') return reply(message, { models: [{ value: 'cursor-model', name: 'Cursor Model' }] });
  if (message.method === 'fake/env') return reply(message, { models: [{ value: process.env.COPILOT_ALLOW_ALL ?? 'scrubbed', name: 'env' }] });
  if (message.method === 'initialized') return;
@@ -75,13 +96,14 @@ createInterface({ input: process.stdin }).on('line', line => {
  if (message.method === 'turn/start') {
   turn++; reply(message, { turn: { id: `turn-${turn}` } });
   notify('turn/started', { threadId: sessionId, turn: { id: `turn-${turn}` } });
-  const prompt = message.params.input[0].text;
+  const prompt = promptText(message.params.input);
+  if (prompt.includes('images')) return images();
   if (prompt.includes('hold')) { notify('item/started', { threadId: sessionId, turnId: `turn-${turn}`, item: { id: 'live-shell', type: 'commandExecution', command: 'wait', cwd: process.cwd(), status: 'inProgress', commandActions: [], processId: 'process-42' } }); return; }
   if (prompt.includes('permission')) return askPermission();
   if (prompt.includes('exit')) return process.exit(3);
   return complete();
  }
- if (kind === 'acp' && message.method === 'session/prompt' && message.params.prompt[0].text.includes('terminal')) {
+ if (kind === 'acp' && message.method === 'session/prompt' && promptText(message.params.prompt).includes('terminal')) {
   pendingPrompt = message;
   const terminalRequestId = ++requestId;
   permissions.set(terminalRequestId, () => complete());
@@ -90,7 +112,8 @@ createInterface({ input: process.stdin }).on('line', line => {
  }
  if (message.method === 'session/prompt') {
   pendingPrompt = message; turn++;
-  const prompt = message.params.prompt[0].text;
+  const prompt = promptText(message.params.prompt);
+  if (prompt.includes('images')) return images();
   if (prompt.includes('hold')) { notify('item/started', { threadId: sessionId, turnId: `turn-${turn}`, item: { id: 'live-shell', type: 'commandExecution', command: 'wait', cwd: process.cwd(), status: 'inProgress', commandActions: [], processId: 'process-42' } }); return; }
   if (prompt.includes('elicitation')) {
    const id = ++requestId;

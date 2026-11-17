@@ -116,6 +116,8 @@ interface ToolCallBase {
     name: string;
     detail: ToolCallDetail;
     metadata?: Record<string, unknown>;
+    /** Images the tool returned, stored through ClientOptions.saveImage (baton). */
+    images?: AgentImageRef[];
 }
 type ToolCallRunningTimelineItem = ToolCallBase & {
     status: "running";
@@ -173,7 +175,31 @@ export interface AgentCapabilities {
     resume: boolean;
     reasoning: boolean;
     mcp: boolean;
+    /** Accepts image parts in a prompt (baton). Sessions still fall back to a text note per model/agent. */
+    images?: boolean;
 }
+/** baton: a prompt is plain text or ordered text/image parts (images at their position in the text). */
+export type AgentPromptPart = {
+    type: "text";
+    text: string;
+} | {
+    type: "image";
+    /** Absolute path of a stored image file. */
+    path: string;
+    mimeType: string;
+    name?: string;
+};
+export type AgentPromptInput = string | AgentPromptPart[];
+/** baton: an image stored by the host (same shape as @baton/protocol AttachmentRef). */
+export interface AgentImageRef {
+    id: string;
+    mimeType: string;
+    name?: string;
+    width?: number;
+    height?: number;
+}
+/** baton: host service that stores an image an agent produced. `data` is raw bytes or base64 (a data: URI is accepted). */
+export type SaveImage = (data: Uint8Array | string, mimeType: string, name?: string) => Promise<AgentImageRef>;
 export interface AgentSessionConfig {
     cwd: string;
     model?: string;
@@ -289,10 +315,10 @@ export interface AgentSession {
     processIds?(): number[];
     readonly sessionId: string | null;
     getPersistence(): AgentPersistenceHandle | null;
-    startTurn(prompt: string): Promise<{
+    startTurn(prompt: AgentPromptInput): Promise<{
         turnId: string;
     }>;
-    steerActiveTurn?(prompt: string): Promise<boolean>;
+    steerActiveTurn?(prompt: AgentPromptInput): Promise<boolean>;
     interrupt(): Promise<void>;
     respondToPermission(id: string, response: AgentPermissionResponse): Promise<void>;
     pendingPermissions(): AgentPermissionRequest[];
@@ -316,4 +342,6 @@ export interface ClientOptions {
     env?: Record<string, string>;
     logger?: import("pino").Logger;
     timeoutMs?: number;
+    /** Stores images agents return (tool output, generated images). Without it they are dropped. */
+    saveImage?: SaveImage;
 }

@@ -36,7 +36,15 @@ export interface OpenSessionSpec {
   title?: string;
 }
 
-export type PromptInput = string;
+/**
+ * A prompt is plain text, or ordered text/image parts with each image at its position in the
+ * text. Image parts point at a stored attachment file; drivers whose agent cannot take an image
+ * send the path as a text note instead. Only sent to drivers whose capabilities.images is true.
+ */
+export type PromptPart =
+  | { type: "text"; text: string }
+  | { type: "image"; /** Absolute path of the stored attachment. */ path: string; mimeType: string; name?: string };
+export type PromptInput = string | PromptPart[];
 
 export type DriverEvent =
   | { type: "session"; sessionId: string }

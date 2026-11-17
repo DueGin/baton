@@ -4,10 +4,19 @@ import { terminateProcessIds } from "@baton/providers";
 import { setTimeout as delay } from "node:timers/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { AgentEntry, BatonToolName, JsonValue, PermissionRequest, PermissionResponse, TimelineItem, Usage } from "@baton/protocol";
-import type { AgentDriver, DriverEvent, DriverRegistry, DriverSession, OpenSessionSpec, SteerOutcome } from "./types.js";
+import type { AgentEntry, AttachmentRef, BatonToolName, JsonValue, PermissionRequest, PermissionResponse, TimelineItem, Usage } from "@baton/protocol";
+import type { AgentDriver, DriverEvent, DriverRegistry, DriverSession, OpenSessionSpec, PromptInput, PromptPart, SteerOutcome } from "./types.js";
+type ImagePart = Extract<PromptPart, { type: "image" }>;
+/** Text a fake agent "sees": image parts are echoed as `[image name]`. */
+export function fakePromptText(prompt: PromptInput): string {
+  return typeof prompt === "string" ? prompt : prompt.map((part) => part.type === "text" ? part.text : `[image ${part.name ?? part.path.split(/[\\/]/).at(-1)}]`).join("");
+}
 export interface FakeContext {
-  prompt: string; turn: number; spec: OpenSessionSpec; signal: AbortSignal;
+  /** Prompt text; image parts appear as `[image name]`. */
+  prompt: string;
+  /** The prompt exactly as the kernel sent it (string or text/image parts). */
+  input: PromptInput; images: ImagePart[];
+  turn: number; spec: OpenSessionSpec; signal: AbortSignal;
   text(text: string): void; reasoning(text: string): void; item(item: TimelineItem): void;
   usage(usage: Usage): void; sleep(ms: number): Promise<void>;
   call<T = unknown>(tool: BatonToolName, input: Record<string, unknown>): Promise<T>;
@@ -15,14 +24,18 @@ export interface FakeContext {
   steered: string[];
   /** Real subprocess, parented by this fake session's agent supervisor; caller owns cleanup. */
   spawn(command: string, args?: string[], options?: { detached?: boolean }): Promise<number>;
+  /** Stores an image the way real drivers store tool output (startServer wires the attachment store). */
+  saveImage(data: Uint8Array | string, mimeType: string, name?: string): Promise<AttachmentRef>;
 }
+export type FakeSaveImage = (data: Uint8Array | string, mimeType: string, name?: string) => Promise<AttachmentRef>;
 export type FakeScript = (context: FakeContext) => Promise<void> | void;
-export interface FakeDriverOptions { script?: FakeScript; scripts?: FakeScript[]; steer?: boolean; label?: string }
-const capabilities = { steer: true, resume: true, reasoning: true, mcp: true };
+export interface FakeDriverOptions { script?: FakeScript; scripts?: FakeScript[]; steer?: boolean; label?: string; /** Accept image parts (default true). */ images?: boolean }
+const capabilities = { steer: true, resume: true, reasoning: true, mcp: true, images: true };
 export class FakeDriver implements AgentDriver {
   readonly capabilities: AgentEntry["capabilities"];
   readonly sessions: FakeSession[] = [];
-  constructor(readonly agentId: string, readonly options: FakeDriverOptions = {}) { this.capabilities = { ...capabilities, steer: options.steer ?? true }; }
+  saveImage?: FakeSaveImage;
+  constructor(readonly agentId: string, readonly options: FakeDriverOptions = {}) { this.capabilities = { ...capabilities, steer: options.steer ?? true, images: options.images ?? true }; }
   async open(spec: OpenSessionSpec): Promise<FakeSession> {
     const session = new FakeSession(this, spec); this.sessions.push(session); return session;
   }
@@ -39,6 +52,8 @@ export class FakeSession implements DriverSession {
   supportsLongToolCalls(): boolean { return true; }
   sessionId: string = randomUUID(); turns = 0; closed = false;
   readonly prompts: string[] = []; readonly steered: string[] = [];
+  /** Raw inputs of prompts / steered, in the same order. */
+  readonly inputs: PromptInput[] = []; readonly steeredInputs: PromptInput[] = [];
   private listeners = new Set<(event: DriverEvent) => void>();
   private active?: { id: string; controller: AbortController; promise: Promise<void> };
   private permissions = new Map<string, { request: PermissionRequest; resolve: (response: PermissionResponse) => void }>();
@@ -70,13 +85,14 @@ export class FakeSession implements DriverSession {
   subscribe(listener: (event: DriverEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   private emit(event: DriverEvent): void { for (const listener of this.listeners) { try { listener(event); } catch { /* driver contract: never throw from listeners */ } } }
   async runtimeInfo(): Promise<{ model: string; modeId: string }> { return { model: this.spec.model ?? "fake-model", modeId: this.spec.modeId ?? "default" }; }
-  async startTurn(prompt: string): Promise<{ turnId: string }> {
+  async startTurn(input: PromptInput): Promise<{ turnId: string }> {
     if (this.closed) throw new Error("Fake session is closed");
     if (this.active) throw new Error("Fake session already has an active turn");
-    const id = randomUUID(), controller = new AbortController(); this.turns++; this.prompts.push(prompt);
+    const prompt = fakePromptText(input), images = typeof input === "string" ? [] : input.filter((part): part is ImagePart => part.type === "image");
+    const id = randomUUID(), controller = new AbortController(); this.turns++; this.prompts.push(prompt); this.inputs.push(input);
     const item = (value: TimelineItem): void => { controller.signal.throwIfAborted(); this.emit({ type: "item", turnId: id, item: value, timestamp: new Date().toISOString() }); };
     const context: FakeContext = {
-      prompt, turn: this.turns, spec: this.spec, signal: controller.signal,
+      prompt, input, images, turn: this.turns, spec: this.spec, signal: controller.signal,
       text: (text) => item({ type: "assistant_message", text }), reasoning: (text) => item({ type: "reasoning", text }), item,
       usage: (usage) => this.emit({ type: "usage", turnId: id, usage }),
       sleep: async (ms) => { await delay(ms, undefined, { signal: controller.signal }); },
@@ -101,6 +117,10 @@ export class FakeSession implements DriverSession {
           if (!controller.signal.aborted) item({ type: "tool_call", callId, name: `mcp__baton__${tool}`, status: "failed", error: error instanceof Error ? error.message : String(error), detail: { type: "unknown", input, output: null } });
           throw error;
         }
+      },
+      saveImage: (data, mimeType, name) => {
+        const save = this.driver.saveImage;
+        return save ? save(data, mimeType, name) : Promise.reject(new Error("No attachment store attached to the fake driver"));
       },
       permission: (request) => new Promise((resolve) => {
         this.permissions.set(request.id, { request, resolve }); this.emit({ type: "permission_requested", turnId: id, request });
@@ -129,10 +149,10 @@ export class FakeSession implements DriverSession {
     })();
     return this.connecting;
   }
-  async steer(prompt: string): Promise<SteerOutcome> {
+  async steer(input: PromptInput): Promise<SteerOutcome> {
     if (!this.driver.capabilities.steer) return "unsupported";
     if (!this.active) return "no_active_turn";
-    this.steered.push(prompt); return "steered";
+    this.steered.push(fakePromptText(input)); this.steeredInputs.push(input); return "steered";
   }
   async interrupt(): Promise<void> {
     const active = this.active; if (!active) return;
@@ -149,6 +169,8 @@ export class FakeSession implements DriverSession {
 }
 export class FakeDriverRegistry implements DriverRegistry {
   readonly drivers: Map<string, FakeDriver>;
+  /** Set by startServer: lets fake scripts store images through the attachment store. */
+  set saveImage(save: FakeSaveImage) { for (const driver of this.drivers.values()) driver.saveImage = save; }
   constructor(scripts?: Record<string, FakeScript | FakeDriverOptions> | FakeDriver[]) {
     const drivers = Array.isArray(scripts) ? scripts : Object.entries(scripts ?? { "fake-claude": { label: "Claude · demo" }, "fake-codex": { label: "Codex · demo" }, "fake-pi": { label: "Pi · demo" } }).map(([id, value]) => new FakeDriver(id, typeof value === "function" ? { script: value } : value));
     this.drivers = new Map(drivers.map((d) => [d.agentId, d]));
@@ -195,6 +217,7 @@ async function legacyDemoScript(c: FakeContext): Promise<void> {
 
 /** The default console demo deliberately stops at the human approval gate. */
 async function demoScript(c: FakeContext): Promise<void> {
+  if (c.images.length) c.text(`I received ${c.images.length === 1 ? "an image" : `${c.images.length} images`}: ${c.images.map((image) => `[image ${image.name ?? "unnamed"}]`).join(", ")}.\n\n`);
   if (c.prompt === "legacy demo" || c.spec.title === "legacy demo" || ["Review the implementation", "Research options", "Integration check", "Check test coverage"].includes(c.spec.title ?? "")) return legacyDemoScript(c);
   if (c.spec.systemPrompt?.includes("SOLO mode")) { c.text("I completed the demo request independently and verified the result."); return; }
   if (c.prompt.includes("<baton-assignment")) {

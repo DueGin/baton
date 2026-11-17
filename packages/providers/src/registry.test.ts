@@ -54,5 +54,28 @@ describe("provider detection", () => {
         const { readFile } = await import("node:fs/promises");
         expect(await readFile(join(home, "frames.jsonl"), "utf8")).not.toContain("session/new");
     });
+    it("reports image capability per agent and hands saveImage to every client", async () => {
+        await writeFile(join(home, "config.json"), JSON.stringify({ agents: { ...disabled,
+            seeing: { extends: "acp", command: [process.execPath, fixture, "acp"], env: { FAKE_IMAGE_INPUT: "1" }, images: true, installHint: "x", homepage: "https://example.test" },
+            blind: { extends: "acp", command: [process.execPath, fixture, "acp"], env: { FAKE_IMAGE_INPUT: "1" }, installHint: "x", homepage: "https://example.test" },
+            native: { extends: "codex", command: [process.execPath, fixture, "codex"], env: { BATON_HOME: home } } } }));
+        const saved: string[] = [];
+        const registry = new ProviderRegistry({ home, timeoutMs: 3000, saveImage: async (data, mimeType) => { saved.push(String(data)); return { id: `att_${saved.length}`, mimeType }; } });
+        const entries = await registry.detect();
+        expect(entries.find(entry => entry.id === "seeing")?.capabilities.images).toBe(true);
+        expect(entries.find(entry => entry.id === "blind")?.capabilities.images).toBe(false);
+        expect(entries.find(entry => entry.id === "native")?.capabilities.images).toBe(true);
+        expect(entries.find(entry => entry.id === "claude")?.capabilities.images).toBe(true);
+        const session = await registry.get("native")!.createSession({ cwd: home });
+        try {
+            const done = new Promise<void>(resolve => session.subscribe(event => { if (event.type === "turn_completed") resolve(); }));
+            await session.startTurn("images");
+            await done;
+            expect(saved.length).toBeGreaterThan(0);
+        }
+        finally {
+            await session.close();
+        }
+    });
 
 });

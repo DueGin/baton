@@ -1,6 +1,7 @@
 // Ported from Paseo (https://github.com/getpaseo/paseo) packages/server/src/server/agent/providers/provider-runner.ts @63ea3e5 — Copyright (c) 2025-present Mohamed Boudra, Apache-2.0. Modified for baton.
 import { randomUUID } from "node:crypto";
-import type { AgentPersistenceHandle, AgentPermissionRequest, AgentPermissionResponse, AgentProvider, AgentSession, AgentSessionConfig, AgentStreamEvent, AgentTimelineItem, AgentUsage } from "./agent-sdk-types.js";
+import type { AgentPersistenceHandle, AgentPermissionRequest, AgentPermissionResponse, AgentPromptInput, AgentProvider, AgentSession, AgentSessionConfig, AgentStreamEvent, AgentTimelineItem, AgentUsage } from "./agent-sdk-types.js";
+import { promptText } from "./images.js";
 export function record(value: unknown): Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 export function text(value: unknown): string { return typeof value === "string" ? value : ""; }
 export function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
@@ -32,7 +33,7 @@ export abstract class ProviderSession implements AgentSession {
     protected identify(id: string): void { if (this.sessionId === id)
         return; this.sessionId = id; this.emit({ type: "thread_started", sessionId: id }); }
     protected timeline(item: AgentTimelineItem): void { this.emit({ type: "timeline", item, timestamp: new Date().toISOString(), ...(this.activeTurn ? { turnId: this.activeTurn } : {}) }); }
-    async startTurn(prompt: string): Promise<{
+    async startTurn(prompt: AgentPromptInput): Promise<{
         turnId: string;
     }> {
         if (this.closed)
@@ -43,7 +44,7 @@ export abstract class ProviderSession implements AgentSession {
         this.activeTurn = turnId;
         this.turnDone = new Promise(resolve => { this.resolveDone = resolve; });
         this.emit({ type: "turn_started", turnId });
-        this.timeline({ type: "user_message", text: prompt });
+        this.timeline({ type: "user_message", text: promptText(prompt) });
         try {
             await this.launchTurn(prompt);
         }
@@ -54,7 +55,7 @@ export abstract class ProviderSession implements AgentSession {
         }
         return { turnId };
     }
-    protected abstract launchTurn(prompt: string): Promise<void>;
+    protected abstract launchTurn(prompt: AgentPromptInput): Promise<void>;
     protected finish(status: "completed" | "failed" | "canceled", message?: string, usage?: AgentUsage): void {
         const turnId = this.activeTurn;
         if (!turnId)

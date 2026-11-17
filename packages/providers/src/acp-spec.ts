@@ -27,6 +27,9 @@ export const AcpSpecFields = {
   noScratchSession: z.boolean().default(true),
   elicitation: z.object({ form: z.boolean(), url: z.boolean() }).default({ form: true, url: true }),
   longToolCalls: z.boolean().default(false),
+  /** Offer image prompt parts (AgentEntry.capabilities.images). Only for agents known to advertise
+   * promptCapabilities.image; the session still checks the agent's initialize response. */
+  images: z.boolean().default(false),
   /** Budget for initialize / session setup RPCs. Some agents (OpenCode ~11 s cold) start slowly. */
   startupTimeoutMs: z.number().int().positive().default(30000),
   toolTimeout: z.object({ env: z.string(), milliseconds: z.number().int().positive() }).optional(),
@@ -42,10 +45,12 @@ function spec(id: string, label: string, command: string[], homepage: string, ex
   return AcpAgentSpecSchema.parse({ id, label, command, homepage, installHint: `Install ${label}: ${homepage}`, mcp: HTTP_MCP, ...extra });
 }
 export const ACP_AGENT_SPECS: readonly AcpAgentSpec[] = [
-  spec("gemini", "Gemini CLI", ["gemini", "--acp"], "https://geminicli.com", { npx: ["npx", "-y", "@google/gemini-cli", "--acp"] }),
-  spec("qwen", "Qwen Code", ["qwen", "--acp"], "https://qwenlm.github.io/qwen-code-docs/en/users/overview", { npx: ["npx", "-y", "@qwen-code/qwen-code", "--acp"], modeMap: { unattended: ["yolo"], readOnly: ["plan"] } }),
-  spec("kimi", "Kimi Code", ["kimi", "acp"], "https://github.com/MoonshotAI/kimi-code", { minVersion: "2.5.0", env: { KIMI_CODE_NO_AUTO_UPDATE: "1" }, dialect: "kimi", modeMap: { unattended: ["auto"], readOnly: [] }, notes: "Kimi ACP: auto never asks; yolo still asks about risky actions. Mode names are counterintuitive (Orca evidence)." }),
-  spec("opencode", "OpenCode", ["opencode", "acp"], "https://opencode.ai/docs/acp/", { startupTimeoutMs: 60000, minVersion: "1.18.31", versionFloors: { "1": "1.18.31", "2": "2.0.14" }, env: { OPENCODE_CLIENT: "acp", OPENCODE_ENABLE_QUESTION_TOOL: "false" }, dialect: "opencode", npx: ["npx", "-y", "--package=opencode-ai", "--", "opencode", "acp"], modeMap: { unattended: [], readOnly: ["plan"] }, notes: "1.x cannot answer ACP questions; 2.x ignores the guard and negotiates form elicitation. ACP retained deliberately." }),
+  // images: initialize advertises promptCapabilities.image — Gemini CLI acpRpcDispatcher.ts (main, 2026-11-18),
+  // Qwen Code 0.27.4 bundle, OpenCode 1.19.5 binary, Kimi Code docs/en/reference/kimi-acp.md.
+  spec("gemini", "Gemini CLI", ["gemini", "--acp"], "https://geminicli.com", { npx: ["npx", "-y", "@google/gemini-cli", "--acp"], images: true }),
+  spec("qwen", "Qwen Code", ["qwen", "--acp"], "https://qwenlm.github.io/qwen-code-docs/en/users/overview", { npx: ["npx", "-y", "@qwen-code/qwen-code", "--acp"], modeMap: { unattended: ["yolo"], readOnly: ["plan"] }, images: true }),
+  spec("kimi", "Kimi Code", ["kimi", "acp"], "https://github.com/MoonshotAI/kimi-code", { images: true, minVersion: "2.5.0", env: { KIMI_CODE_NO_AUTO_UPDATE: "1" }, dialect: "kimi", modeMap: { unattended: ["auto"], readOnly: [] }, notes: "Kimi ACP: auto never asks; yolo still asks about risky actions. Mode names are counterintuitive (Orca evidence)." }),
+  spec("opencode", "OpenCode", ["opencode", "acp"], "https://opencode.ai/docs/acp/", { images: true, startupTimeoutMs: 60000, minVersion: "1.18.31", versionFloors: { "1": "1.18.31", "2": "2.0.14" }, env: { OPENCODE_CLIENT: "acp", OPENCODE_ENABLE_QUESTION_TOOL: "false" }, dialect: "opencode", npx: ["npx", "-y", "--package=opencode-ai", "--", "opencode", "acp"], modeMap: { unattended: [], readOnly: ["plan"] }, notes: "1.x cannot answer ACP questions; 2.x ignores the guard and negotiates form elicitation. ACP retained deliberately." }),
   spec("omp", "Oh My Pi", ["omp", "acp"], "https://github.com/can1357/oh-my-pi", { minVersion: "17.0.5", env: { PI_NO_PTY: "1" }, notes: "ACP transport; catalog from initialize/config only. No persistent listing session." }),
   spec("copilot", "GitHub Copilot", ["copilot", "--acp", "--stdio"], "https://github.com/github/copilot-cli", { minVersion: "1.0.88", scrubEnv: ["COPILOT_ALLOW_ALL"], noScratchSession: true, modelDiscovery: "static", dialect: "copilot", modeMap: { unattended: ["allow-all"], readOnly: ["https://agentclientprotocol.com/protocol/session-modes#plan"] }, notes: "Every session is retained upstream; catalog never opens one. Managed policy env remains intact." }),
   spec("cursor", "Cursor", ["cursor-agent", "--disable-auto-update", "acp"], "https://docs.cursor.com/en/cli/overview", { minVersion: "2026.10.21", modelDiscovery: "cursor", modelCatalogRpc: "cursor/list_available_models", noScratchSession: true, dialect: "cursor", modeMap: { unattended: ["yolo"], readOnly: ["plan", "ask"] } }),
