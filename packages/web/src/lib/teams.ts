@@ -1,4 +1,4 @@
-import type { AgentEntry, DelegationStatus, RunSnapshot, TeamActor, TeamChange, TeamMember, TeamMemberSpec, TeamPresetInput, TeamRecord } from "@baton/protocol";
+import type { AgentEntry, DelegationStatus, RunSnapshot, TeamActor, TeamCandidate, TeamCandidateSpec, TeamChange, TeamMember, TeamMemberSpec, TeamPresetInput, TeamRecord } from "@baton/protocol";
 
 export const collaborationLabels = { dynamic: "动态组队", preset: "预设团队", solo: "单独完成" };
 export const actorLabels: Record<TeamActor, string> = { human: "你", lead: "主导者", preset: "预设", agent: "Agent" };
@@ -24,8 +24,29 @@ export function validateMembers(members: TeamMemberSpec[]): string[] {
   });
   return errors;
 }
+/** Same agent, model, mode and thinking = the same candidate (the description does not make it different). */
+const candidateKey = (candidate: TeamCandidateSpec): string => JSON.stringify([candidate.agentId.trim(), candidate.model?.trim() ?? "", candidate.modeId ?? "", candidate.thinking ?? ""]);
+export function validateCandidates(candidates: TeamCandidateSpec[]): string[] {
+  const errors: string[] = []; const seen = new Set<string>();
+  candidates.forEach((candidate, index) => {
+    if (!candidate.agentId.trim()) { errors.push(`候选 ${index + 1}：请选择 agent`); return; }
+    const key = candidateKey(candidate);
+    if (seen.has(key)) errors.push(`候选重复：${candidate.agentId} · ${candidate.model?.trim() || "默认模型"}（agent、模型和思考级别都相同）`);
+    seen.add(key);
+  });
+  return errors;
+}
 export function validatePreset(preset: TeamPresetInput): string[] {
-  return [...(!preset.name.trim() ? ["请填写预设名称"] : []), ...(!preset.lead.agentId.trim() ? ["请选择 lead agent"] : []), ...validateMembers(preset.members)];
+  return [...(!preset.name.trim() ? ["请填写预设名称"] : []), ...(!preset.lead.agentId.trim() ? ["请选择 lead agent"] : []), ...validateMembers(preset.members), ...validateCandidates(preset.candidates ?? [])];
+}
+export function cleanCandidate(candidate: TeamCandidateSpec): TeamCandidateSpec {
+  return { agentId: candidate.agentId.trim(), ...(candidate.model?.trim() ? { model: candidate.model.trim() } : {}), ...(candidate.modeId ? { modeId: candidate.modeId } : {}), ...(candidate.thinking ? { thinking: candidate.thinking } : {}), ...(candidate.description?.trim() ? { description: candidate.description.trim() } : {}) };
+}
+/** "codex · gpt-5.3-codex · high" */
+export const candidateConfig = (candidate: TeamCandidateSpec): string => [candidate.agentId, candidate.model ?? "默认模型", candidate.thinking].filter(Boolean).join(" · ");
+/** Every member the lead hired from each of the run's candidates (any status, oldest first). */
+export function candidateRows(team?: TeamRecord): Array<{ candidate: TeamCandidate; hires: TeamMember[] }> {
+  return (team?.candidates ?? []).map(candidate => ({ candidate, hires: team?.members.filter(member => member.candidateId === candidate.id) ?? [] }));
 }
 export function cleanMember(member: TeamMemberSpec): TeamMemberSpec {
   return { role: member.role.trim(), agentId: member.agentId.trim(), ...(member.model ? { model: member.model } : {}), ...(member.modeId ? { modeId: member.modeId } : {}), ...(member.thinking ? { thinking: member.thinking } : {}), ...(member.responsibilities?.trim() ? { responsibilities: member.responsibilities.trim() } : {}) };
