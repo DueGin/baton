@@ -7,8 +7,9 @@ import "@xyflow/react/dist/style.css";
 import "./styles.css";
 import { highlightStyles } from "./highlight.js";
 import { installDesktopLinks } from "./desktop.js";
+import { installMenuDismiss } from "./lib/dismiss.js";
 
-installDesktopLinks();
+installDesktopLinks(); installMenuDismiss();
 const token = readToken(window.location, window.sessionStorage, window.history);
 const demo = new URLSearchParams(window.location.search).get("demo") === "1" || !token;
 const client = demo ? new DemoClient() : new ApiClient(token!);

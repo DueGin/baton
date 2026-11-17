@@ -7,6 +7,7 @@ import { errorText } from "../store.js";
 import { AgentMark, Icon, Toggle } from "./common.js";
 import { CopyButton } from "./CopyButton.js";
 import { Modal } from "./TeamForms.js";
+import { useDismiss } from "../lib/dismiss.js";
 
 function Ports({ ports }: { ports: number[] }) { return <>{backgroundPorts(ports).map(port => <a className="background-port" key={port} href={`http://localhost:${port}`} target="_blank" rel="noopener noreferrer">:{port} ↗</a>)}</>; }
 export function BackgroundPill({ snapshot, open, controls, onClick }: { snapshot: RunSnapshot; open: boolean; controls: string; onClick: () => void }) {
@@ -46,7 +47,8 @@ export function BackgroundList({ snapshot, now, client, compact = false, project
 export function BackgroundPopover({ snapshot, now, client, projectName }: { snapshot: RunSnapshot; now: number; client: BatonClient; projectName?: string }) {
   const [open, setOpen] = useState(false); const id = useId(); const container = useRef<HTMLDivElement>(null); const panel = useRef<HTMLDivElement>(null);
   const close = () => { setOpen(false); container.current?.querySelector<HTMLButtonElement>(".background-pill")?.focus(); };
-  useEffect(() => { if (!open) return; panel.current?.focus(); const outside = (event: PointerEvent) => { if (document.querySelector("dialog[open]")) return; if (event.target instanceof Node && !container.current?.contains(event.target)) setOpen(false); }; document.addEventListener("pointerdown", outside); return () => document.removeEventListener("pointerdown", outside); }, [open]);
+  useEffect(() => { if (open) panel.current?.focus(); }, [open]);
+  useDismiss(open, container, reason => { if (reason === "escape") close(); else setOpen(false); }, () => Boolean(document.querySelector("dialog[open]")));
   return <div ref={container} className="background-popover-anchor" onKeyDown={event => { if (event.key === "Escape" && !document.querySelector("dialog[open]")) { event.stopPropagation(); event.preventDefault(); close(); } }}><BackgroundPill snapshot={snapshot} open={open} controls={id} onClick={() => setOpen(value => !value)} />{open && <div ref={panel} id={id} role="dialog" aria-label="本会话的后台进程" tabIndex={-1} className="background-popover"><header><strong>后台进程</strong><small>本 Run 的所有 agent</small><button type="button" className="icon-button" aria-label="关闭后台进程" onClick={close}><Icon name="close" size={14} /></button></header><BackgroundList projectName={projectName} snapshot={snapshot} now={now} client={client} /></div>}</div>;
 }
 export function CancelRunDialog({ snapshot, busy, close, submit, error }: { snapshot: RunSnapshot; busy: boolean; close: () => void; submit: (request: CancelRunRequest) => void; error?: string | null }) {

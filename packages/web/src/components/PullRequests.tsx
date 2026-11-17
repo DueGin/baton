@@ -6,6 +6,7 @@ import { clock } from "../lib/derive.js";
 import { errorText } from "../store.js";
 import { AgentMark, Icon } from "./common.js";
 import { ForgeIcon } from "./ForgeIcon.js";
+import { useDismiss } from "../lib/dismiss.js";
 
 export function PrChecks({ pr }: { pr: PullRequestRecord }) {
   return <span className={`pr-checks pr-tone-${prTone([pr])}`} title={`检查：${pr.checks.total} 项，${pr.checks.passed} 通过，${pr.checks.failed} 失败，${pr.checks.pending} 进行中`} aria-label={`检查 ${pr.checks.passed} 通过 ${pr.checks.failed} 失败 ${pr.checks.pending} 进行中`}>✓{pr.checks.passed} ✗{pr.checks.failed} ⏳{pr.checks.pending}</span>;
@@ -49,7 +50,8 @@ export function PullRequestPill({ snapshot, open, controls, onClick }: { snapsho
 export function PullRequestPopover({ snapshot, client, inspect }: { snapshot: RunSnapshot; client: BatonClient; inspect: (id: string) => void }) {
   const [open, setOpen] = useState(false); const id = useId(); const container = useRef<HTMLDivElement>(null); const panel = useRef<HTMLDivElement>(null);
   const close = () => { setOpen(false); container.current?.querySelector<HTMLButtonElement>(".pr-pill")?.focus(); };
-  useEffect(() => { if (!open) return; panel.current?.focus(); const outside = (event: PointerEvent) => { if (event.target instanceof Node && !container.current?.contains(event.target)) setOpen(false); }; document.addEventListener("pointerdown", outside); return () => document.removeEventListener("pointerdown", outside); }, [open]);
+  useEffect(() => { if (open) panel.current?.focus(); }, [open]);
+  useDismiss(open, container, reason => { if (reason === "escape") close(); else setOpen(false); });
   return <div className="pr-popover-anchor" ref={container} onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); } }}><PullRequestPill snapshot={snapshot} open={open} controls={id} onClick={() => setOpen(value => !value)} />{open && <div ref={panel} id={id} role="dialog" aria-label="本会话的 Pull Requests" tabIndex={-1} className="background-popover pr-popover"><header><strong>Pull Requests</strong><small>全部关联 PR</small><button type="button" className="icon-button" aria-label="关闭 Pull Requests" onClick={close}><Icon name="close" size={14} /></button></header><PullRequestList snapshot={snapshot} client={client} inspect={id => { close(); inspect(id); }} /></div>}</div>;
 }
 /** Shares the compact AgentMessageCard row language; body stays safe React content. */
