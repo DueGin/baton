@@ -60,6 +60,12 @@ export interface AgentEntry {
     resume: boolean;
     reasoning: boolean;
     mcp: boolean;
+    /**
+     * Accepts images in a prompt, placed inline with the text (Claude, Codex, Pi with an image
+     * model, ACP agents advertising promptCapabilities.image). When false, attached images reach the
+     * agent as a text note with the image's local file path.
+     */
+    images?: boolean;
   };
   checkedAt: IsoTime;
 }

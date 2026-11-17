@@ -64,6 +64,17 @@ export interface ToolCallItem {
   detail: ToolCallDetail;
   /** Error text when status is "failed". */
   error?: string;
+  /** Images the tool returned (screenshots, image reads), stored as attachments. */
+  images?: AttachmentRef[];
+}
+
+/** An image stored by the daemon; fetch it with GET /api/attachments/:id. */
+export interface AttachmentRef {
+  id: string;
+  mimeType: string;
+  name?: string;
+  width?: number;
+  height?: number;
 }
 
 export interface TodoEntry {

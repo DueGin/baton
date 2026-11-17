@@ -1,5 +1,5 @@
 /** REST request/response bodies (DESIGN §7). */
-import type { PermissionResponse } from "./timeline.js";
+import type { AttachmentRef, PermissionResponse } from "./timeline.js";
 import type { AgentEntry, BackgroundProcess, PullRequestRecord, ProjectRecord, ProjectSummary, DelegationRecord, InboxItem, ItemRecord, PermissionRule, RunPolicy, RunSnapshot, RunSummary, TeamMemberSpec, TeamPreset } from "./records.js";
 
 export interface CreateRunRequest {
@@ -345,3 +345,37 @@ export interface NotificationEvent {
   route?: string;
   ts: string;
 }
+
+// ───────────────────────────── images / attachments ─────────────────────────────
+
+/** Image types accepted for attachments (upload and tool output). */
+export const ATTACHMENT_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+/** Largest attachment the daemon stores, in bytes. */
+export const ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024;
+
+/**
+ * POST /api/attachments — body is the raw image bytes with Content-Type one of
+ * ATTACHMENT_MIME_TYPES; optional `X-Attachment-Name` header (URI-encoded file name).
+ * 201 → AttachmentRecord. Files live in BATON_HOME/attachments/<id>.<ext>.
+ *
+ * GET /api/attachments/:id — the bytes with their content type (Bearer auth like every API call).
+ */
+export interface AttachmentRecord extends AttachmentRef {
+  size: number;
+  createdAt: string;
+}
+
+/**
+ * Images inside a human message: the composer writes each image as a Markdown image whose URL is
+ * `attachment:<id>` at the cursor position, e.g. `看这里 ![截图](attachment:att_123) 哪里不对`.
+ * The kernel turns the text into ordered text/image parts for agents with capabilities.images and
+ * into text plus "[图片: /abs/path]" notes for the rest. Transcripts render the marker as a thumbnail.
+ */
+export const ATTACHMENT_URL_PREFIX = "attachment:";
+
+/**
+ * GET /api/files/image?path=<absolute path> — serves a local image an agent referred to by path in
+ * its Markdown (e.g. `![](/Users/me/proj/shot.png)` or a path relative to the node's cwd, resolved
+ * by the client against NodeRecord.cwd). Only ATTACHMENT_MIME_TYPES extensions, regular files, at
+ * most ATTACHMENT_MAX_BYTES; 404 otherwise. Bearer auth.
+ */
