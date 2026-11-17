@@ -20,6 +20,7 @@ describe("project screens", () => {
     const client = new DemoClient(() => now); const projects = await client.projects(true); const runs = await client.runs();
     const html = renderToStaticMarkup(<ProjectGroups projects={projects} runs={runs} runId={null} currentId="project-atlas" page="runs" reveal={null} choose={() => undefined} selectProject={() => undefined} newRun={() => undefined} add={() => undefined} canCreate mutate={async () => undefined} loading={false} />);
     for (const text of ["Atlas", "研究笔记", "已归档项目", "添加项目", "重命名", "复制路径", "归档", "活跃", "待处理", "在 Atlas 新建 Run", "后台服务"]) expect(html).toContain(text);
+    expect(html).toContain('<details class="project-menu" data-menu="true">');
     expect(html).not.toContain("旧版原型");
     const legacy = renderToStaticMarkup(<ProjectGroups projects={projects} runs={[{ ...runs[0]!, projectId: undefined, title: "Legacy run" }]} runId={null} currentId={null} page="runs" reveal={null} choose={() => undefined} selectProject={() => undefined} newRun={() => undefined} add={() => undefined} canCreate mutate={async () => undefined} loading={false} />);
     expect(legacy).toContain("未归属"); expect(legacy).toContain("Legacy run");
