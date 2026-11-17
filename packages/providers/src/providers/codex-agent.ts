@@ -266,8 +266,10 @@ class CodexSession extends ProviderSession {
             return saveProviderImages(save, image ? [image] : []).then(([ref]) => {
                 if (this.closed || !this.activeTurn)
                     return;
-                this.timeline({ ...running, status: "completed", detail: { type: "unknown", input, output: ref ? { attachment: ref.id } : null } });
-                this.timeline({ type: "assistant_message", text: ref ? imageMarkdown(ref, "生成的图片") : "\n\n[图片生成完成，但无法保存输出文件]\n\n" });
+                const path = image && "path" in image ? image.path : undefined;
+                this.timeline({ ...running, status: "completed", detail: { type: "unknown", input, output: ref ? { attachment: ref.id } : path ? { path } : null } });
+                // Unstored but saved by Codex: a local-path image the console serves via /api/files/image.
+                this.timeline({ type: "assistant_message", text: ref ? imageMarkdown(ref, "生成的图片") : path ? `\n\n![生成的图片](${encodeURI(path)})\n\n` : "\n\n[图片生成完成，但无法保存输出文件]\n\n" });
             });
         }
         if (method !== "item/completed" || !save)

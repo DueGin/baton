@@ -180,6 +180,14 @@ describe("attachment HTTP API", () => {
   });
 });
 
+describe("agent image capability", () => {
+  it("reports capabilities.images in GET /api/agents", async () => {
+    const server = await serve([new FakeDriver("seeing"), new FakeDriver("blind", { images: false })]);
+    const agents = await (await fetch(`${server.url}/api/agents`, { headers: { authorization: `Bearer ${server.token}` } })).json() as Array<{ id: string; capabilities: { images?: boolean } }>;
+    expect(Object.fromEntries(agents.map((agent) => [agent.id, agent.capabilities.images]))).toEqual({ seeing: true, blind: false });
+  });
+});
+
 describe("image delivery to agents", () => {
   async function setup(options: FakeDriverOptions = {}) {
     const driver = new FakeDriver("root", { script: (c) => c.text("Done"), ...options });

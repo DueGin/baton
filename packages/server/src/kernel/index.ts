@@ -205,14 +205,15 @@ export class Kernel {
     if (!input.title) void this.generateTitle(runId, attachmentLabel(input.prompt));
     return this.store.snapshot(runId);
   }
+  /** The run's first prompt for title naming; attachment markers read as "[图片 name]". */
   firstPrompt(id: string): string {
     const run = this.store.snapshot(id).run;
     const row = this.store.items(run.rootNodeId).find((r) => r.item.type === "user_message");
-    return row?.item.type === "user_message" ? row.item.text : run.title;
+    return row?.item.type === "user_message" ? attachmentLabel(row.item.text) : run.title;
   }
   async regenerateTitle(id: string): Promise<RunSnapshot["run"]> {
     this.store.snapshot(id);
-    await this.generateTitle(id, attachmentLabel(this.firstPrompt(id)), true);
+    await this.generateTitle(id, this.firstPrompt(id), true);
     return this.store.snapshot(id).run;
   }
   private async generateTitle(id: string, prompt: string, force = false): Promise<void> {

@@ -13,8 +13,9 @@ import { mapClaudeCompletedToolCall, mapClaudeFailedToolCall, mapClaudeRunningTo
 export type ClaudeQueryFactory = typeof query;
 type ClaudeBlock = { type: "text"; text: string } | { type: "image"; source: { type: "base64"; media_type: "image/png" | "image/jpeg" | "image/gif" | "image/webp"; data: string } };
 type ClaudeContent = string | ClaudeBlock[];
-/** The Messages API rejects larger inline images; bigger files go as a path note Claude can Read. */
-const CLAUDE_INLINE_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+/** The Messages API caps an image at 5 MB; base64 inflates by 4/3, so stay at 3.75 MB of file.
+ * Bigger files go as a path note: Claude Code's Read tool downsizes images itself. */
+const CLAUDE_INLINE_IMAGE_MAX_BYTES = 3_750_000;
 /** Text stays a plain string; image parts become base64 blocks at their position (Paseo toSdkUserMessage). */
 export async function claudePromptContent(prompt: AgentPromptInput): Promise<ClaudeContent> {
     if (typeof prompt === "string")
@@ -146,9 +147,9 @@ class ClaudeSession extends ProviderSession {
             clearTimeout(timer);
         }
     }
-    protected async launchTurn(prompt: AgentPromptInput): Promise<void> { const content = await claudePromptContent(prompt); this.canceling = false; this.sawText = false; this.streamedBlocks.clear(); this.unstartedMessages.add(this.queue.push(content)); }
+    protected async launchTurn(prompt: AgentPromptInput): Promise<void> { const content = typeof prompt === "string" ? prompt : await claudePromptContent(prompt); this.canceling = false; this.sawText = false; this.streamedBlocks.clear(); this.unstartedMessages.add(this.queue.push(content)); }
     async steerActiveTurn(prompt: AgentPromptInput): Promise<boolean> { if (!this.activeTurn)
-        return false; if (this.canceling) return false; const content = await claudePromptContent(prompt); if (!this.activeTurn || this.canceling || this.closed) return false; this.unstartedMessages.add(this.queue.push(content, "next")); this.timeline({ type: "user_message", text: promptText(prompt) }); return true; }
+        return false; if (this.canceling) return false; const content = typeof prompt === "string" ? prompt : await claudePromptContent(prompt); if (!this.activeTurn || this.canceling || this.closed) return false; this.unstartedMessages.add(this.queue.push(content, "next")); this.timeline({ type: "user_message", text: promptText(prompt) }); return true; }
     private async pump(): Promise<void> {
         try {
             for await (const raw of this.query) {
