@@ -19,6 +19,10 @@ describe("ACP specifications", () => {
       }
     }
   });
+  it("offers image prompts only for agents verified to advertise promptCapabilities.image", () => {
+    expect(ACP_AGENT_SPECS.filter(s => s.images).map(s => s.id).sort()).toEqual(["gemini", "kimi", "opencode", "qwen"]);
+    expect(AcpAgentSpecSchema.parse({ id: "x", label: "X", command: ["x"], homepage: "https://example.com", installHint: "x", mcp: { supported: true, http: true, sse: true, stdio: true } }).images).toBe(false);
+  });
   it("uses explicit Kimi semantics before the generic mode heuristic", () => {
     const kimi = ACP_AGENT_SPECS.find(s => s.id === "kimi")!;
     expect(modeFlags("auto", kimi.modeMap).isUnattended).toBe(true);

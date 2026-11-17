@@ -1,11 +1,12 @@
 // Ported from Paseo (https://github.com/getpaseo/paseo) packages/server/src/server/agent/providers/claude/agent.test.ts @63ea3e5 — Copyright (c) 2025-present Mohamed Boudra, Apache-2.0. Modified for baton.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Query, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { Query, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { ClaudeAgentClient, type ClaudeQueryFactory } from "./claude-agent.js";
-import type { AgentSession, AgentStreamEvent } from "../agent-sdk-types.js";
+import type { AgentSession, AgentStreamEvent, SaveImage } from "../agent-sdk-types.js";
 class Messages implements AsyncIterable<SDKMessage> {
     private values: SDKMessage[] = [];
     private wake?: () => void;
@@ -27,13 +28,13 @@ let home: string;
 let session: AgentSession | undefined;
 beforeEach(async () => { home = await mkdtemp(join(tmpdir(), "baton-claude-test-")); });
 afterEach(async () => { await session?.close(); session = undefined; await rm(home, { recursive: true, force: true }); });
-function setup() {
+function setup(saveImage?: SaveImage) {
     const messages = new Messages();
     let captured: Parameters<ClaudeQueryFactory>[0] | undefined;
     const generator = messages[Symbol.asyncIterator]();
     const query = Object.assign(generator, { supportedModels: vi.fn(async () => [{ value: "fake", displayName: "Fake", description: "", supportedEffortLevels: ["high"] }]), cancelAsyncMessage: vi.fn(async (_uuid: string) => true), interrupt: vi.fn(async () => { messages.push(result(0, true)); }), close: vi.fn(() => messages.end()) }) as unknown as Query;
     const factory: ClaudeQueryFactory = input => { captured = input; return query; };
-    const client = new ClaudeAgentClient({ home, command: ["fake-claude"], queryFactory: factory });
+    const client = new ClaudeAgentClient({ home, command: ["fake-claude"], queryFactory: factory, saveImage });
     return { client, messages, query, options: () => captured!.options!, input: () => captured!.prompt };
 }
 function result(cost = 0.01, failed = false): unknown { return { type: "result", subtype: failed ? "error_during_execution" : "success", is_error: failed, session_id: "claude-session", total_cost_usd: cost, usage: { input_tokens: 10, cache_read_input_tokens: 2, output_tokens: 4 }, modelUsage: { fake: { inputTokens: cost * 1000, cacheReadInputTokens: cost * 200, outputTokens: cost * 400, contextWindow: 10000 } }, errors: failed ? ["aborted"] : undefined }; }
@@ -172,4 +173,37 @@ it("closes before interruption when an older SDK cannot recall consumed input", 
     expect(fake.query.close).toHaveBeenCalledOnce();
     expect(fake.query.interrupt).not.toHaveBeenCalled();
     await expect(session.startTurn("must not revive")).rejects.toThrow("closed");
+});
+describe("Claude images", () => {
+    it("sends image parts as base64 content blocks and records the text with path notes", async () => {
+        const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64"), path = join(home, "shot.png");
+        await writeFile(path, png);
+        const fake = setup();
+        session = await fake.client.createSession({ cwd: home });
+        const events: AgentStreamEvent[] = [];
+        session.subscribe(event => events.push(event));
+        await session.startTurn([{ type: "text", text: "look " }, { type: "image", path, mimeType: "image/png", name: "shot.png" }, { type: "text", text: " here" }]);
+        const queued = await (fake.input() as AsyncIterable<SDKUserMessage>)[Symbol.asyncIterator]().next();
+        expect(queued.value?.message.content).toEqual([{ type: "text", text: "look " }, { type: "image", source: { type: "base64", media_type: "image/png", data: png.toString("base64") } }, { type: "text", text: " here" }]);
+        expect(events.find(event => event.type === "timeline")).toMatchObject({ item: { type: "user_message", text: `look [图片 shot.png: ${path}] here` } });
+    });
+    it("stores tool-result images as attachment refs before the turn ends", async () => {
+        const saved: string[] = [];
+        const fake = setup(async (data, mimeType, name) => { await delay(30); saved.push(String(data)); return { id: `att_${saved.length}`, mimeType, ...(name ? { name } : {}) }; });
+        session = await fake.client.createSession({ cwd: home });
+        const events: AgentStreamEvent[] = [];
+        session.subscribe(event => events.push(event));
+        await session.startTurn("read the screenshot");
+        fake.messages.push({ type: "assistant", session_id: "claude-session", message: { content: [{ type: "tool_use", id: "read-1", name: "Read", input: { file_path: "/tmp/shots/screen.png" } }] } });
+        fake.messages.push({ type: "user", tool_use_result: { type: "image", file: { base64: "SDKCOPY", type: "image/png" } }, message: { content: [{ type: "tool_result", tool_use_id: "read-1", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "INLINE" } }] }] } });
+        fake.messages.push(result());
+        await wait(events, "turn_completed");
+        const index = events.findIndex(event => event.type === "timeline" && event.item.type === "tool_call" && event.item.status === "completed");
+        expect(index).toBeGreaterThan(-1);
+        expect(index).toBeLessThan(events.findIndex(event => event.type === "turn_completed"));
+        expect(events[index]).toMatchObject({ item: { callId: "read-1", images: [{ id: "att_1", mimeType: "image/png", name: "screen.png" }] } });
+        // One image per result: the inline block wins over the SDK's structured copy.
+        expect(saved).toEqual(["INLINE"]);
+        expect(JSON.stringify(events)).not.toContain("SDKCOPY");
+    });
 });
