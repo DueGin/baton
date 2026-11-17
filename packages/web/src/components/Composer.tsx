@@ -4,19 +4,13 @@ import { Slice, type Node as PMNode, type Schema } from "@tiptap/pm/model";
 import type { BatonClient } from "../api.js";
 import { docIsEmpty, docToMarkdown, IMAGE_NODE, pastedTextDoc } from "../lib/composer-markdown.js";
 import { acceptImages, attachmentName, composerUploads } from "../lib/composer-uploads.js";
-import { IMAGE_ACCEPT, imageSource, useImageContext, useImageUrl } from "../lib/images.js";
+import { imageSource, useImageContext, useImageUrl } from "../lib/images.js";
 import { composerExtensions, imageIdentity, ImageOrderContext, imageStatus, type ComposerImageStatus } from "./composer-extensions.js";
 import { ImageLightbox } from "./Images.js";
 import { Icon } from "./common.js";
+import { ComposerPlaceholder, type ComposerHandle, type ComposerStatus } from "./composer-shell.js";
+export type { ComposerHandle, ComposerStatus } from "./composer-shell.js";
 
-export interface ComposerHandle {
-  /** Send the draft (unless images are still uploading or failed). */
-  submit(): void;
-  /** Add images at the caret (gated on the agent's image capability). */
-  attach(files: File[]): void;
-  focus(): void;
-}
-export interface ComposerStatus { empty: boolean; uploading: boolean; failed: boolean; hint?: string }
 
 /** Unsent drafts per node, kept while the page lives (switching nodes or views keeps them). */
 const drafts = new Map<string, JSONContent>();
@@ -190,7 +184,7 @@ export function Composer({ ref, nodeId, client, placeholder, disabled, imagesEna
     {images.length > 0 && <div className="composer-images" aria-label="已添加的图片">{images.map((image, index) => <ComposerThumb key={image.identity} image={image} number={index + 1} client={client} remove={() => remove(image.identity)} retry={() => { if (image.key) composerUploads.retry(client, image.key); }} />)}</div>}
     <ImageOrderContext value={order}>
       {editor ? <EditorContent editor={editor} className="composer-editor-scroll" />
-        : <div className="composer-editor-scroll"><div className="composer-editor" role="textbox" aria-multiline="true" aria-label="消息" aria-placeholder={placeholder} aria-disabled={disabled || undefined}><p className="is-editor-empty" data-placeholder={placeholder} /></div></div>}
+        : <ComposerPlaceholder placeholder={placeholder} disabled={disabled} />}
     </ImageOrderContext>
   </div>;
 }
@@ -214,13 +208,4 @@ function ComposerThumb({ image, number, client, remove, retry }: { image: DraftI
     <button type="button" className="composer-thumb-remove" aria-label={`移除${label}`} title="移除" onClick={remove}>×</button>
     {open && url && <ImageLightbox url={url} alt={image.alt || label} close={() => setOpen(false)} />}
   </div>;
-}
-
-/** Image icon in the composer footer; disabled with a reason when the node's agent cannot take images. */
-export function AttachImageButton({ enabled, disabled, attach }: { enabled: boolean; disabled: boolean; attach: (files: File[]) => void }) {
-  const input = useRef<HTMLInputElement>(null);
-  return <>
-    <button type="button" className="icon-button composer-attach" aria-label="添加图片" title={enabled ? "添加图片 · 也可直接粘贴或拖入" : "当前 agent 不支持图片"} disabled={disabled || !enabled} onClick={() => input.current?.click()}><Icon name="image" size={16} /></button>
-    <input ref={input} type="file" accept={IMAGE_ACCEPT} multiple hidden tabIndex={-1} onChange={event => { const files = [...(event.target.files ?? [])]; event.target.value = ""; attach(files); }} />
-  </>;
 }

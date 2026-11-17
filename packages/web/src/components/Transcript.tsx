@@ -24,7 +24,7 @@ import { TurnFooter, TurnIndicator } from "./TurnIndicator.js";
 import { markdownPlainText } from "../lib/markdown.js";
 import { ToolImages } from "./Images.js";
 import { ImageContext } from "../lib/images.js";
-import { AttachImageButton, Composer, type ComposerHandle, type ComposerStatus } from "./Composer.js";
+import { AttachImageButton, LazyComposer, type ComposerHandle, type ComposerStatus } from "./composer-shell.js";
 export { Markdown } from "./Markdown.js";
 
 export function ToolDetail({ detail }: { detail: ToolCallDetail }) {
@@ -151,7 +151,7 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
     <form className="composer" onSubmit={event => { event.preventDefault(); composer.current?.submit(); }}
       onDragOver={event => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
       onDrop={event => { if (event.defaultPrevented || !event.dataTransfer.types.includes("Files")) return; event.preventDefault(); composer.current?.attach([...event.dataTransfer.files]); }}>
-      <Composer key={node.id} ref={composer} nodeId={node.id} client={store.client} placeholder={`向 ${node.agentId} 发送消息…${live ? "（运行中也可发送）" : ""}`} disabled={closed} imagesEnabled={imagesEnabled} onSend={send} onStatus={setComposerStatus} />
+      <LazyComposer key={node.id} ref={composer} nodeId={node.id} client={store.client} placeholder={`向 ${node.agentId} 发送消息…${live ? "（运行中也可发送）" : ""}`} disabled={closed} imagesEnabled={imagesEnabled} onSend={send} onStatus={setComposerStatus} />
       <div className="composer-footer">{composerStatus.hint ? <span className="composer-hint" role="status">{composerStatus.hint}</span> : <span title="送达方式会显示在消息旁">{snapshot.run.status === "paused" ? "会话已暂停，消息会在继续后送达" : live ? "运行中 · 发送后排队，可在消息上改为引导或立即发送" : "发送到当前节点"} · ⌘ / Ctrl + Enter</span>}<div className="composer-actions"><AttachImageButton enabled={imagesEnabled} disabled={closed} attach={files => composer.current?.attach(files)} />{composerAction === "stop" ? <button type="button" className="button composer-stop" disabled={busy} title="停止本会话中所有正在工作的 agent（可继续）" onClick={() => stopRun?.()}><Icon name="stop" size={13} />停止</button>
       : composerAction === "resume" ? <button type="button" className="button primary composer-resume" disabled={busy} title="继续本会话" onClick={() => resumeRun?.()}><Icon name="play" size={13} />继续</button>
       : <button className="button primary" disabled={composerStatus.empty || closed || composerStatus.uploading} title={composerStatus.uploading ? "图片上传中…" : composerStatus.failed ? "有图片上传失败" : undefined}><Icon name="arrow" size={15} />发送</button>}</div></div></form></div>
