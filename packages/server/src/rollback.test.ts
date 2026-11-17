@@ -109,7 +109,7 @@ describe("rollback checkpoints", () => {
 
 describe("POST /api/nodes/:nodeId/rollback", () => {
   it("previews and restores files (added deleted, modified reverted, deleted restored)", async () => {
-    const { server, root, cwd, idle, api } = await setup();
+    const { server, driver, root, cwd, idle, api } = await setup();
     await idle();
     await writeFile(join(cwd, "gone.md"), "keep me");
     const turn = await server.kernel.message(root, "write readme.md v2\nwrite new.txt created\ndelete gone.md");
@@ -129,6 +129,25 @@ describe("POST /api/nodes/:nodeId/rollback", () => {
     await server.kernel.message(root, "what now");
     await idle();
     expect(server.store.items(root).filter((r) => r.rolledBack)).toEqual([]);
+    const prompt = driver.sessions.at(-1)!.prompts.at(-1)!;
+    expect(prompt).toContain("restored the files");
+    expect(prompt.endsWith("what now")).toBe(true);
+    // The transcript shows only the human's text.
+    expect(server.store.items(root).find((r) => r.item.type === "user_message" && r.item.text === "what now")).toBeDefined();
+  });
+
+  it("resumes a node interrupted by a files-only rollback", async () => {
+    const hold = gate();
+    const { server, driver, root, cwd, idle, checkpoints } = await setup({ script: async (c) => { await fileScript(c); if (c.prompt.includes("slow")) await hold.wait(c); } });
+    await idle();
+    const turn = await server.kernel.message(root, "write wip.txt partial\nslow work");
+    await until(() => existsSync(join(cwd, "wip.txt")) && server.store.node(root).status === "running");
+    const result = await server.kernel.rollbacks.rollback(root, { checkpointId: checkpoints().find((c) => c.itemSeq === turn.itemSeq)!.id, mode: "files" });
+    expect(result).toEqual({ mode: "files", files: ["wip.txt"] });
+    expect(existsSync(join(cwd, "wip.txt"))).toBe(false);
+    await until(() => driver.sessions[0]!.prompts.some((p) => p.includes("restored the files") && p.includes("Continue where you left off")));
+    await idle();
+    expect(server.store.items(root).some((r) => r.rolledBack)).toBe(false);
   });
 
   it("rewinds the conversation natively, flags rows, returns the draft and continues from the fork", async () => {

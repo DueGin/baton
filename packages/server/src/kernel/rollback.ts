@@ -68,13 +68,15 @@ export class Rollbacks {
       const restored = files ? (await checkpoints.restore(record)).map((change) => change.path) : undefined;
       let rewound: { draft: string; conversation: "native" | "replay" } | undefined;
       if (conversation) rewound = await this.rewind(nodeId, entry, checkpoints);
-      else checkpoints.addPreamble(nodeId, noticePrompt("system", `The human restored the files in ${record.files!.cwd} to the checkpoint taken before one of their earlier messages (${record.createdAt}). Every change made after it, by you or anyone else, was undone${restored!.length ? `; changed paths: ${restored!.slice(0, 50).join(", ")}${restored!.length > 50 ? ", …" : ""}` : ""}. Re-read files before relying on what you saw earlier.`));
+      // Files only, node idle: it hears about the restore with its next prompt (an interrupted one is resumed below).
+      else if (!interrupted.includes(nodeId)) checkpoints.addPreamble(nodeId, noticePrompt("system", `The human restored the files in ${record.files!.cwd} to the checkpoint taken before one of their earlier messages (${record.createdAt}). Every change made after it, by you or anyone else, was undone${restored!.length ? `; changed paths: ${restored!.slice(0, 50).join(", ")}${restored!.length > 50 ? ", …" : ""}` : ""}. Re-read files before relying on what you saw earlier.`));
       response = { mode: input.mode, ...(rewound ? { draft: rewound.draft, conversation: rewound.conversation, canceledDelegations } : {}), ...(restored ? { files: restored } : {}) };
     } finally { this.running.delete(node.runId); }
-    // Other nodes only lost their turn: resume them. The rolled-back node waits for the human.
+    // Interrupted nodes resume with a notice, except the node whose conversation was rolled back: it
+    // waits for the human's edited message.
     const notice = noticePrompt("system", files ? `The human restored the files in ${record.files!.cwd} to an earlier checkpoint while you were working, which interrupted your turn. Files may have changed: re-read before editing. Continue where you left off.` : "The human rolled back part of this run's conversation, which interrupted your turn. Continue where you left off.");
     for (const id of this.store.snapshot(node.runId).nodes.map((entry) => entry.id)) {
-      try { await this.hooks.restart(id, id !== nodeId && interrupted.includes(id) ? notice : undefined); }
+      try { await this.hooks.restart(id, interrupted.includes(id) && !(id === nodeId && conversation) ? notice : undefined); }
       catch (error) { this.hooks.log(node.runId, error, id); }
     }
     return response;
@@ -97,7 +99,7 @@ export class Rollbacks {
     const record = entry.record, runId = record.runId;
     this.hooks.flush(nodeId);
     this.hooks.takeQueuedMessages(nodeId);
-    const turns = new Set(this.store.snapshot(runId).turns.filter((turn) => turn.nodeId === nodeId && turn.startedAt >= record.createdAt).map((turn) => turn.id));
+    const turns = new Set(this.store.snapshot(runId).turns.filter((turn) => turn.nodeId === nodeId && (turn.id === entry.turnId || turn.startedAt > record.createdAt)).map((turn) => turn.id));
     const rows = this.store.items(nodeId);
     const opened = rows.filter((row) => row.item.type === "user_message" && (entry.turnId ? row.turnId === entry.turnId && (row.item.delivery === "turn" || row.seq === record.itemSeq) : row.seq === record.itemSeq));
     const order = (row: ItemRecord): number => row.item.type === "user_message" ? row.item.deliveryOrder ?? 0 : 0;
