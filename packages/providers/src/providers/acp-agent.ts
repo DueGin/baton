@@ -5,8 +5,9 @@ import { Readable, Writable } from "node:stream";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { ClientSideConnection, PROTOCOL_VERSION, ndJsonStream, type Client, type McpServer, type RequestPermissionRequest, type RequestPermissionResponse, type SessionNotification, type CreateTerminalRequest, type TerminalOutputResponse, type TerminalExitStatus } from "@agentclientprotocol/sdk";
-import type { AgentClient, AgentPersistenceHandle, AgentSessionConfig, ClientOptions, ProviderCatalog, ToolCallTimelineItem } from "../agent-sdk-types.js";
+import { ClientSideConnection, PROTOCOL_VERSION, ndJsonStream, type Client, type ContentBlock, type McpServer, type RequestPermissionRequest, type RequestPermissionResponse, type SessionNotification, type CreateTerminalRequest, type TerminalOutputResponse, type TerminalExitStatus } from "@agentclientprotocol/sdk";
+import type { AgentClient, AgentImageRef, AgentPersistenceHandle, AgentPromptInput, AgentSessionConfig, ClientOptions, ProviderCatalog, ToolCallTimelineItem } from "../agent-sdk-types.js";
+import { OrderedTasks, findImageBlocks, imageMarkdown, imageNote, readPromptImage, saveProviderImages } from "../images.js";
 import { ProviderSession, errorText, record, text } from "../session.js";
 import { spawnProcess } from "../process.js";
 import { terminateWithTreeKill } from "../tree-kill.js";
@@ -18,9 +19,36 @@ import { externalEnv } from "../process.js";
 import { acpDialect } from "./acp-dialect.js";
 import { formElicitation, cursorQuestion } from "./acp-elicitation.js";
 export interface AcpClientOptions extends ClientOptions { spec?: AcpAgentSpec }
+/** ACP prompt blocks (Paseo toACPContentBlocks): image blocks only when the agent's initialize
+ * advertised promptCapabilities.image, else the path note. The system prompt leads the first prompt. */
+export async function acpPromptBlocks(prompt: AgentPromptInput, imagePrompts: boolean, prefix?: string): Promise<ContentBlock[]> {
+    const blocks: ContentBlock[] = [];
+    const pushText = (value: string): void => {
+        const last = blocks.at(-1);
+        if (last?.type === "text")
+            last.text += value;
+        else
+            blocks.push({ type: "text", text: value });
+    };
+    if (prefix)
+        pushText(`${prefix}\n\n`);
+    for (const part of typeof prompt === "string" ? [{ type: "text" as const, text: prompt }] : prompt) {
+        if (part.type === "text") {
+            if (part.text || !blocks.length)
+                pushText(part.text);
+            continue;
+        }
+        const image = imagePrompts ? await readPromptImage(part) : null;
+        if (image)
+            blocks.push({ type: "image", data: image.data, mimeType: image.mimeType });
+        else
+            pushText(imageNote(part));
+    }
+    return blocks.length ? blocks : [{ type: "text", text: "" }];
+}
 export class ACPAgentClient implements AgentClient {
     readonly provider = "acp" as const;
-    readonly capabilities = { steer: false, resume: true, reasoning: true, mcp: true };
+    readonly capabilities = { steer: false, resume: true, reasoning: true, mcp: true, images: false };
     constructor(protected readonly options: AcpClientOptions) { }
     async createSession(config: AgentSessionConfig): Promise<ACPSession> { return ACPSession.open(this.options, config); }
     async resumeSession(handle: AgentPersistenceHandle, config: AgentSessionConfig): Promise<ACPSession> { return ACPSession.open(this.options, config, handle); }
@@ -53,7 +81,10 @@ class ACPSession extends ProviderSession implements Client {
     private firstPrompt = true;
     private canceling = false;
     private canResume = false;
-    detectedCapabilities = { steer: false, resume: false, reasoning: true, mcp: false };
+    /** initialize advertised promptCapabilities.image. */
+    private imagePrompts = false;
+    private inbound = new OrderedTasks();
+    detectedCapabilities = { steer: false, resume: false, reasoning: true, mcp: false, images: false };
     private terminals = new Map<string, TerminalSnapshot & {
         child: ChildProcessWithoutNullStreams;
         truncated: boolean;
@@ -103,6 +134,8 @@ class ACPSession extends ProviderSession implements Client {
         this.canResume = initialized.agentCapabilities?.loadSession ?? false;
         this.detectedCapabilities.resume = this.canResume;
         this.detectedCapabilities.mcp = this.options.spec?.mcp.supported !== false && this.options.spec?.mcp.http !== false && (initialized.agentCapabilities?.mcpCapabilities?.http ?? false);
+        this.imagePrompts = initialized.agentCapabilities?.promptCapabilities?.image === true;
+        this.detectedCapabilities.images = this.options.spec?.images === true && this.imagePrompts;
         this.readCatalog({ ...record(record(initialized)._meta), ...record(initialized) });
         const rpc = this.options.spec?.modelCatalogRpc ?? (this.options.spec?.modelDiscovery === "cursor" ? "cursor/list_available_models" : undefined);
         if (rpc) {
@@ -195,21 +228,25 @@ class ACPSession extends ProviderSession implements Client {
             if (Array.isArray(configs) && configs.map(record).some(o => o.id === "allow_all" && o.currentValue === "on")) this.catalog.defaultModeId = "allow-all";
         }
     }
-    protected async launchTurn(prompt: string): Promise<void> {
+    protected async launchTurn(prompt: AgentPromptInput): Promise<void> {
+        const blocks = await acpPromptBlocks(prompt, this.imagePrompts, this.firstPrompt ? this.config.systemPrompt : undefined);
         this.canceling = false;
         this.usage = undefined;
         this.startingCost = this.totalCost;
         const turnId = this.activeTurn;
-        const input = this.firstPrompt && this.config.systemPrompt ? `${this.config.systemPrompt}\n\n${prompt}` : prompt;
         this.firstPrompt = false;
-        void this.connection.prompt({ sessionId: this.sessionId!, prompt: [{ type: "text", text: input }] }).then(response => {
+        // Updates may still be storing an image; the turn ends after them.
+        void this.connection.prompt({ sessionId: this.sessionId!, prompt: blocks }).then(response => this.inbound.run(() => {
             if (this.activeTurn !== turnId)
                 return;
             this.finish(response.stopReason === "cancelled" || this.canceling ? "canceled" : "completed", undefined, this.usage);
-        }, error => { if (this.activeTurn === turnId)
-            this.finish(this.canceling ? "canceled" : "failed", errorText(error)); });
+        }), error => this.inbound.run(() => { if (this.activeTurn === turnId)
+            this.finish(this.canceling ? "canceled" : "failed", errorText(error)); }));
     }
     async sessionUpdate(notification: SessionNotification): Promise<void> {
+        this.inbound.run(() => this.update(notification));
+    }
+    private update(notification: SessionNotification): void | Promise<void> {
         if (this.closed || (this.sessionId && notification.sessionId !== this.sessionId))
             return;
         const update = record(notification.update);
@@ -219,6 +256,9 @@ class ACPSession extends ProviderSession implements Client {
                 const content = record(update.content);
                 if (content.type === "text")
                     this.timeline({ type: update.sessionUpdate === "agent_message_chunk" ? "assistant_message" : "reasoning", text: text(content.text) });
+                if (content.type === "image" && update.sessionUpdate === "agent_message_chunk" && this.options.saveImage)
+                    return saveProviderImages(this.options.saveImage, findImageBlocks(content)).then(([ref]) => { if (ref && !this.closed)
+                        this.timeline({ type: "assistant_message", text: imageMarkdown(ref) }); });
                 break;
             }
             case "tool_call":
@@ -233,9 +273,17 @@ class ACPSession extends ProviderSession implements Client {
                 const output = Array.isArray(merged.content) ? merged.content.map(record).map(c => text(record(c.content).text)).filter(Boolean).join("\n") : "";
                 const detail = acpToolDetail(merged, this.terminals);
                 const item: ToolCallTimelineItem = { type: "tool_call", callId: id, name, detail, ...(status === "failed" ? { status, error: output || "Tool failed" } : { status, error: null }) };
-                this.timeline(item);
-                if (status !== "running")
-                    this.tools.delete(id);
+                const emit = (images: AgentImageRef[] = []): void => {
+                    this.timeline(images.length ? { ...item, images } : item);
+                    if (status !== "running")
+                        this.tools.delete(id);
+                };
+                // Tool content blocks: { type: "content", content: { type: "image", data, mimeType } }.
+                const found = status !== "running" && Array.isArray(merged.content) ? findImageBlocks(merged.content.map(record).map(c => c.content)) : [];
+                if (found.length && this.options.saveImage)
+                    return saveProviderImages(this.options.saveImage, found).then(images => { if (!this.closed)
+                        emit(images); });
+                emit();
                 break;
             }
             case "plan": {

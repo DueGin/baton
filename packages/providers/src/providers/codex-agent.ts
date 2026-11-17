@@ -2,13 +2,45 @@
 import pino from "pino";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { AgentClient, AgentPersistenceHandle, AgentSessionConfig, AgentUsage, ClientOptions, ProviderCatalog } from "../agent-sdk-types.js";
+import type { AgentClient, AgentPersistenceHandle, AgentPromptInput, AgentSessionConfig, AgentUsage, ClientOptions, ProviderCatalog, ToolCallTimelineItem } from "../agent-sdk-types.js";
+import { OrderedTasks, imageFileExists, imageMarkdown, imageNote, promptText, saveProviderImages, type ProviderImage } from "../images.js";
 import { ProviderSession, record, text } from "../session.js";
 import { spawnProcess } from "../process.js";
 import { CodexAppServerClient, CodexAppServerRpcError } from "./codex/app-server-transport.js";
 import { CodexAppServerStartupCoordinator } from "./codex/app-server-startup.js";
-import { mapCodexToolCallFromThreadItem } from "./codex/tool-call-mapper.js";
+import { mapCodexToolCallFromThreadItem, splitCodexMcpToolResultImages } from "./codex/tool-call-mapper.js";
 const startup = new CodexAppServerStartupCoordinator();
+/** Text items plus `localImage` items at their position (Paseo codexAppServerTurnInputFromPrompt). */
+export async function codexTurnInput(prompt: AgentPromptInput): Promise<Array<Record<string, unknown>>> {
+    if (typeof prompt === "string")
+        return [{ type: "text", text: prompt }];
+    const input: Array<Record<string, unknown>> = [];
+    for (const part of prompt) {
+        if (part.type === "text") {
+            if (part.text)
+                input.push({ type: "text", text: part.text });
+        }
+        else if (await imageFileExists(part.path))
+            input.push({ type: "localImage", path: part.path });
+        else
+            input.push({ type: "text", text: imageNote(part) });
+    }
+    return input.length ? input : [{ type: "text", text: "" }];
+}
+/** Generated image payloads: a saved file, or a result string/object (base64, data: URI, path). */
+function codexGeneratedImage(item: Record<string, unknown>): ProviderImage | null {
+    const saved = text(item.savedPath ?? item.saved_path);
+    if (saved)
+        return { path: saved, name: "生成的图片" };
+    const result = item.result;
+    if (typeof result === "string") {
+        const value = result.trim();
+        return value.toLowerCase().startsWith("data:image/") || (/^[A-Za-z0-9+/\r\n]+={0,2}$/.test(value) && value.length > 64) ? { data: value, name: "生成的图片" } : null;
+    }
+    const object = record(result);
+    const path = text(object.path ?? object.savedPath ?? object.saved_path), data = text(object.data), mimeType = text(object.mimeType ?? object.mime_type) || null;
+    return path ? { path, mimeType, name: "生成的图片" } : data ? { data, mimeType, name: "生成的图片" } : null;
+}
 const MODES = [
     { id: "default", label: "Default", description: "Workspace write with approval requests" },
     { id: "read-only", label: "Read only", isReadOnly: true },
@@ -16,7 +48,7 @@ const MODES = [
 ];
 export class CodexAppServerAgentClient implements AgentClient {
     readonly provider = "codex" as const;
-    readonly capabilities = { steer: true, resume: true, reasoning: true, mcp: true };
+    readonly capabilities = { steer: true, resume: true, reasoning: true, mcp: true, images: true };
     constructor(private options: ClientOptions) { }
     async createSession(config: AgentSessionConfig): Promise<CodexSession> { return CodexSession.open(this.options, config); }
     async resumeSession(handle: AgentPersistenceHandle, config: AgentSessionConfig): Promise<CodexSession> { return CodexSession.open(this.options, config, handle); }
@@ -71,14 +103,18 @@ class CodexSession extends ProviderSession {
     private terminalIds = new Set<string>();
     private previousUsage: AgentUsage = {};
     private totalUsage: AgentUsage = {};
+    private options!: ClientOptions;
+    /** Keeps notification order while an image is being stored. */
+    private inbound = new OrderedTasks();
     private constructor(config: AgentSessionConfig) { super("codex", config); }
     static async open(options: ClientOptions, config: AgentSessionConfig, handle?: AgentPersistenceHandle): Promise<CodexSession> {
         const session = new CodexSession(config);
+        session.options = options;
         if (config.modeId && !["default", "read-only", "full-access", "bypass"].includes(config.modeId))
             throw new Error(`Unsupported Codex mode ${config.modeId}`);
         try {
             session.client = await connect(options, config);
-            session.client.setNotificationHandler((method, params) => session.notification(method, record(params)));
+            session.client.setNotificationHandler((method, params) => session.inbound.run(() => session.notification(method, record(params))));
             session.client.setUnexpectedTerminationHandler(error => session.processExited(error.message));
             for (const method of ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "item/mcpToolCall/requestApproval", "item/tool/requestUserInput", "tool/requestUserInput", "mcpServer/elicitation/request"])
                 session.client.setRequestHandler(method, params => session.permission(method, record(params)));
@@ -104,7 +140,8 @@ class CodexSession extends ProviderSession {
             throw error;
         }
     }
-    protected async launchTurn(prompt: string): Promise<void> {
+    protected async launchTurn(prompt: AgentPromptInput): Promise<void> {
+        const input = await codexTurnInput(prompt);
         this.canceling = false;
         this.nativeTurn = null;
         this.usage = undefined;
@@ -112,16 +149,19 @@ class CodexSession extends ProviderSession {
         this.terminalIds.clear();
         this.seenText.clear();
         const turnId = this.activeTurn;
-        const result = record(await this.client.request("turn/start", { threadId: this.sessionId, input: [{ type: "text", text: prompt }], ...(this.config.model ? { model: this.config.model } : {}), ...(this.config.thinking ? { effort: this.config.thinking } : {}), cwd: this.config.cwd }, 90000));
+        const result = record(await this.client.request("turn/start", { threadId: this.sessionId, input, ...(this.config.model ? { model: this.config.model } : {}), ...(this.config.thinking ? { effort: this.config.thinking } : {}), cwd: this.config.cwd }, 90000));
         if (this.activeTurn === turnId)
             this.nativeTurn = text(record(result.turn).id) || this.nativeTurn;
     }
-    async steerActiveTurn(prompt: string): Promise<boolean> {
+    async steerActiveTurn(prompt: AgentPromptInput): Promise<boolean> {
         if (!this.activeTurn || !this.nativeTurn)
             return false;
         try {
-            await this.client.request("turn/steer", { threadId: this.sessionId, expectedTurnId: this.nativeTurn, input: [{ type: "text", text: prompt }] }, 10000);
-            this.timeline({ type: "user_message", text: prompt });
+            const input = await codexTurnInput(prompt);
+            if (!this.activeTurn || !this.nativeTurn)
+                return false;
+            await this.client.request("turn/steer", { threadId: this.sessionId, expectedTurnId: this.nativeTurn, input }, 10000);
+            this.timeline({ type: "user_message", text: promptText(prompt) });
             return true;
         }
         catch (error) {
@@ -130,7 +170,7 @@ class CodexSession extends ProviderSession {
             throw error;
         }
     }
-    private notification(method: string, params: Record<string, unknown>): void {
+    private notification(method: string, params: Record<string, unknown>): void | Promise<void> {
         if (this.closed)
             return;
         if (params.threadId && params.threadId !== this.sessionId && this.sessionId)
@@ -166,6 +206,9 @@ class CodexSession extends ProviderSession {
         }
         if (method === "item/started" || method === "item/completed") {
             const item = record(params.item);
+            const handled = this.itemImages(method, item);
+            if (handled !== false)
+                return handled === true ? undefined : handled;
             if (item.type === "commandExecution" && typeof item.processId === "string") {
                 if (method === "item/started")
                     this.terminalIds.add(item.processId);
@@ -203,6 +246,48 @@ class CodexSession extends ProviderSession {
         }
         if (method === "error" && params.willRetry !== true)
             this.finish("failed", text(record(params.error).message) || "Codex error");
+    }
+    /** Image-bearing items (MCP image results, view_image, image generation): true when handled
+     * synchronously, a promise while an image is stored, false for every other item. */
+    private itemImages(method: string, item: Record<string, unknown>): boolean | Promise<void> {
+        const save = this.options.saveImage, id = text(item.id);
+        if (item.type === "imageGeneration" || item.type === "ImageGeneration") {
+            const input = { prompt: text(item.revisedPrompt ?? item.revised_prompt) || undefined };
+            const running: ToolCallTimelineItem = { type: "tool_call", callId: id, name: "image_generation", status: "running", error: null, detail: { type: "unknown", input, output: null } };
+            if (method === "item/started") {
+                this.timeline(running);
+                return true;
+            }
+            if (item.status === "failed") {
+                this.timeline({ ...running, status: "failed", error: item.failure ?? item.error ?? "Image generation failed" });
+                return true;
+            }
+            const image = codexGeneratedImage(item);
+            return saveProviderImages(save, image ? [image] : []).then(([ref]) => {
+                if (this.closed || !this.activeTurn)
+                    return;
+                this.timeline({ ...running, status: "completed", detail: { type: "unknown", input, output: ref ? { attachment: ref.id } : null } });
+                this.timeline({ type: "assistant_message", text: ref ? imageMarkdown(ref, "生成的图片") : "\n\n[图片生成完成，但无法保存输出文件]\n\n" });
+            });
+        }
+        if (method !== "item/completed" || !save)
+            return false;
+        if ((item.type === "imageView" || item.type === "ImageView") && text(item.path)) {
+            return saveProviderImages(save, [{ path: text(item.path) }]).then(images => {
+                if (!this.closed && this.activeTurn)
+                    this.timeline({ type: "tool_call", callId: id, name: "view_image", status: "completed", error: null, detail: { type: "read", filePath: text(item.path) }, ...(images.length ? { images } : {}) });
+            });
+        }
+        if (item.type !== "mcpToolCall")
+            return false;
+        const found = splitCodexMcpToolResultImages(item.result ?? null).images;
+        if (!found.length)
+            return false;
+        return saveProviderImages(save, found).then(images => {
+            const tool = mapCodexToolCallFromThreadItem(item, { cwd: this.config.cwd });
+            if (tool && !this.closed && this.activeTurn)
+                this.timeline(images.length ? { ...tool, images } : tool);
+        });
     }
     private async permission(method: string, params: Record<string, unknown>): Promise<unknown> {
         const id = `permission-${text(params.approvalId) || text(params.itemId) || crypto.randomUUID()}`;

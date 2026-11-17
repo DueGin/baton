@@ -3,17 +3,36 @@ import pino from "pino";
 import { mkdir, mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { AgentClient, AgentPersistenceHandle, AgentSessionConfig, AgentUsage, ClientOptions, ProviderCatalog } from "../agent-sdk-types.js";
+import type { AgentClient, AgentImageRef, AgentPersistenceHandle, AgentPromptInput, AgentSessionConfig, AgentUsage, ClientOptions, ProviderCatalog } from "../agent-sdk-types.js";
+import { OrderedTasks, imageNote, promptImages, promptText, readPromptImage, saveProviderImages } from "../images.js";
 import { ProviderSession, record, text, errorText } from "../session.js";
 import { JsonlRpcProcess } from "./jsonl-rpc-process.js";
 import { mapToolDetail, parseToolArgs, parseToolResult, splitPiToolResultImages, type PiTrackedToolCall } from "./pi/tool-call-mapper.js";
 const THINKING = ["off", "minimal", "low", "medium", "high", "xhigh", "max"].map(id => ({ id, label: id }));
+/** Pi RPC prompt payload: images ride along base64 when the model takes image input (Paseo
+ * convertPromptInput); the text keeps a "[图片 name]" marker where each one was. Otherwise each
+ * image becomes the path note. */
+export async function piPromptPayload(prompt: AgentPromptInput, imageInput: boolean): Promise<{ message: string; images?: Array<{ type: "image"; data: string; mimeType: string }> }> {
+    if (typeof prompt === "string")
+        return { message: prompt };
+    const images: Array<{ type: "image"; data: string; mimeType: string }> = [];
+    const loaded = new Map<number, boolean>();
+    if (imageInput)
+        for (const [index, part] of promptImages(prompt).entries()) {
+            const image = await readPromptImage(part);
+            loaded.set(index, !!image);
+            if (image)
+                images.push({ type: "image", ...image });
+        }
+    const message = promptText(prompt, (part, index) => loaded.get(index) ? `[图片${part.name ? ` ${part.name}` : ` ${index + 1}`}]` : imageNote(part));
+    return images.length ? { message, images } : { message };
+}
 function runtime(options: ClientOptions, config: AgentSessionConfig, extra: string[] = []): JsonlRpcProcess {
     return new JsonlRpcProcess({ launch: { command: options.command[0]!, args: [...options.command.slice(1), "--mode", "rpc", ...extra], cwd: config.cwd, env: { ...options.env, ...config.env } }, logger: options.logger ?? pino({ enabled: false }), diagnosticName: "Pi RPC", defaultRequestTimeoutMs: options.timeoutMs ?? 10000 });
 }
 export class PiRpcAgentClient implements AgentClient {
     readonly provider = "pi" as const;
-    readonly capabilities = { steer: true, resume: true, reasoning: true, mcp: true };
+    readonly capabilities = { steer: true, resume: true, reasoning: true, mcp: true, images: true };
     constructor(private options: ClientOptions) { }
     async createSession(config: AgentSessionConfig): Promise<PiSession> { return PiSession.open(this.options, config); }
     async resumeSession(handle: AgentPersistenceHandle, config: AgentSessionConfig): Promise<PiSession> { return PiSession.open(this.options, config, handle); }
@@ -49,9 +68,14 @@ class PiSession extends ProviderSession {
     private canceling = false;
     private usage?: AgentUsage;
     private settledMessages: unknown[] = [];
+    private options!: ClientOptions;
+    /** The session model accepts image input (get_state model.input includes "image"). */
+    private imageInput = false;
+    private inbound = new OrderedTasks();
     private constructor(config: AgentSessionConfig) { super("pi", config); }
     static async open(options: ClientOptions, config: AgentSessionConfig, handle?: AgentPersistenceHandle): Promise<PiSession> {
         const session = new PiSession(config);
+        session.options = options;
         if (config.modeId && config.modeId !== "default")
             throw new Error(`Unsupported Pi mode ${config.modeId}`);
         if (handle && !handle.sessionFile)
@@ -117,7 +141,7 @@ class PiSession extends ProviderSession {
                 args.push("--extension", extensionPath);
             }
             session.process = runtime(options, config, args);
-            session.process.onMessage(event => session.event(event));
+            session.process.onMessage(event => session.inbound.run(() => session.event(event)));
             session.process.onExit(exit => session.processExited(exit.error.message));
             const state = record(await session.process.request({ type: "get_state" }));
             session.sessionFile = text(state.sessionFile) || handle?.sessionFile;
@@ -126,6 +150,7 @@ class PiSession extends ProviderSession {
                 throw new Error("Pi did not return session identity");
             const model = record(state.model);
             session.config.model = model.id ? `${text(model.provider)}/${text(model.id)}` : config.model;
+            session.imageInput = Array.isArray(model.input) && model.input.includes("image");
             session.config.modeId ??= "default";
             return session;
         }
@@ -136,7 +161,8 @@ class PiSession extends ProviderSession {
         }
     }
     override getPersistence(): AgentPersistenceHandle | null { const handle = super.getPersistence(); return handle && this.sessionFile ? { ...handle, sessionFile: this.sessionFile } : null; }
-    protected async launchTurn(prompt: string): Promise<void> {
+    protected async launchTurn(prompt: AgentPromptInput): Promise<void> {
+        const payload = await piPromptPayload(prompt, this.imageInput);
         this.streamedText = false;
         this.streamedThinking = false;
         this.canceling = false;
@@ -144,15 +170,16 @@ class PiSession extends ProviderSession {
         this.settledMessages = [];
         // Pi's prompt acknowledgment may arrive only after agent_end.
         const turnId = this.activeTurn;
-        void this.process.request({ type: "prompt", message: prompt }, null).then(result => {
+        void this.process.request({ type: "prompt", ...payload }, null).then(result => {
             if (this.activeTurn === turnId && record(result).agentInvoked === false)
                 this.finish("completed");
         }, error => { if (this.activeTurn === turnId)
             this.finish(this.canceling ? "canceled" : "failed", errorText(error)); });
     }
-    async steerActiveTurn(prompt: string): Promise<boolean> { if (!this.activeTurn)
-        return false; await this.process.request({ type: "steer", message: prompt }); this.timeline({ type: "user_message", text: prompt }); return true; }
-    private event(event: Record<string, unknown>): void {
+    async steerActiveTurn(prompt: AgentPromptInput): Promise<boolean> { if (!this.activeTurn)
+        return false; const payload = await piPromptPayload(prompt, this.imageInput); if (!this.activeTurn)
+        return false; await this.process.request({ type: "steer", ...payload }); this.timeline({ type: "user_message", text: promptText(prompt) }); return true; }
+    private event(event: Record<string, unknown>): void | Promise<void> {
         if (!this.activeTurn || this.closed)
             return;
         if (event.type === "message_start") {
@@ -183,7 +210,7 @@ class PiSession extends ProviderSession {
             const id = text(event.toolCallId), name = text(event.toolName);
             const call = this.tools.get(id) ?? parseToolArgs(name, event.args);
             this.tools.set(id, call);
-            const result = splitPiToolResultImages(parseToolResult(event.result ?? event.partialResult)).result;
+            const split = splitPiToolResultImages(parseToolResult(event.result ?? event.partialResult)), result = split.result;
             const detail = mapToolDetail(call, result);
             let displayName = name || call.toolName;
             if (displayName === "mcp") {
@@ -191,9 +218,16 @@ class PiSession extends ProviderSession {
               const server = text(details.server ?? args.server), tool = text(details.tool ?? args.tool);
               if (server && tool) displayName = `${server}.${tool.startsWith(`${server}_`) ? tool.slice(server.length + 1) : tool}`;
             }
-            this.timeline({ type: "tool_call", callId: id, name: displayName, detail, ...(event.isError ? { status: "failed", error: result } : { status: event.type === "tool_execution_end" ? "completed" : "running", error: null }) });
-            if (event.type === "tool_execution_end")
-                this.tools.delete(id);
+            const emit = (images: AgentImageRef[] = []): void => {
+                this.timeline({ type: "tool_call", callId: id, name: displayName, detail, ...(images.length ? { images } : {}), ...(event.isError ? { status: "failed", error: result } : { status: event.type === "tool_execution_end" ? "completed" : "running", error: null }) });
+                if (event.type === "tool_execution_end")
+                    this.tools.delete(id);
+            };
+            // Only the final result's images are stored; partial updates would duplicate them.
+            if (event.type === "tool_execution_end" && split.images.length && this.options.saveImage)
+                return saveProviderImages(this.options.saveImage, split.images).then(images => { if (this.activeTurn && !this.closed)
+                    emit(images); });
+            emit();
         }
         if (event.type === "extension_ui_request" && ["confirm", "select", "input", "editor"].includes(text(event.method))) {
             const id = text(event.id);

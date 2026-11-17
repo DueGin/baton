@@ -1,15 +1,39 @@
 // Ported from Paseo (https://github.com/getpaseo/paseo) packages/server/src/server/agent/providers/claude/agent.ts @63ea3e5 — Copyright (c) 2025-present Mohamed Boudra, Apache-2.0. Modified for baton.
 import { query, type Query, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { terminateWithTreeKill } from "../tree-kill.js";
-import type { AgentClient, AgentPersistenceHandle, AgentSessionConfig, AgentUsage, ClientOptions, ProviderCatalog } from "../agent-sdk-types.js";
+import type { AgentClient, AgentImageRef, AgentPersistenceHandle, AgentPromptInput, AgentSessionConfig, AgentUsage, ClientOptions, ProviderCatalog } from "../agent-sdk-types.js";
+import { findImageBlocks, imageNote, promptText, readPromptImage, saveProviderImages } from "../images.js";
 import { ProviderSession, record, text, errorText } from "../session.js";
 import { externalEnv, spawnProcess } from "../process.js";
 import { mapClaudeCompletedToolCall, mapClaudeFailedToolCall, mapClaudeRunningToolCall } from "./claude/tool-call-mapper.js";
 export type ClaudeQueryFactory = typeof query;
+type ClaudeBlock = { type: "text"; text: string } | { type: "image"; source: { type: "base64"; media_type: "image/png" | "image/jpeg" | "image/gif" | "image/webp"; data: string } };
+type ClaudeContent = string | ClaudeBlock[];
+/** The Messages API rejects larger inline images; bigger files go as a path note Claude can Read. */
+const CLAUDE_INLINE_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+/** Text stays a plain string; image parts become base64 blocks at their position (Paseo toSdkUserMessage). */
+export async function claudePromptContent(prompt: AgentPromptInput): Promise<ClaudeContent> {
+    if (typeof prompt === "string")
+        return prompt;
+    const content: ClaudeBlock[] = [];
+    for (const part of prompt) {
+        if (part.type === "text") {
+            if (part.text)
+                content.push({ type: "text", text: part.text });
+            continue;
+        }
+        const image = ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(part.mimeType) ? await readPromptImage(part, CLAUDE_INLINE_IMAGE_MAX_BYTES) : null;
+        if (image)
+            content.push({ type: "image", source: { type: "base64", media_type: image.mimeType as "image/png" | "image/jpeg" | "image/gif" | "image/webp", data: image.data } });
+        else
+            content.push({ type: "text", text: imageNote(part) });
+    }
+    return content.length ? content : "";
+}
 const MODES = [
     { id: "default", label: "Default" }, { id: "acceptEdits", label: "Accept edits" },
     { id: "plan", label: "Plan", isReadOnly: true }, { id: "bypassPermissions", label: "Bypass permissions", isUnattended: true },
@@ -18,8 +42,8 @@ class PromptQueue implements AsyncIterable<SDKUserMessage> {
     private values: SDKUserMessage[] = [];
     private wake?: () => void;
     private ended = false;
-    push(text: string, priority?: "next"): string { if (this.ended)
-        throw new Error("Claude input closed"); const uuid = randomUUID(); this.values.push({ type: "user", uuid, message: { role: "user", content: text }, parent_tool_use_id: null, ...(priority ? { priority } : {}) }); this.wake?.(); return uuid; }
+    push(content: ClaudeContent, priority?: "next"): string { if (this.ended)
+        throw new Error("Claude input closed"); const uuid = randomUUID(); this.values.push({ type: "user", uuid, message: { role: "user", content } as SDKUserMessage["message"], parent_tool_use_id: null, ...(priority ? { priority } : {}) }); this.wake?.(); return uuid; }
     withdraw(ids: Set<string>): Set<string> {
         const removed = new Set(this.values.flatMap(value => value.uuid && ids.has(value.uuid) ? [value.uuid] : []));
         this.values = this.values.filter(value => !value.uuid || !ids.has(value.uuid));
@@ -40,7 +64,7 @@ class PromptQueue implements AsyncIterable<SDKUserMessage> {
 }
 export class ClaudeAgentClient implements AgentClient {
     readonly provider = "claude" as const;
-    readonly capabilities = { steer: true, resume: true, reasoning: true, mcp: true };
+    readonly capabilities = { steer: true, resume: true, reasoning: true, mcp: true, images: true };
     constructor(private options: ClientOptions & {
         queryFactory?: ClaudeQueryFactory;
     }) { }
@@ -79,7 +103,7 @@ class ClaudeSession extends ProviderSession {
         name: string;
         input: unknown;
     }>();
-    constructor(options: ClientOptions & {
+    constructor(private options: ClientOptions & {
         queryFactory?: ClaudeQueryFactory;
     }, config: AgentSessionConfig, handle?: AgentPersistenceHandle) {
         super("claude", config);
@@ -122,13 +146,17 @@ class ClaudeSession extends ProviderSession {
             clearTimeout(timer);
         }
     }
-    protected async launchTurn(prompt: string): Promise<void> { this.canceling = false; this.sawText = false; this.streamedBlocks.clear(); this.unstartedMessages.add(this.queue.push(prompt)); }
-    async steerActiveTurn(prompt: string): Promise<boolean> { if (!this.activeTurn)
-        return false; if (this.canceling) return false; this.unstartedMessages.add(this.queue.push(prompt, "next")); this.timeline({ type: "user_message", text: prompt }); return true; }
+    protected async launchTurn(prompt: AgentPromptInput): Promise<void> { const content = await claudePromptContent(prompt); this.canceling = false; this.sawText = false; this.streamedBlocks.clear(); this.unstartedMessages.add(this.queue.push(content)); }
+    async steerActiveTurn(prompt: AgentPromptInput): Promise<boolean> { if (!this.activeTurn)
+        return false; if (this.canceling) return false; const content = await claudePromptContent(prompt); if (!this.activeTurn || this.canceling || this.closed) return false; this.unstartedMessages.add(this.queue.push(content, "next")); this.timeline({ type: "user_message", text: promptText(prompt) }); return true; }
     private async pump(): Promise<void> {
         try {
-            for await (const raw of this.query)
-                this.message(record(raw));
+            for await (const raw of this.query) {
+                // Saving tool-output images is the only asynchronous step; it keeps event order.
+                const pending = this.message(record(raw));
+                if (pending)
+                    await pending;
+            }
             if (!this.closed)
                 this.processExited("Claude stream ended");
         }
@@ -137,7 +165,7 @@ class ClaudeSession extends ProviderSession {
                 this.processExited(errorText(error));
         }
     }
-    private message(message: Record<string, unknown>): void {
+    private message(message: Record<string, unknown>): void | Promise<void> {
         if (this.closed)
             return;
         if (message.type === "command_lifecycle" || (message.type === "system" && message.subtype === "command_lifecycle")) {
@@ -193,19 +221,21 @@ class ClaudeSession extends ProviderSession {
         }
         if (message.type === "user") {
             const content = record(message.message).content;
-            if (Array.isArray(content))
-                for (const block of content.map(record))
-                    if (block.type === "tool_result") {
-                        const id = text(block.tool_use_id), tool = this.tools.get(id);
-                        if (!tool)
-                            continue;
-                        const output = sanitizeImages(message.tool_use_result ?? (Array.isArray(block.content) ? block.content.map(record).filter(c => c.type === "text").map(c => text(c.text)).join("\n") : block.content));
-                        const params = { callId: id, name: tool.name, input: tool.input, output };
-                        const mapped = block.is_error ? mapClaudeFailedToolCall({ ...params, error: output }) : mapClaudeCompletedToolCall(params);
-                        if (mapped)
-                            this.timeline(mapped);
-                        this.tools.delete(id);
-                    }
+            if (Array.isArray(content)) {
+                const results = content.map(record).filter(block => block.type === "tool_result" && this.tools.has(text(block.tool_use_id)));
+                const images = this.options.saveImage ? results.map(block => toolResultImages(block, message.tool_use_result)) : [];
+                if (images.some(list => list.length))
+                    return (async () => {
+                        for (const [index, block] of results.entries()) {
+                            const tool = this.tools.get(text(block.tool_use_id));
+                            const refs = await saveProviderImages(this.options.saveImage, (images[index] ?? []).map(image => ({ ...image, ...(tool?.name === "Read" && typeof record(tool.input).file_path === "string" ? { name: basename(text(record(tool.input).file_path)) } : {}) })));
+                            if (!this.closed)
+                                this.toolResult(block, message, refs);
+                        }
+                    })();
+                for (const block of results)
+                    this.toolResult(block, message);
+            }
         }
         if (message.type === "result") {
             const failed = message.is_error === true || message.subtype !== "success";
@@ -237,6 +267,17 @@ class ClaudeSession extends ProviderSession {
             const errors = Array.isArray(message.errors) ? message.errors.join("\n") : text(message.result);
             this.finish(this.canceling ? "canceled" : failed ? "failed" : "completed", errors || "Claude failed", mapped);
         }
+    }
+    private toolResult(block: Record<string, unknown>, message: Record<string, unknown>, images: AgentImageRef[] = []): void {
+        const id = text(block.tool_use_id), tool = this.tools.get(id);
+        if (!tool)
+            return;
+        const output = sanitizeImages(message.tool_use_result ?? (Array.isArray(block.content) ? block.content.map(record).filter(c => c.type === "text").map(c => text(c.text)).join("\n") : block.content));
+        const params = { callId: id, name: tool.name, input: tool.input, output };
+        const mapped = block.is_error ? mapClaudeFailedToolCall({ ...params, error: output }) : mapClaudeCompletedToolCall(params);
+        if (mapped)
+            this.timeline(images.length ? { ...mapped, images } : mapped);
+        this.tools.delete(id);
     }
     async interrupt(): Promise<void> {
         if (!this.activeTurn)
@@ -279,6 +320,11 @@ class ClaudeSession extends ProviderSession {
     }
 }
 
+/** Images of one tool_result: its content blocks, else the SDK's structured tool_use_result (Read). */
+function toolResultImages(block: Record<string, unknown>, toolUseResult: unknown): Array<{ data: string; mimeType: string | null }> {
+    const inline = Array.isArray(block.content) ? findImageBlocks(block.content) : [];
+    return inline.length ? inline : findImageBlocks(toolUseResult);
+}
 function sanitizeImages(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sanitizeImages);
   if (value === null || typeof value !== "object") return value;
