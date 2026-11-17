@@ -1384,3 +1384,6 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .settings-tab.selected { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
 .settings-shell > .page-content { overflow: visible; flex: none; }
 .agent-baton-icon { border-radius: 22%; background: center / contain no-repeat; max-width: none; max-height: none; }
+.composer .composer-stop { display: inline-flex; align-items: center; gap: 5px; background: var(--text); border-color: var(--text); color: var(--surface); }
+.composer .composer-stop:hover:not(:disabled) { background: var(--red, #c4473a); border-color: var(--red, #c4473a); }
+.composer .composer-resume { display: inline-flex; align-items: center; gap: 5px; }

@@ -8,7 +8,7 @@ import { createScenario, replay } from "../demo/scenario.js";
 import { demoBriefPrompt, demoResultsPrompt } from "../demo/prompts.js";
 import { reasoningBlockId, reasoningPreferences } from "../lib/reasoning.js";
 import type { TimelineItem } from "@baton/protocol";
-import type { MessageActionState } from "../lib/conversation.js";
+import { nodeIsLive, type MessageActionState } from "../lib/conversation.js";
 
 describe("safe agent content rendering", () => {
   it("renders the anchored question between the agent introduction and same-turn continuation", async () => {
@@ -28,6 +28,16 @@ describe("safe agent content rendering", () => {
     expect(transcript).toContain("question-marker"); expect(transcript).toContain("在输入框上方作答"); expect(transcript).not.toContain("question-card");
     expect(stack.indexOf('class="question-dock"')).toBeLessThan(stack.indexOf('class="composer"')); expect(stack).toContain("question-card question-pending is-compact"); expect(stack).toContain("提交回答"); expect(stack).toContain('aria-label="收起问题"');
     expect(html.match(new RegExp(`id="question-${encodeURIComponent(question.id)}"`, "g"))).toHaveLength(1);
+  });
+  it("turns the empty composer's send button into 停止 while agents work and 继续 once paused", () => {
+    const now = Date.parse("2026-11-10T07:00:00Z"); const store = new RunStore(new DemoClient(() => now));
+    const live = replay(createScenario(0), 30000); const node = live.nodes[0]!;
+    expect(live.nodes.some(entry => nodeIsLive(live, entry))).toBe(true);
+    const render = (snapshot: typeof live, actions = true) => renderToStaticMarkup(<Transcript snapshot={snapshot} store={store} items={{ [node.id]: [] }} itemStatus={{ [node.id]: "ready" }} nodeId={node.id} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} {...(actions ? { stopRun: () => undefined, resumeRun: () => undefined } : {})} />);
+    const working = render(live); expect(working).toContain("composer-stop"); expect(working).toContain("停止"); expect(working).not.toContain(">发送<");
+    const paused = render({ ...live, run: { ...live.run, status: "paused" } }); expect(paused).toContain("composer-resume"); expect(paused).toContain("继续");
+    const done = render({ ...live, run: { ...live.run, status: "completed" } }); expect(done).not.toContain("composer-stop"); expect(done).toContain("发送");
+    expect(render(live, false)).not.toContain("composer-stop");
   });
   it("keeps queued/retracted rows out of the transcript and places icon actions on steered messages", () => {
     const snapshot = replay(createScenario(0), 86000); const node = snapshot.nodes[0]!;

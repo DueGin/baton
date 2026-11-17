@@ -96,8 +96,8 @@ function QuestionMarker({ question, jump }: { question: QuestionRecord; jump: (i
   const prompts = questionPrompts(question);
   return <button type="button" className="question-marker" onClick={() => jump(question.id)} title="跳到输入框上方的问题卡片"><i aria-hidden="true" /><strong>等你回答</strong><span>{prompts[0]?.question}{prompts.length > 1 ? ` 等 ${prompts.length} 个问题` : ""}</span><small>在输入框上方作答 ↓</small></button>;
 }
-export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNodeId, now, inspect, projectName, answer, busy }: {
-  answer: HumanActions["answer"]; busy: boolean; projectName?: string; snapshot: RunSnapshot; store: RunStore; items: Record<string, ItemRecord[]>; itemStatus: Record<string, string>;
+export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNodeId, now, inspect, projectName, answer, busy, stopRun, resumeRun }: {
+  answer: HumanActions["answer"]; busy: boolean; projectName?: string; stopRun?: () => void; resumeRun?: () => void; snapshot: RunSnapshot; store: RunStore; items: Record<string, ItemRecord[]>; itemStatus: Record<string, string>;
   nodeId: string; setNodeId: (id: string) => void; now: number; inspect: (id: string) => void;
 }) {
   const [draft, setDraft] = useState(""); const [follow, setFollow] = useState(true); const bottom = useRef<HTMLDivElement>(null);
@@ -142,6 +142,11 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
     });
     observer.observe(textarea); return () => observer.disconnect();
   }, [draft, node?.id]);
+  // Empty composer + agents still working anywhere in this run → the send button becomes 停止 (pause the
+  // whole run: every running turn is interrupted and nothing restarts on its own); a paused run offers 继续.
+  const terminal = ["completed", "failed", "canceled"].includes(snapshot.run.status);
+  const runWorking = !terminal && snapshot.run.status !== "paused" && snapshot.nodes.some(entry => nodeIsLive(snapshot, entry));
+  const composerAction: "send" | "stop" | "resume" = draft.trim() ? "send" : runWorking && stopRun ? "stop" : snapshot.run.status === "paused" && resumeRun ? "resume" : "send";
   const submit = (): void => { const text = draft.trim(); if (!text || !node) return; setDraft(""); setFollow(true); void store.sendMessage(node.id, text); };
   if (!node) return <Empty>等待根节点创建…</Empty>;
   return <div className="transcript-view"><div className="view-toolbar conversation-toolbar"><div className="transcript-selector"><AgentMark agent={node.agentId} small /><select aria-label="选择会话节点" value={node.id} onChange={event => setNodeId(event.target.value)}>{treeOrder(snapshot.nodes).map(entry => <option key={entry.id} value={entry.id}>{"　".repeat(entry.depth)}{snapshot.run.status === "paused" && !["canceled", "completed", "failed", "replaced"].includes(entry.status) ? "⏸ " : nodeIsLive(snapshot, entry) ? "◉ " : ""}{entry.title} · {entry.agentId}{nodeIsLive(snapshot, entry) ? " · 运行中" : ""}</option>)}</select><Status status={displayStatus(node, snapshot)} /></div><div className="conversation-toolbar-actions"><span className="muted">{messages.length} items</span><button className="text-button" onClick={() => inspect(node.id)} title="查看当前节点详情">节点详情 ↗</button></div></div>
@@ -149,6 +154,8 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
     <div className="composer-stack">{dockQuestions.length > 0 && <div className="question-dock" aria-label="待回答的问题">{dockQuestions.map(question => <QuestionCard key={question.id} inline compact question={question} answer={answer} busy={busy} />)}</div>}
     <div className="composer-tools"><BackgroundPopover projectName={projectName} key={snapshot.run.id} snapshot={snapshot} now={now} client={store.client} /><PullRequestPopover key={`pr:${snapshot.run.id}`} snapshot={snapshot} client={store.client} inspect={inspect} /></div>
     <QueueDock key={node.id} entries={queue} actions={state.messageActions} pending={queueState?.pending} error={queueState?.error} reorder={order => { void store.reorderQueue(node.id, order); }} act={(seq, action) => store.actOnMessage(node.id, seq, action)} edit={(seq, text) => store.editMessage(node.id, seq, text)} />
-    <form className="composer" onSubmit={event => { event.preventDefault(); submit(); }}><textarea ref={input} aria-label="消息" placeholder={`向 ${node.agentId} 发送消息…${live ? "（运行中也可发送）" : ""}`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); submit(); } }} disabled={["canceled", "replaced"].includes(node.status)} rows={2} /><div className="composer-footer"><span title="送达方式会显示在消息旁">{snapshot.run.status === "paused" ? "会话已暂停，消息会在继续后送达" : live ? "运行中 · 发送后排队，可在消息上改为引导或立即发送" : "发送到当前节点"} · ⌘ / Ctrl + Enter</span><button className="button primary" disabled={!draft.trim() || ["canceled", "replaced"].includes(node.status)}><Icon name="arrow" size={15} />发送</button></div></form></div>
+    <form className="composer" onSubmit={event => { event.preventDefault(); submit(); }}><textarea ref={input} aria-label="消息" placeholder={`向 ${node.agentId} 发送消息…${live ? "（运行中也可发送）" : ""}`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); submit(); } }} disabled={["canceled", "replaced"].includes(node.status)} rows={2} /><div className="composer-footer"><span title="送达方式会显示在消息旁">{snapshot.run.status === "paused" ? "会话已暂停，消息会在继续后送达" : live ? "运行中 · 发送后排队，可在消息上改为引导或立即发送" : "发送到当前节点"} · ⌘ / Ctrl + Enter</span>{composerAction === "stop" ? <button type="button" className="button composer-stop" disabled={busy} title="停止本会话中所有正在工作的 agent（可继续）" onClick={() => stopRun?.()}><Icon name="stop" size={13} />停止</button>
+      : composerAction === "resume" ? <button type="button" className="button primary composer-resume" disabled={busy} title="继续本会话" onClick={() => resumeRun?.()}><Icon name="play" size={13} />继续</button>
+      : <button className="button primary" disabled={!draft.trim() || ["canceled", "replaced"].includes(node.status)}><Icon name="arrow" size={15} />发送</button>}</div></form></div>
   </div>;
 }
