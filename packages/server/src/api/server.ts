@@ -89,6 +89,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
   let registry: DriverRegistry;
   try { registry = options.registry ?? (options.fake ? new FakeDriverRegistry() : (await import("../driver/paseo-adapter.js")).createPaseoDriverRegistry({ home, saveImage: (data, mimeType, name) => attachments.saveImage(data, mimeType, name) })); }
   catch (error) { store.close(); throw error; }
+  if (registry instanceof FakeDriverRegistry) registry.saveImage = (data, mimeType, name) => attachments.saveImage(data, mimeType, name);
   try {
     const projects = new Projects(store); await projects.migrate();
     if (options.fake) { const path = join(home, "demo-project"); await mkdir(path, { recursive: true }); await projects.create({ path, name: "Demo project" }); }

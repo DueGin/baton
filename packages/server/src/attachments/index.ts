@@ -103,11 +103,13 @@ export class Attachments {
     try { return { record, bytes: await readFile(this.path(record)) }; } catch { return undefined; }
   }
   private async put(bytes: Buffer, type: AttachmentMimeType, name?: string): Promise<AttachmentRecord> {
-    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const sha256 = createHash("sha256").update(bytes).digest("hex"), clean = cleanName(name);
+    // Identical bytes share one id and file; the caller still gets the name it asked for.
+    const named = (stored: AttachmentRecord): AttachmentRecord => clean ? { ...stored, name: clean } : stored;
     const existing = this.store.attachmentBySha(sha256);
-    if (existing && await this.present(existing)) return existing;
+    if (existing && await this.present(existing)) return named(existing);
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
-    const size = imageSize(bytes, type), clean = cleanName(name);
+    const size = imageSize(bytes, type);
     const record: AttachmentRecord = existing ?? { id: `att_${randomBytes(12).toString("base64url")}`, mimeType: type, ...(clean ? { name: clean } : {}), ...(size ?? {}), size: bytes.byteLength, createdAt: new Date().toISOString() };
     const file = this.path(record), temp = `${file}.${randomBytes(6).toString("hex")}.tmp`;
     await writeFile(temp, bytes, { mode: 0o600 });
@@ -115,7 +117,7 @@ export class Attachments {
     // A concurrent save of the same bytes may have won the row; keep the stored record.
     const stored = this.store.insertAttachment(record, sha256);
     if (stored.id !== record.id) await rm(file, { force: true });
-    return stored;
+    return named(stored);
   }
   private async present(record: AttachmentRecord): Promise<boolean> {
     try { return (await stat(this.path(record))).isFile(); } catch { return false; }

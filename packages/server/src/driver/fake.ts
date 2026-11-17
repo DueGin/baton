@@ -4,7 +4,7 @@ import { terminateProcessIds } from "@baton/providers";
 import { setTimeout as delay } from "node:timers/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { AgentEntry, BatonToolName, JsonValue, PermissionRequest, PermissionResponse, TimelineItem, Usage } from "@baton/protocol";
+import type { AgentEntry, AttachmentRef, BatonToolName, JsonValue, PermissionRequest, PermissionResponse, TimelineItem, Usage } from "@baton/protocol";
 import type { AgentDriver, DriverEvent, DriverRegistry, DriverSession, OpenSessionSpec, PromptInput, PromptPart, SteerOutcome } from "./types.js";
 type ImagePart = Extract<PromptPart, { type: "image" }>;
 /** Text a fake agent "sees": image parts are echoed as `[image name]`. */
@@ -24,13 +24,17 @@ export interface FakeContext {
   steered: string[];
   /** Real subprocess, parented by this fake session's agent supervisor; caller owns cleanup. */
   spawn(command: string, args?: string[], options?: { detached?: boolean }): Promise<number>;
+  /** Stores an image the way real drivers store tool output (startServer wires the attachment store). */
+  saveImage(data: Uint8Array | string, mimeType: string, name?: string): Promise<AttachmentRef>;
 }
+export type FakeSaveImage = (data: Uint8Array | string, mimeType: string, name?: string) => Promise<AttachmentRef>;
 export type FakeScript = (context: FakeContext) => Promise<void> | void;
 export interface FakeDriverOptions { script?: FakeScript; scripts?: FakeScript[]; steer?: boolean; label?: string; /** Accept image parts (default true). */ images?: boolean }
 const capabilities = { steer: true, resume: true, reasoning: true, mcp: true, images: true };
 export class FakeDriver implements AgentDriver {
   readonly capabilities: AgentEntry["capabilities"];
   readonly sessions: FakeSession[] = [];
+  saveImage?: FakeSaveImage;
   constructor(readonly agentId: string, readonly options: FakeDriverOptions = {}) { this.capabilities = { ...capabilities, steer: options.steer ?? true, images: options.images ?? true }; }
   async open(spec: OpenSessionSpec): Promise<FakeSession> {
     const session = new FakeSession(this, spec); this.sessions.push(session); return session;
@@ -114,6 +118,10 @@ export class FakeSession implements DriverSession {
           throw error;
         }
       },
+      saveImage: (data, mimeType, name) => {
+        const save = this.driver.saveImage;
+        return save ? save(data, mimeType, name) : Promise.reject(new Error("No attachment store attached to the fake driver"));
+      },
       permission: (request) => new Promise((resolve) => {
         this.permissions.set(request.id, { request, resolve }); this.emit({ type: "permission_requested", turnId: id, request });
       }),
@@ -161,6 +169,8 @@ export class FakeSession implements DriverSession {
 }
 export class FakeDriverRegistry implements DriverRegistry {
   readonly drivers: Map<string, FakeDriver>;
+  /** Set by startServer: lets fake scripts store images through the attachment store. */
+  set saveImage(save: FakeSaveImage) { for (const driver of this.drivers.values()) driver.saveImage = save; }
   constructor(scripts?: Record<string, FakeScript | FakeDriverOptions> | FakeDriver[]) {
     const drivers = Array.isArray(scripts) ? scripts : Object.entries(scripts ?? { "fake-claude": { label: "Claude · demo" }, "fake-codex": { label: "Codex · demo" }, "fake-pi": { label: "Pi · demo" } }).map(([id, value]) => new FakeDriver(id, typeof value === "function" ? { script: value } : value));
     this.drivers = new Map(drivers.map((d) => [d.agentId, d]));
