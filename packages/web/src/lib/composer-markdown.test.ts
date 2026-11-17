@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { docIsEmpty, docToMarkdown, escapeText, IMAGE_NODE, markdownToDoc, RAW_NODE } from "./composer-markdown.js";
+import { docIsEmpty, docToMarkdown, escapeText, IMAGE_NODE, markdownToDoc, pastedTextDoc, pasteKind, RAW_NODE } from "./composer-markdown.js";
 
 const roundTrip = (markdown: string) => docToMarkdown(markdownToDoc(markdown));
 const paragraph = (...content: object[]) => ({ type: "doc", content: [{ type: "paragraph", content }] });
@@ -76,5 +76,29 @@ describe("composer markdown", () => {
     expect(docIsEmpty({ type: "doc", content: [{ type: "paragraph", content: [text("  ")] }, { type: "paragraph" }] })).toBe(true);
     expect(docIsEmpty(paragraph(text("x")))).toBe(false);
     expect(docIsEmpty(paragraph({ type: IMAGE_NODE, attrs: { key: "k" } }))).toBe(false);
+  });
+});
+
+describe("pasted text", () => {
+  it("reads Markdown as formatted content and keeps code and plain text literal", () => {
+    expect(pasteKind("# 计划\n\n- 一\n- 二")).toBe("markdown");
+    expect(pasteKind("请看 **重点** 和 `config.ts`")).toBe("markdown");
+    expect(pasteKind("- a\n  - nested")).toBe("markdown");
+    expect(pasteKind("```py\nprint(1)\n```")).toBe("markdown");
+    expect(pasteKind("| a | b |\n| - | - |")).toBe("markdown");
+    expect(pasteKind("def __init__(self):\n    # comment\n    return 1")).toBe("code");
+    expect(pasteKind("Error: boom\n    at foo (a.js:1:2)\n    at bar (b.js:3:4)")).toBe("code");
+    expect(pasteKind("def __init__(self): pass")).toBe("text");
+    expect(pasteKind("2 * 3 * 4 和 a_b_c")).toBe("text");
+    expect(pasteKind("第一行\n第二行")).toBe("text");
+  });
+  it("builds paragraphs with line breaks, code blocks or parsed Markdown", () => {
+    expect(pastedTextDoc("一\n二\n\n三")).toEqual({ type: "doc", content: [{ type: "paragraph", content: [text("一"), { type: "hardBreak" }, text("二")] }, { type: "paragraph", content: [text("三")] }] });
+    expect(pastedTextDoc("# 不是标题", { plain: true })).toEqual(paragraph(text("# 不是标题")));
+    expect(pastedTextDoc("const a = 1;\nconst b = 2;\n", { language: "typescript" })).toEqual({ type: "doc", content: [{ type: "codeBlock", attrs: { language: "typescript" }, content: [text("const a = 1;\nconst b = 2;")] }] });
+    expect(pastedTextDoc("const a = 1;", { language: "typescript" })).toEqual(paragraph(text("const a = 1;")));
+    expect(pastedTextDoc("# 标题", { language: "markdown" }).content?.[0]?.type).toBe("heading");
+    expect(pastedTextDoc("  indented\n  log").content?.[0]?.type).toBe("codeBlock");
+    expect(docToMarkdown(pastedTextDoc("a_b *c* [d]", { plain: true }))).toBe("a_b \\*c\\* [d]");
   });
 });

@@ -242,8 +242,6 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .diff .removed { color: var(--red); background: var(--red-soft); }
 .composer { padding: 12px 16px 10px; margin: 0 24px 20px; max-width: 800px; align-self: center; width: calc(100% - 48px); border: 1px solid var(--border-strong); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); }
 .composer:focus-within { border-color: var(--accent); }
-.composer textarea { display: block; width: 100%; background: transparent; border: 0; border-radius: 0; padding: 0; font-size: 12px; resize: none; }
-.composer textarea:focus { outline: none; }
 .composer-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 5px; }
 .composer-footer > span { color: var(--text-dim); font-size: 9px; }
 .composer .button { padding: 6px 10px; font-size: 10px; }
@@ -774,7 +772,6 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .conversation-toolbar-actions .muted { font: 9px var(--font-mono); }
 .transcript-content { padding-top: 18px; padding-bottom: 18px; }
 .composer { flex: none; margin: 7px 18px 10px; padding: 8px 12px 7px; max-width: 840px; width: calc(100% - 36px); }
-.composer textarea { line-height: 20px; min-height: 40px; max-height: 160px; overflow-y: auto; }
 .composer-footer { margin-top: 4px; min-height: 24px; gap: 8px; }
 .composer-footer > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 9px; }
 .composer .button { padding: 4px 9px; line-height: 1.5; }
@@ -1432,3 +1429,69 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .image-lightbox-close { position: absolute; top: 12px; right: 14px; width: 32px; height: 32px; border: 0; border-radius: 50%; background: #ffffff1f; color: #fff; font-size: 20px; line-height: 1; }
 .image-lightbox-close:hover { background: #ffffff33; }
 @keyframes image-lightbox-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* Composer: a TipTap editor that renders Markdown as you type (Typora-like). It grows to 160px, then
+   scrolls; the send button stays in the footer. */
+.composer { position: relative; }
+.composer-body { min-width: 0; }
+.composer-editor-scroll { min-height: 40px; max-height: 160px; overflow-y: auto; cursor: text; }
+.composer-body.is-disabled .composer-editor-scroll { cursor: not-allowed; opacity: .6; }
+.composer-editor { min-height: 40px; outline: none; color: var(--text); font-size: 12px; line-height: 20px; white-space: pre-wrap; overflow-wrap: anywhere; caret-color: var(--accent); }
+.composer-editor > * + * { margin-top: 4px; }
+.composer-editor p { margin: 0; line-height: 20px; }
+.composer-editor p.is-editor-empty:first-child::before { content: attr(data-placeholder); float: left; height: 0; color: var(--text-dim); pointer-events: none; }
+.composer-editor h1, .composer-editor h2, .composer-editor h3, .composer-editor h4, .composer-editor h5, .composer-editor h6 { margin: 0; color: var(--text); font-weight: 650; }
+.composer-editor h1 { font-size: 17px; line-height: 26px; } .composer-editor h2 { font-size: 15px; line-height: 24px; } .composer-editor h3 { font-size: 13.5px; line-height: 22px; }
+.composer-editor h4, .composer-editor h5, .composer-editor h6 { font-size: 12px; line-height: 20px; }
+.composer-editor ul, .composer-editor ol { margin: 0; padding-left: 20px; }
+.composer-editor li > p { margin: 0; }
+.composer-editor li > * + * { margin-top: 2px; }
+.composer-editor li::marker { color: var(--text-dim); }
+.composer-editor blockquote { margin: 0; padding-left: 10px; border-left: 3px solid var(--border-strong); color: var(--text-secondary); }
+.composer-editor code { padding: 1px 4px; border-radius: 4px; background: var(--surface-active); font: 11px var(--font-mono); }
+.composer-editor pre { margin: 0; padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: 11px/1.6 var(--font-mono); white-space: pre-wrap; }
+.composer-editor pre code { padding: 0; background: none; font: inherit; }
+.composer-editor pre.composer-raw::before { content: "Markdown 源码"; display: block; margin-bottom: 2px; color: var(--text-dim); font: 600 9px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: .4px; }
+.composer-editor a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; cursor: text; }
+.composer-editor s { color: var(--text-secondary); }
+.composer-editor hr { margin: 8px 0; border: 0; border-top: 1px solid var(--border-strong); }
+.composer-editor hr.ProseMirror-selectednode { border-top-color: var(--accent); }
+.composer-editor ul[data-type="taskList"] { padding-left: 2px; list-style: none; }
+.composer-editor ul[data-type="taskList"] li { display: flex; align-items: flex-start; gap: 6px; }
+.composer-editor ul[data-type="taskList"] li > label { flex: none; display: flex; height: 20px; align-items: center; }
+.composer-editor ul[data-type="taskList"] li > label input { margin: 0; accent-color: var(--accent); }
+.composer-editor ul[data-type="taskList"] li > div { flex: 1; min-width: 0; }
+.composer-editor ul[data-type="taskList"] li[data-checked="true"] > div { color: var(--text-dim); text-decoration: line-through; }
+.composer-editor .ProseMirror-gapcursor:after { border-top-color: var(--text); }
+
+/* Inline image pill (after Orca's promptPill badge): secondary chip, muted text, image icon and
+   "图片 #N", baseline-aligned in the text, ringed while selected. */
+.composer-image-node { display: inline; }
+.composer-image-pill { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; height: 18px; margin: 0 1px; padding: 0 6px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-active); color: var(--text-secondary); font-size: 11px; font-weight: 500; line-height: 16px; vertical-align: baseline; white-space: nowrap; user-select: none; cursor: default; transition: box-shadow .12s, border-color .12s; }
+.composer-image-pill svg { flex: none; }
+.composer-image-pill[data-selected="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.composer-image-pill.is-uploading { color: var(--text-dim); }
+.composer-image-pill.is-failed, .composer-image-pill.is-missing { border-color: color-mix(in srgb, var(--red) 45%, transparent); background: var(--red-soft); color: var(--red); }
+.composer-pill-spinner { width: 10px; height: 10px; flex: none; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: composer-spin .8s linear infinite; }
+@keyframes composer-spin { to { transform: rotate(360deg); } }
+
+/* Numbered thumbnails above the editor; × removes the image and its pill. */
+.composer-images { display: flex; gap: 8px; padding: 6px 6px 8px 0; overflow-x: auto; }
+.composer-thumb { position: relative; flex: none; width: 48px; height: 48px; }
+.composer-thumb-open { position: relative; display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; padding: 0; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); color: var(--text-dim); overflow: hidden; cursor: zoom-in; }
+.composer-thumb-open:hover { border-color: var(--border-strong); }
+.composer-thumb-open img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.composer-thumb.is-uploading img { opacity: .5; }
+.composer-thumb.is-failed .composer-thumb-open, .composer-thumb.is-missing .composer-thumb-open { border-color: var(--red); cursor: pointer; }
+.composer-thumb.is-failed img, .composer-thumb.is-missing img { opacity: .35; filter: grayscale(1); }
+.composer-thumb-retry { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--red); }
+.composer-thumb-number { position: absolute; left: 3px; bottom: 3px; min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px; background: #000000a8; color: #fff; font-size: 9px; font-weight: 600; line-height: 15px; text-align: center; pointer-events: none; }
+.composer-thumb-progress { position: absolute; left: 50%; top: 50%; width: 16px; height: 16px; margin: -8px 0 0 -8px; border: 2px solid #fff; border-right-color: transparent; border-radius: 50%; filter: drop-shadow(0 0 2px #0009); animation: composer-spin .8s linear infinite; pointer-events: none; }
+.composer-thumb-remove { position: absolute; top: -6px; right: -6px; display: flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0 0 1px; border: 1.5px solid var(--surface); border-radius: 50%; background: var(--text); color: var(--surface); font-size: 13px; line-height: 1; opacity: 0; transition: opacity .12s; }
+.composer-thumb:hover .composer-thumb-remove, .composer-thumb:focus-within .composer-thumb-remove { opacity: 1; }
+@media (hover: none) { .composer-thumb-remove { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .composer-pill-spinner, .composer-thumb-progress { animation-duration: 2.4s; } }
+
+.composer-actions { display: flex; flex: none; align-items: center; gap: 4px; }
+.composer .composer-attach { width: 26px; height: 26px; }
+.composer-footer > .composer-hint { color: var(--amber); font-weight: 600; }

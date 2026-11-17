@@ -73,7 +73,20 @@ function toBlock(node: RootContent, markdown: string): Node[] {
     default: return [raw(source(node, markdown))];
   }
 }
+/** Adjacent text with the same marks becomes one node (inline HTML and escapes split it while parsing). */
+function mergeText(nodes: Node[]): Node[] {
+  const out: Node[] = [];
+  for (const node of nodes) {
+    const last = out.at(-1);
+    if (node.type === "text" && last?.type === "text" && JSON.stringify(last.marks ?? []) === JSON.stringify(node.marks ?? [])) out[out.length - 1] = { ...last, text: (last.text ?? "") + (node.text ?? "") };
+    else out.push(node);
+  }
+  return out;
+}
 function toInline(nodes: PhrasingContent[], marks: Mark[], markdown: string): Node[] {
+  return mergeText(inlineNodes(nodes, marks, markdown));
+}
+function inlineNodes(nodes: PhrasingContent[], marks: Mark[], markdown: string): Node[] {
   const text = (value: string, extra: Mark[] = []): Node[] => {
     const all = [...marks, ...extra];
     return value ? [{ type: "text", text: value, ...(all.length ? { marks: all } : {}) }] : [];
@@ -162,9 +175,17 @@ function listItem(item: Node, marker: string, indent: number): string {
  */
 function serializeTextblock(nodes: Node[], prefix: string): string {
   const content = trimBreaks(nodes);
-  const plain = serializeInline(content, false);
+  const plain = serializeInline(content, NO_ESCAPES);
   if (!/[\\`*_[\]~|<>&#+=\-!.)]/.test(plain) || roundTrips(prefix + plain, content)) return plain;
-  return serializeInline(content, true);
+  // Escape everything, then drop each kind of escape the block does not need.
+  let enabled = new Set(ESCAPES); let best = serializeInline(content, enabled);
+  if (!roundTrips(prefix + best, content)) return best;
+  for (const kind of ESCAPES) {
+    const trial = new Set(enabled); trial.delete(kind);
+    const candidate = serializeInline(content, trial);
+    if (roundTrips(prefix + candidate, content)) { enabled = trial; best = candidate; }
+  }
+  return best;
 }
 function trimBreaks(nodes: Node[]): Node[] {
   let end = nodes.length;
@@ -205,18 +226,19 @@ function codeSpan(text: string): string {
   const pad = /^[`\s]|[`\s]$/.test(text) && text.trim() ? " " : "";
   return `${ticks}${pad}${text}${pad}${ticks}`;
 }
+const ESCAPES = ["backslash", "code", "star", "underscore", "bracket", "tilde", "pipe", "angle", "entity", "block"] as const;
+type Escape = typeof ESCAPES[number];
+const NO_ESCAPES: ReadonlySet<Escape> = new Set();
+const ESCAPE_PATTERNS: [Escape, RegExp][] = [["code", /`/g], ["star", /\*/g], ["underscore", /_/g], ["bracket", /[[\]]/g], ["tilde", /~/g], ["pipe", /\|/g], ["angle", /<(?=[A-Za-z/!?])/g], ["entity", /&(?=#?\w+;)/g]];
 /** Backslash-escape what could start Markdown syntax; `lineStart` also covers block markers. */
-export function escapeText(text: string, lineStart: boolean): string {
-  let out = text
-    .replace(/\\(?=[!-/:-@[-`{-~])/g, "\\\\")
-    .replace(/[`*_[\]~|]/g, "\\$&")
-    .replace(/<(?=[A-Za-z/!?])/g, "\\<")
-    .replace(/&(?=#?\w+;)/g, "\\&");
-  if (lineStart) out = out.replace(/^(#{1,6}(?=\s|$)|>|[-+](?=\s|$)|[=-]+\s*$)/, "\\$1").replace(/^(\d{1,9})([.)])(?=\s|$)/, "$1\\$2");
+export function escapeText(text: string, lineStart: boolean, enabled: ReadonlySet<Escape> = new Set(ESCAPES)): string {
+  let out = enabled.has("backslash") ? text.replace(/\\(?=[!-/:-@[-`{-~])/g, "\\\\") : text;
+  for (const [kind, pattern] of ESCAPE_PATTERNS) if (enabled.has(kind)) out = out.replace(pattern, "\\$&");
+  if (lineStart && enabled.has("block")) out = out.replace(/^(#{1,6}(?=\s|$)|>|[-+](?=\s|$)|[=-]+\s*$)/, "\\$1").replace(/^(\d{1,9})([.)])(?=\s|$)/, "$1\\$2");
   return out;
 }
 
-function serializeInline(nodes: Node[], escape: boolean): string {
+function serializeInline(nodes: Node[], escapes: ReadonlySet<Escape>): string {
   let out = ""; let pending = ""; let lineStart = true;
   const open: Mark[] = [];
   const emit = (text: string) => { out += (lineStart ? "" : pending) + text; pending = ""; };
@@ -258,7 +280,7 @@ function serializeInline(nodes: Node[], escape: boolean): string {
       } else { open.push(mark); out += DELIMITER[mark.type]; }
     }
     const linkBare = open.some(mark => mark.type === "link" && mark.attrs?.bare);
-    out += code ? codeSpan(core) : escape && !linkBare ? escapeText(core, lineStart) : core;
+    out += code ? codeSpan(core) : escapes.size && !linkBare ? escapeText(core, lineStart, escapes) : core;
     lineStart = false;
     pending = trail;
   });
@@ -272,4 +294,48 @@ function serializeInline(nodes: Node[], escape: boolean): string {
 export function docIsEmpty(doc: Node): boolean {
   const walk = (node: Node): boolean => node.type === IMAGE_NODE || node.type === "horizontalRule" || (node.type === "text" && Boolean(node.text?.trim())) || (node.content ?? []).some(walk);
   return !walk(doc);
+}
+
+// ───────────────────────────── pasted text ─────────────────────────────
+
+/**
+ * How plain text pasted into the composer is read. Markdown (agent output, notes) becomes formatted
+ * content like in Typora; code and logs with indented lines become a code block so their whitespace
+ * and `__dunder__`/`# comment` syntax survive; anything else is literal text.
+ */
+export function pasteKind(text: string): "markdown" | "code" | "text" {
+  const normalized = text.replace(/\r\n?/g, "\n").replace(/\n+$/, "");
+  const lines = normalized.split("\n");
+  if (/^ {0,3}(```|~~~)/m.test(normalized)) return "markdown";
+  if (lines.length > 1 && lines.some(line => /^[ \t]+\S/.test(line) && !/^\s+([-*+]|\d{1,9}[.)])\s/.test(line))) return "code";
+  if (/^ {0,3}(#{1,6}\s|>|[-*+]\s+\S|\d{1,9}[.)]\s+\S|(-{3,}|\*{3,})\s*$|\|.*\|\s*$)/m.test(normalized)) return "markdown";
+  if (/\*\*\S[^\n]*?\*\*|`[^`\n]+`|~~\S[^\n]*?~~|!?\[[^\]\n]+\]\([^)\s]+\)|(^|\s)\*\S[^*\n]*?\*(?=[\s,.!?;:，。！？；：]|$)/.test(normalized)) return "markdown";
+  return "text";
+}
+
+function textLines(text: string): Node[] {
+  return text.split("\n").flatMap((line, index): Node[] => [...(index ? [{ type: "hardBreak" }] : []), ...(line ? [{ type: "text", text: line }] : [])]);
+}
+/** Literal text: blank lines separate paragraphs, single newlines are line breaks. */
+export function plainTextDoc(text: string): Node {
+  const blocks = text.replace(/\r\n?/g, "\n").replace(/^\n+|\n+$/g, "").split(/\n{2,}/);
+  return { type: "doc", content: blocks.map(block => { const content = textLines(block); return content.length ? { type: "paragraph", content } : paragraph(); }) };
+}
+function codeDoc(text: string, language: string | null): Node {
+  const code = text.replace(/\r\n?/g, "\n").replace(/\n+$/, "");
+  return { type: "doc", content: [{ type: "codeBlock", attrs: { language }, ...(code ? { content: [{ type: "text", text: code }] } : {}) }] };
+}
+
+/**
+ * The document for pasted text. `plain` (Shift+⌘V) keeps it literal; `language` is the source
+ * editor's mode when it reports one (VS Code): Markdown is parsed, other code becomes a code block.
+ */
+export function pastedTextDoc(text: string, options: { plain?: boolean; language?: string | null } = {}): Node {
+  const normalized = text.replace(/\r\n?/g, "\n");
+  if (options.plain) return plainTextDoc(normalized);
+  const language = options.language?.toLowerCase();
+  if (language === "markdown") return markdownToDoc(normalized);
+  if (language && language !== "plaintext") return normalized.trim().includes("\n") ? codeDoc(normalized, language) : plainTextDoc(normalized);
+  const kind = pasteKind(normalized);
+  return kind === "markdown" ? markdownToDoc(normalized) : kind === "code" ? codeDoc(normalized, null) : plainTextDoc(normalized);
 }
