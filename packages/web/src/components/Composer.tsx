@@ -2,7 +2,7 @@ import { useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useSt
 import { EditorContent, useEditor, type Editor, type JSONContent } from "@tiptap/react";
 import { Slice, type Node as PMNode, type Schema } from "@tiptap/pm/model";
 import type { BatonClient } from "../api.js";
-import { docIsEmpty, docToMarkdown, IMAGE_NODE, pastedTextDoc } from "../lib/composer-markdown.js";
+import { docIsEmpty, docToMarkdown, IMAGE_NODE, markdownToDoc, pastedTextDoc } from "../lib/composer-markdown.js";
 import { acceptImages, attachmentName, composerUploads } from "../lib/composer-uploads.js";
 import { imageSource, useImageContext, useImageUrl } from "../lib/images.js";
 import { composerExtensions, imageIdentity, ImageOrderContext, imageStatus, type ComposerImageStatus } from "./composer-extensions.js";
@@ -169,6 +169,15 @@ export function Composer({ ref, nodeId, client, placeholder, disabled, imagesEna
     submit: () => actions.current.submit(),
     attach: files => actions.current.attach(files),
     focus: () => { editor?.commands.focus(); },
+    setDraft: markdown => {
+      if (!editor || editor.isDestroyed) return;
+      const doc = markdownToDoc(markdown), current = editor.getJSON();
+      if (docIsEmpty(current) && !draftImages(current).length) editor.commands.setContent(doc);
+      else editor.chain().focus("end").insertContent(doc.content ?? []).run();
+      editor.commands.focus("end");
+      flash("已把回退的消息放回输入框，可以修改后重新发送");
+    },
+    hint: text => flash(text),
   }), [editor]);
 
   const remove = (identity: string) => {

@@ -7,7 +7,7 @@ import type {
   ProjectRecord, ProjectSummary, CreateProjectRequest, PatchProjectRequest, ListDirsResponse,
   PullRequestRecord, ListPullRequestsResponse, LinkPullRequestRequest, PullRequestFeedbackRequest,
   SendMessageResponse, SendMode, DeliverMessageRequest, EditMessageRequest, ReorderQueueRequest, ReorderQueueResponse, InboxItem, AnswerQuestionRequest, ResolveEscalationRequest, PermissionRule, CreatePermissionRuleRequest,
-  AttachmentRecord,
+  AttachmentRecord, ListCheckpointsResponse, CheckpointChangesResponse, RollbackRequest, RollbackResponse,
 } from "@baton/protocol";
 
 /** The server may attach availability warnings to successful preset mutations. */
@@ -74,6 +74,11 @@ export interface BatonClient {
   attachmentBlob(id: string): Promise<Blob>;
   /** A local image an agent referred to by absolute path. */
   localImageBlob(path: string): Promise<Blob>;
+  /** Rollback checkpoints of a node, newest first (DESIGN §4.13). */
+  checkpoints(nodeId: string): Promise<ListCheckpointsResponse>;
+  /** What a file rollback to this checkpoint would undo. */
+  checkpointChanges(checkpointId: string): Promise<CheckpointChangesResponse>;
+  rollback(nodeId: string, request: RollbackRequest): Promise<RollbackResponse>;
   /** A connection lasts until aborted or disconnected. The store owns reconnects. */
   events(runId: string, after: number, onEvent: (event: RunEventEnvelope) => void, signal: AbortSignal): Promise<void>;
 }
@@ -149,6 +154,9 @@ export class ApiClient implements BatonClient {
   edit = (nodeId: string, itemSeq: number, body: EditMessageRequest) => this.request<void>(`/nodes/${encodeURIComponent(nodeId)}/messages/${itemSeq}`, "PATCH", body);
   reorderQueue = (nodeId: string, body: ReorderQueueRequest) => this.request<ReorderQueueResponse>(`/nodes/${encodeURIComponent(nodeId)}/queue`, "PUT", body);
   cancelNode = (id: string) => this.request<void>(`/nodes/${encodeURIComponent(id)}/cancel`, "POST", {});
+  checkpoints = (nodeId: string) => this.request<ListCheckpointsResponse>(`/nodes/${encodeURIComponent(nodeId)}/checkpoints`);
+  checkpointChanges = (id: string) => this.request<CheckpointChangesResponse>(`/checkpoints/${encodeURIComponent(id)}/changes`);
+  rollback = (nodeId: string, body: RollbackRequest) => this.request<RollbackResponse>(`/nodes/${encodeURIComponent(nodeId)}/rollback`, "POST", body);
   decide = (id: string, body: PermissionDecision) => this.request<void>(`/permissions/${encodeURIComponent(id)}`, "POST", body);
   delegation = (id: string) => this.request<DelegationRecord>(`/delegations/${encodeURIComponent(id)}`);
   teams = () => this.request<TeamPreset[]>("/teams");
