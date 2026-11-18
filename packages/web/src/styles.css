@@ -1607,3 +1607,8 @@ h1, h2, h3, h4, p { margin-top: 0; }
 /* Form contexts: inputs next to dropdowns share their height. */
 .rule-form input, .remember-form input:not([type=checkbox]), .advanced-policy-fields input, .title-model-fields input { height: 34px; padding-top: 0; padding-bottom: 0; }
 .form-field > .select, .rule-form > label > .select, .remember-form > label > .select, .advanced-policy-fields > label > .select { width: 100%; }
+
+/* ⋯ menus (<details data-menu>) use the dropdown surface: same radius, shadow, row padding and hover. */
+.project-menu > div, .reasoning-bulk-menu > div { padding: 4px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface-raised); box-shadow: var(--popover-shadow); }
+.project-menu button, .reasoning-bulk-menu button { min-height: 28px; padding: 5px 8px; border-radius: 5px; color: var(--text); font-size: 11px; }
+.project-menu button:hover:not(:disabled), .reasoning-bulk-menu button:hover:not(:disabled) { background: var(--surface-hover); }

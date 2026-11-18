@@ -2,7 +2,7 @@
 .rollback-anchor { position: relative; display: inline-flex; }
 .message-top-actions .message-action-rollback { width: 28px; height: 26px; padding: 5px; }
 .message-action-rollback.is-open { background: var(--surface-active); color: var(--text); }
-.rollback-menu { position: absolute; right: 0; top: calc(100% + 5px); z-index: 30; width: min(320px, calc(100vw - 48px)); display: flex; flex-direction: column; background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: 9px; box-shadow: var(--shadow), 0 1px 3px color-mix(in srgb, var(--text) 8%, transparent); font-size: 12px; text-align: left; cursor: default; }
+.rollback-menu { position: absolute; right: 0; top: calc(100% + 5px); z-index: 30; width: min(320px, calc(100vw - 48px)); display: flex; flex-direction: column; background: var(--surface-raised); border: 1px solid var(--border-strong); border-radius: 8px; box-shadow: var(--popover-shadow); font-size: 12px; text-align: left; cursor: default; }
 .rollback-menu.opens-up { top: auto; bottom: calc(100% + 5px); }
 .rollback-menu:focus { outline: none; }
 .rollback-menu > header { display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 12px; border-bottom: 1px solid var(--border); }
