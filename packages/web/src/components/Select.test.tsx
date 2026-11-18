@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Select, SelectListbox, type SelectOption } from "./Select.js";
+import { ReasoningControls } from "./ReasoningControls.js";
 
 const noop = (): undefined => undefined;
 const options: SelectOption[] = [{ value: "run", label: "本 Run", description: "只对当前 Run 生效" }, { value: "global", label: "全局", hint: "所有 Run" }, { value: "off", label: "关闭", disabled: true }, { value: "plan", label: "Plan", warning: "不可用", separated: true, depth: 2 }];
@@ -31,5 +32,11 @@ describe("shared Select", () => {
     expect(html).toContain('class="select-option is-separated is-warning" style="--depth:2"');
     // A separator never opens the list.
     expect(renderToStaticMarkup(<SelectListbox id="x" label="x" options={[options[3]!]} value="" />)).not.toContain("is-separated");
+  });
+  it("is what the console's former native selects render, keeping their accessible names", () => {
+    const reasoning = renderToStaticMarkup(<ReasoningControls rows={[]} />);
+    expect(reasoning).not.toContain("<select"); expect(reasoning).toContain('aria-label="思考过程显示"'); expect(reasoning).toContain(">折叠</span>");
+    const settings = renderToStaticMarkup(<ReasoningControls settings />);
+    expect(settings).toContain('role="combobox"'); expect(settings).toContain("思考过程显示");
   });
 });
