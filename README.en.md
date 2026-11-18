@@ -7,20 +7,33 @@
 Local agent client with **native delegation** and **observability**. baton detects and drives the agent CLIs already installed on your machine (Claude Code, Codex, pi, and any ACP agent such as Gemini CLI, Qwen Code, Kimi, OpenCode, Goose…) instead of running its own agent loop.
 
 - **Agents you already have.** 53 built-in agents: native Claude Code (Agent SDK), Codex (app-server) and pi (RPC), plus 50 ACP agents (OpenCode, Qwen Code, Gemini CLI, Kimi, Copilot, Cursor, Grok, Goose…). Detected from your PATH with version gates and install hints; every spec can be overridden in `config.json`.
-- **Native delegation.** Every agent gets a per-node `baton` MCP server (`delegate`, `wait`, `send`, `reassign`, `report_result`, `ask_human`, team tools…). Any agent can delegate to any detected agent, across vendors; results flow back automatically. Collaboration modes: dynamic teams (with roster approval), preset teams, or solo.
-- **Human in the loop.** Cross-run inbox for permissions, team proposals, inline question cards and escalations; permission rules; queue / steer / interrupt sending modes; pause and resume.
+- **Native delegation.** Every agent gets a per-node `baton` MCP server (`delegate`, `wait`, `send`, `reassign`, `report_result`, `ask_human`, team tools…). Any agent can delegate to any detected agent, across vendors; results flow back automatically. Collaboration modes: dynamic teams (with roster approval), preset teams, or solo. Dynamic and preset teams can carry candidate members (agent, model, thinking level, optional description, no role) that the lead hires on its own.
+- **Human in the loop.** Cross-run inbox for permissions, team proposals, inline question cards and escalations; permission rules; queue / steer / interrupt sending modes; pause and resume; roll a message back (conversation, files, or both).
+- **Conversation.** Live Markdown in the composer; images inline as pills for agents that accept them, and shown in the transcript; an outline rail to jump to any message you sent.
 - **Observability.** Live delegation topology, a session timeline (idle gaps compressed), full transcripts with GFM + Mermaid, per-turn timing, background processes started by agents, and pull requests they open (with CI / review status).
-- **Projects and desktop.** Every session belongs to a project (working directory). Electron desktop app for macOS and Windows with a native folder picker; the same console also runs in a browser.
+- **Projects and desktop.** Every session belongs to a project (working directory). Electron desktop app for macOS and Windows with a native folder picker; the same console also runs in a browser. Light and dark themes.
 
 Design: [docs/DESIGN.md](docs/DESIGN.md).
 
 ![Delegation topology](docs/images/topology.png)
 
-| Conversation and agent messages | Team roster approval |
+| New run: candidate members, models from the agent's config | Team roster approval |
 | --- | --- |
-| ![Conversation](docs/images/conversation.png) | ![Team roster](docs/images/team-proposal.png) |
-| **Inline question cards** | **Session timeline (idle gaps folded)** |
-| ![Questions](docs/images/questions.png) | ![Timeline](docs/images/timeline.png) |
+| ![New run](docs/images/new-run.png) | ![Team roster](docs/images/team-proposal.png) |
+| **Run team and candidates** | **Conversation and agent messages** |
+| ![Run team](docs/images/run-team.png) | ![Conversation](docs/images/conversation.png) |
+| **Markdown and the outline rail** | **Mermaid diagrams** |
+| ![Markdown](docs/images/markdown.png) | ![Mermaid](docs/images/mermaid.png) |
+| **Composer: live Markdown and image pills** | **Message rollback: conversation, files or both** |
+| ![Composer](docs/images/composer.png) | ![Rollback](docs/images/rollback.png) |
+| **Inline question cards** | **Inbox** |
+| ![Questions](docs/images/questions.png) | ![Inbox](docs/images/inbox.png) |
+| **Session timeline (idle gaps folded)** | **Background processes** |
+| ![Timeline](docs/images/timeline.png) | ![Background processes](docs/images/background.png) |
+| **Pull request tracking (CI and reviews)** | **Dark theme** |
+| ![Pull requests](docs/images/pull-requests.png) | ![Dark theme](docs/images/dark.png) |
+
+![Agent detection](docs/images/agents.png)
 
 Screenshots are from the console's built-in demo mode (open without a token or with `?demo=1`); the UI is currently Chinese.
 

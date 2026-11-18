@@ -17,19 +17,41 @@
   - **预设团队**：按你保存好的团队直接执行。
   - **单人模式**：只用一个 agent 完成。
   - 执行过程中可以随时换人或改派。
-- **人在回路**：跨会话的「待处理」收件箱，汇总权限请求、团队名单、内联问答卡片和升级事项。另有权限规则，消息支持排队、引导、立即发送（中断）三种发送模式，会话可以暂停和恢复。
+  - 动态组队和预设团队都可以带**候选成员**：只填 agent、模型、思考级别和可选描述，不用定角色，主导者按任务自主招人。
+- **人在回路**：跨会话的「待处理」收件箱，汇总权限请求、团队名单、内联问答卡片和升级事项。另有权限规则，消息支持排队、引导、立即发送（中断）三种发送模式，会话可以暂停和恢复，也可以把消息**回退**到之前（只回退会话、只回退文件，或两者一起）。
+- **会话体验**：输入框实时渲染 Markdown；支持图片的 agent 可以在消息里插入图片（以胶囊显示），对话中直接显示图片；会话右侧的目录栏可以跳到你发过的每条消息。
 - **可观测性**：实时委派拓扑图；会话时间线（自动折叠空闲时段）；完整对话记录（支持 GFM、Mermaid、中日韩排版）；每轮计时与思考动画；agent 在后台启动的常驻进程登记；agent 提交的 Pull Request 及其 CI 和评审状态。
-- **项目与桌面端**：每个会话都归属一个项目（工作目录）。提供 macOS 和 Windows 桌面应用，选择目录时直接唤起系统对话框；同一套控制台也可以在浏览器里使用。
+- **项目与桌面端**：每个会话都归属一个项目（工作目录）。提供 macOS 和 Windows 桌面应用，选择目录时直接唤起系统对话框；同一套控制台也可以在浏览器里使用。亮色、暗色主题可切换。
 
 ## 截图
 
-| 会话与 agent 往来消息 | 团队名单确认 |
+### 协作与团队
+
+| 新建 Run：候选成员，模型从 agent 配置中选 | 团队名单确认 |
 | --- | --- |
-| ![会话](docs/images/conversation.png) | ![团队名单](docs/images/team-proposal.png) |
-| **内联问答卡片** | **会话时间线（折叠空闲）** |
-| ![问答卡片](docs/images/questions.png) | ![时间线](docs/images/timeline.png) |
-| **后台进程登记** | **待处理收件箱** |
-| ![后台进程](docs/images/background.png) | ![待处理](docs/images/inbox.png) |
+| ![新建 Run](docs/images/new-run.png) | ![团队名单](docs/images/team-proposal.png) |
+| **运行中的团队与候选成员** | **会话与 agent 往来消息** |
+| ![运行团队](docs/images/run-team.png) | ![会话](docs/images/conversation.png) |
+
+### 会话体验
+
+| Markdown 渲染与会话目录栏 | Mermaid 图表 |
+| --- | --- |
+| ![Markdown 与目录](docs/images/markdown.png) | ![Mermaid](docs/images/mermaid.png) |
+| **输入框：实时 Markdown 与图片胶囊** | **消息回退：会话、文件或两者** |
+| ![输入框](docs/images/composer.png) | ![消息回退](docs/images/rollback.png) |
+
+### 人在回路与可观测
+
+| 内联问答卡片 | 待处理收件箱 |
+| --- | --- |
+| ![问答卡片](docs/images/questions.png) | ![待处理](docs/images/inbox.png) |
+| **会话时间线（折叠空闲）** | **后台进程登记** |
+| ![时间线](docs/images/timeline.png) | ![后台进程](docs/images/background.png) |
+| **Pull Request 跟踪（CI 与评审）** | **暗色主题** |
+| ![Pull Requests](docs/images/pull-requests.png) | ![暗色主题](docs/images/dark.png) |
+
+### Agent 检测
 
 ![Agent 检测](docs/images/agents.png)
 
