@@ -3,6 +3,7 @@ import type { AgentEntry, ItemRecord, NodeRecord, QuestionRecord, RunSnapshot, T
 import { activeTurn, conversationPhase, conversationRows, messageActionKey, queuedRows, nodeIsLive, inFlightMessage, type OutgoingMessage, type MessageActionState, type MessageAction } from "../lib/conversation.js";
 import { clock, displayStatus, treeOrder } from "../lib/derive.js";
 import { AgentMark, Empty, Icon, Status } from "./common.js";
+import { Select, type SelectOption } from "./Select.js";
 import type { RunStore } from "../store.js";
 import { AgentMessageCard } from "./AgentMessageCard.js";
 import { partAgentCards, toolAgentCard } from "../lib/agent-messages.js";
@@ -103,6 +104,14 @@ function QuestionMarker({ question, jump }: { question: QuestionRecord; jump: (i
   const prompts = questionPrompts(question);
   return <button type="button" className="question-marker" onClick={() => jump(question.id)} title="跳到输入框上方的问题卡片"><i aria-hidden="true" /><strong>等你回答</strong><span>{markdownPlainText(prompts[0]?.question ?? question.question)}{prompts.length > 1 ? ` 等 ${prompts.length} 个问题` : ""}</span><small>在输入框上方作答 ↓</small></button>;
 }
+/** The conversation node selector: the run's nodes in tree order, indented by depth, live and paused ones marked. */
+export function nodeOptions(snapshot: RunSnapshot): SelectOption[] {
+  return treeOrder(snapshot.nodes).map(entry => {
+    const paused = snapshot.run.status === "paused" && !["canceled", "completed", "failed", "replaced"].includes(entry.status);
+    const live = nodeIsLive(snapshot, entry);
+    return { value: entry.id, label: entry.title, description: [entry.agentId, entry.role, entry.model].filter(Boolean).join(" · "), icon: <AgentMark agent={entry.agentId} small />, depth: entry.depth, ...(paused ? { hint: "已暂停" } : live ? { hint: "运行中" } : {}) };
+  });
+}
 export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNodeId, now, inspect, projectName, answer, decline, busy, stopRun, resumeRun, agents = [] }: {
   agents?: AgentEntry[]; answer: HumanActions["answer"]; decline?: HumanActions["decline"]; busy: boolean; projectName?: string; stopRun?: () => void; resumeRun?: () => void; snapshot: RunSnapshot; store: RunStore; items: Record<string, ItemRecord[]>; itemStatus: Record<string, string>;
   nodeId: string; setNodeId: (id: string) => void; now: number; inspect: (id: string) => void;
@@ -159,7 +168,7 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
   const imagesEnabled = agent?.capabilities.images === true;
   const closed = node ? ["canceled", "replaced"].includes(node.status) : false;
   if (!node) return <Empty>等待根节点创建…</Empty>;
-  return <ImageContext value={imageContext}><div className="transcript-view"><div className="view-toolbar conversation-toolbar"><div className="transcript-selector"><AgentMark agent={node.agentId} small /><select aria-label="选择会话节点" value={node.id} onChange={event => setNodeId(event.target.value)}>{treeOrder(snapshot.nodes).map(entry => <option key={entry.id} value={entry.id}>{"　".repeat(entry.depth)}{snapshot.run.status === "paused" && !["canceled", "completed", "failed", "replaced"].includes(entry.status) ? "⏸ " : nodeIsLive(snapshot, entry) ? "◉ " : ""}{entry.title} · {entry.agentId}{nodeIsLive(snapshot, entry) ? " · 运行中" : ""}</option>)}</select><Status status={displayStatus(node, snapshot)} /></div><div className="conversation-toolbar-actions"><span className="muted">{messages.length} items</span><button className="text-button" onClick={() => inspect(node.id)} title="查看当前节点详情">节点详情 ↗</button></div></div>
+  return <ImageContext value={imageContext}><div className="transcript-view"><div className="view-toolbar conversation-toolbar"><div className="transcript-selector"><Select label="选择会话节点" variant="ghost" value={node.id} onChange={setNodeId} options={nodeOptions(snapshot)} popoverMinWidth={300} popoverMaxWidth={460} /><Status status={displayStatus(node, snapshot)} /></div><div className="conversation-toolbar-actions"><span className="muted">{messages.length} items</span><button className="text-button" onClick={() => inspect(node.id)} title="查看当前节点详情">节点详情 ↗</button></div></div>
     <div className="transcript-body"><div className="transcript-scroll" ref={scroll} onScroll={() => { const el = scroll.current; if (el) setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 100); }}><div className="transcript-content">{itemStatus[node.id] === "loading" && <div className="loading-line">正在加载会话…</div>}{itemStatus[node.id] === "error" && <button className="button" onClick={() => { void store.loadItems(node.id, true); }}>重试加载会话</button>}{entries.map((entry, index) => {
       const start = rolled.start[index]!, key = start >= 0 ? groupKey(start) : "", hidden = start >= 0 && !revealed.has(key);
       const toggle = start === index ? <RolledBackToggle count={rolled.size.get(index)!} open={!hidden} toggle={() => setRevealed(current => { const next = new Set(current); if (next.has(key)) next.delete(key); else next.add(key); return next; })} /> : null;

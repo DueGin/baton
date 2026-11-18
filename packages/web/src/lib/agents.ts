@@ -4,8 +4,10 @@ export const agentGroupLabels = { ready: "已就绪", error: "版本过低或出
 export type AgentGroup = keyof typeof agentGroupLabels;
 export function agentGroup(agent: AgentEntry): AgentGroup { return !agent.enabled ? "disabled" : agent.status; }
 export const agentReady = (agent?: AgentEntry): boolean => agent?.enabled === true && agent.status === "ready";
+/** Everything an agent search matches: ids, labels, version, notes, diagnostics, source, model and mode names. */
+export const agentSearchText = (agent: AgentEntry): string => [agent.id, agent.label, agent.kind, agent.version, agent.notes, agent.diagnostic, agent.source === "config" ? "自定义 config" : "builtin", ...agent.models.flatMap(model => [model.id, model.label]), ...agent.modes.flatMap(mode => [mode.id, mode.label])].filter(Boolean).join(" ").toLowerCase();
 export function agentMatches(agent: AgentEntry, query: string): boolean {
-  const haystack = [agent.id, agent.label, agent.kind, agent.version, agent.notes, agent.diagnostic, agent.source === "config" ? "自定义 config" : "builtin", ...agent.models.flatMap(model => [model.id, model.label]), ...agent.modes.flatMap(mode => [mode.id, mode.label])].join(" ").toLowerCase();
+  const haystack = agentSearchText(agent);
   return query.trim().toLowerCase().split(/\s+/).every(word => haystack.includes(word));
 }
 export function sortAgents(agents: AgentEntry[]): AgentEntry[] {
