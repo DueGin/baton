@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AgentCatalogRow, AgentsPage } from "./Agents.js";
-import { AgentOptions, AgentPicker } from "./AgentPicker.js";
+import { AgentPicker, agentOptions } from "./AgentPicker.js";
+import { SelectListbox } from "./Select.js";
+import { filterOptions } from "../lib/listbox.js";
 import { AgentFields, MembersEditor } from "./TeamForms.js";
 import { AgentIcon, ModelIcon, agentVendor, agentVendors, modelVendor } from "./AgentIcon.js";
 import { demoAgents } from "../demo/agents.js";
@@ -19,12 +21,19 @@ describe("expanded Agents UI", () => {
     expect(html).not.toContain("<script>"); expect(html).not.toContain("<img"); expect(html).not.toContain("javascript:"); expect(html).toContain("&lt;script&gt;"); expect(html).toContain("&lt;svg");
   });
   it("filters searchable options, keeps ready entries first and disables every unavailable entry", () => {
-    const html = renderToStaticMarkup(<AgentOptions agents={[...demoAgents].reverse()} value="codex" choose={() => undefined} />);
-    expect(html.indexOf("Claude Code")).toBeLessThan(html.indexOf("Gemini CLI"));
-    const options = html.match(/<button[^>]*>[\s\S]*?<\/button>/g)!;
-    for (const option of options) { if (["Gemini CLI", "Kimi CLI", "Cursor Agent"].some(label => option.includes(label))) expect(option).toContain('disabled=""'); }
-    expect(renderToStaticMarkup(<AgentOptions agents={demoAgents} value="" query="GPT-5.3" choose={() => undefined} />)).toContain("Codex");
-    expect(renderToStaticMarkup(<AgentOptions agents={demoAgents} value="" query="GPT-5.3" choose={() => undefined} />)).not.toContain("Claude Code");
+    const options = agentOptions([...demoAgents].reverse(), "codex");
+    expect(options.findIndex(option => option.label === "Claude Code")).toBeLessThan(options.findIndex(option => option.label === "Gemini CLI"));
+    for (const label of ["Gemini CLI", "Kimi CLI", "Cursor Agent"]) expect(options.find(option => option.label === label)).toMatchObject({ disabled: true, warning: "不可用" });
+    expect(options.find(option => option.value === "codex")).toMatchObject({ pinned: true }); expect(options.find(option => option.value === "claude")?.disabled).toBeUndefined();
+    const html = renderToStaticMarkup(<SelectListbox id="agents" label="Agent" options={options} value="codex" />);
+    const rows = html.match(/<div role="option"[^>]*>[\s\S]*?<\/div>/g) ?? [];
+    expect(html.match(/role="option"/g)).toHaveLength(demoAgents.length);
+    for (const row of rows) if (["Gemini CLI", "Kimi CLI", "Cursor Agent"].some(label => row.includes(label))) expect(row).toContain('aria-disabled="true"');
+    expect(html).toMatch(/aria-selected="true"[^>]*>[\s\S]*?Codex/);
+    // Search matches an agent's model ids; the current agent stays listed while filtering.
+    const search = (query: string, value = "") => filterOptions(agentOptions(demoAgents, value), query).map(option => option.label);
+    expect(search("GPT-5.3")).toContain("Codex"); expect(search("GPT-5.3")).not.toContain("Claude Code");
+    expect(search("GPT-5.3", "claude")).toContain("Claude Code");
   });
   it("uses shared searchable pickers in agent and member fields without an extra catalog link", () => {
     const picker = renderToStaticMarkup(<AgentPicker agents={demoAgents} value="codex" change={() => undefined} />);
