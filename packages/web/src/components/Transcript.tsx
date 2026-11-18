@@ -27,6 +27,8 @@ import { ImageContext } from "../lib/images.js";
 import { AttachImageButton, LazyComposer, type ComposerHandle, type ComposerStatus } from "./composer-shell.js";
 import { RollbackAction, RolledBackToggle, type RollbackProps } from "./RollbackMenu.js";
 import { rolledBackGroups, rollbackTarget } from "../lib/rollback.js";
+import { ConversationOutline } from "./ConversationOutline.js";
+import { outlineItems } from "../lib/outline.js";
 export { Markdown } from "./Markdown.js";
 
 export function ToolDetail({ detail }: { detail: ToolCallDetail }) {
@@ -85,7 +87,7 @@ export function TranscriptRow({ row, node, snapshot, inspect, client, streaming 
   if (item.type === "todo") return <div className="todo-row">{item.items.map((todo, index) => <div key={index}><span>{todo.status === "completed" ? "✓" : todo.status === "in_progress" ? "◉" : "○"}</span><Markdown text={todo.text} /></div>)}</div>;
   const delivery = item.type === "user_message" ? item.delivery ?? outgoing?.delivery : undefined;
   const canAct = act && row.seq > 0 && (!outgoing || outgoing.state === "accepted");
-  return <article className={`message message-${item.type}${outgoing?.state === "failed" ? " message-send-failed" : ""}`}>
+  return <article className={`message message-${item.type}${outgoing?.state === "failed" ? " message-send-failed" : ""}`} data-user-message={item.type === "user_message" && row.seq > 0 ? row.seq : undefined}>
     <div className="message-meta">{item.type === "user_message" ? <span className="user-avatar">U</span> : <AgentMark agent={node.agentId} small />}<strong>{item.type === "user_message" ? "你" : node.agentId}</strong><time dateTime={row.ts}>{clock(row.ts)}</time>{item.type === "user_message" && <DeliveryIcon delivery={delivery} interrupted={item.interrupted ?? outgoing?.interrupted} state={outgoing?.state} />}{item.type === "user_message" && <EditedMarker at={item.editedAt ?? outgoing?.editedAt} />}
       <div className="message-top-actions">{canAct && <MessageActionIcons delivery={delivery} state={actionState} act={action => { if (action !== "edit") act(action); }} />}{rollback && item.type === "user_message" && row.seq > 0 && (!outgoing || outgoing.state === "accepted") && <RollbackAction row={row} {...rollback} />}{outgoing?.state === "failed" && <button type="button" className="icon-button" aria-label="重试发送" title="重试发送" onClick={retry}><Icon name="refresh" size={15} /></button>}</div>
     </div>
@@ -119,6 +121,9 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
   const footers = turnFooters(entries, snapshot, node?.id ?? nodeId);
   // Rolled-back rows (DESIGN §4.13) hide behind one slim bar per run of rows; the bar reveals them greyed out.
   const rolled = rolledBackGroups(entries);
+  const outlineAll = outlineItems(entries), outlineKey = outlineAll.map(item => `${item.seq}:${item.preview}`).join("\n");
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on content so the rail does not re-measure on every render
+  const outline = useMemo(() => outlineAll, [outlineKey]);
   const [revealed, setRevealed] = useState<ReadonlySet<string>>(() => new Set());
   const groupKey = (start: number): string => { const entry = entries[start]; return `${node?.id ?? nodeId}:${entry?.type === "row" ? entry.entry.row.seq : start}`; };
   const firstHuman = rows.find(row => row.item.type === "user_message")?.seq;
@@ -155,13 +160,13 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
   const closed = node ? ["canceled", "replaced"].includes(node.status) : false;
   if (!node) return <Empty>等待根节点创建…</Empty>;
   return <ImageContext value={imageContext}><div className="transcript-view"><div className="view-toolbar conversation-toolbar"><div className="transcript-selector"><AgentMark agent={node.agentId} small /><select aria-label="选择会话节点" value={node.id} onChange={event => setNodeId(event.target.value)}>{treeOrder(snapshot.nodes).map(entry => <option key={entry.id} value={entry.id}>{"　".repeat(entry.depth)}{snapshot.run.status === "paused" && !["canceled", "completed", "failed", "replaced"].includes(entry.status) ? "⏸ " : nodeIsLive(snapshot, entry) ? "◉ " : ""}{entry.title} · {entry.agentId}{nodeIsLive(snapshot, entry) ? " · 运行中" : ""}</option>)}</select><Status status={displayStatus(node, snapshot)} /></div><div className="conversation-toolbar-actions"><span className="muted">{messages.length} items</span><button className="text-button" onClick={() => inspect(node.id)} title="查看当前节点详情">节点详情 ↗</button></div></div>
-    <div className="transcript-scroll" ref={scroll} onScroll={() => { const el = scroll.current; if (el) setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 100); }}><div className="transcript-content">{itemStatus[node.id] === "loading" && <div className="loading-line">正在加载会话…</div>}{itemStatus[node.id] === "error" && <button className="button" onClick={() => { void store.loadItems(node.id, true); }}>重试加载会话</button>}{entries.map((entry, index) => {
+    <div className="transcript-body"><div className="transcript-scroll" ref={scroll} onScroll={() => { const el = scroll.current; if (el) setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 100); }}><div className="transcript-content">{itemStatus[node.id] === "loading" && <div className="loading-line">正在加载会话…</div>}{itemStatus[node.id] === "error" && <button className="button" onClick={() => { void store.loadItems(node.id, true); }}>重试加载会话</button>}{entries.map((entry, index) => {
       const start = rolled.start[index]!, key = start >= 0 ? groupKey(start) : "", hidden = start >= 0 && !revealed.has(key);
       const toggle = start === index ? <RolledBackToggle count={rolled.size.get(index)!} open={!hidden} toggle={() => setRevealed(current => { const next = new Set(current); if (next.has(key)) next.delete(key); else next.add(key); return next; })} /> : null;
       if (hidden) return toggle && <Fragment key={`rolled:${key}`}>{toggle}</Fragment>;
       const content = <>{entry.type === "question" ? entry.question.status === "pending" ? <QuestionMarker question={entry.question} jump={jumpQuestion} /> : <QuestionCard inline compact question={entry.question} answer={answer} busy={busy} /> : (() => { const { row, outgoing } = entry.entry; return <TranscriptRow client={store.client} row={row} node={node} snapshot={snapshot} inspect={inspect} outgoing={outgoing} actionState={state.messageActions[messageActionKey(node.id, row.seq)]} act={action => { void store.actOnMessage(node.id, row.seq, action); }} retry={outgoing ? () => { void store.sendMessage(node.id, outgoing.text, outgoing.clientId); } : undefined} streaming={live && inTurn(row) && (row.item.type === "reasoning" || (row.seq === latestText?.seq && phase?.kind === "reply"))} rollback={rollbackTarget(row, row.seq === firstHuman) ? rollback : undefined} />; })()}{footers.get(index)?.map(turn => <TurnFooter key={turn.id} turn={turn} />)}</>;
       return <Fragment key={entry.type === "question" ? entry.question.id : entry.entry.outgoing?.clientId ?? entry.entry.row.seq}>{toggle}{start >= 0 ? <div className="rolled-back-row">{content}</div> : content}</Fragment>;
-    })}{!entries.length && itemStatus[node.id] === "ready" && <Empty>这个节点还没有消息。</Empty>}{phase && <TurnIndicator key={node.id} phase={phase} snapshot={snapshot} now={now} inspect={inspect} jumpQuestion={jumpQuestion} />}<div ref={bottom} /></div></div>
+    })}{!entries.length && itemStatus[node.id] === "ready" && <Empty>这个节点还没有消息。</Empty>}{phase && <TurnIndicator key={node.id} phase={phase} snapshot={snapshot} now={now} inspect={inspect} jumpQuestion={jumpQuestion} />}<div ref={bottom} /></div></div><ConversationOutline items={outline} scroll={scroll} /></div>
     <div className="composer-stack">{dockQuestions.length > 0 && <div className="question-dock" aria-label="待回答的问题">{dockQuestions.map(question => <QuestionCard key={question.id} inline compact question={question} answer={answer} decline={decline} busy={busy} />)}</div>}
     <div className="composer-tools"><BackgroundPopover projectName={projectName} key={snapshot.run.id} snapshot={snapshot} now={now} client={store.client} /><PullRequestPopover key={`pr:${snapshot.run.id}`} snapshot={snapshot} client={store.client} inspect={inspect} /></div>
     <QueueDock key={node.id} entries={queue} actions={state.messageActions} pending={queueState?.pending} error={queueState?.error} reorder={order => { void store.reorderQueue(node.id, order); }} act={(seq, action) => store.actOnMessage(node.id, seq, action)} edit={(seq, text) => store.editMessage(node.id, seq, text)} />

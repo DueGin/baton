@@ -65,7 +65,10 @@ export function remarkBrTags() {
 
 /** One-line plain text from Markdown, for titles, tooltips and single-line previews. */
 export function markdownPlainText(text: string): string {
-  return text
+  // Backslash-escaped characters are literal text: hide them from the stripping below, restore after.
+  const escaped: string[] = [];
+  const protectedText = text.replace(/\\([\\`*_{}[\]()#+\-.!~|<>])/g, (_match, char: string) => `\u0000${escaped.push(char) - 1}\u0000`);
+  return protectedText
     .replace(/```[^\n]*\n([\s\S]*?)(```|$)/g, "$1")
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
@@ -75,5 +78,6 @@ export function markdownPlainText(text: string): string {
     .replace(/`([^`]+)`/g, "$1")
     .replace(/<br\s*\/?>/gi, " ")
     .replace(/\s+/g, " ")
-    .trim();
+    .trim()
+    .replace(/\u0000(\d+)\u0000/g, (_match, index: string) => escaped[Number(index)] ?? "");
 }
