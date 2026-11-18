@@ -142,6 +142,20 @@ describe("preset candidates", () => {
     const updated = await api<TeamPreset>(s, `/api/teams/${preset.id}`, "PUT", { name: "Roles only", lead: { agentId: "lead" }, members: [member()] });
     expect(updated.candidates).toBeUndefined();
   });
+  it("New Run candidates: a dynamic run gets them (lead hires without approval); preset runs append them; solo and unknown agents are rejected", async () => {
+    const s = await setup();
+    const run = await s.kernel.createRun({ projectId: await project(s), agent: "lead", cwd: tmpdir(), prompt: "hire", candidates: [{ agentId: "worker", model: "fast", description: "前端" }, { agentId: "replacement" }] });
+    expect(run.run.policy).toMatchObject({ mode: "dynamic", teamApproval: true });
+    expect(s.store.snapshot(run.run.id).run.team?.candidates).toEqual([{ id: "c1", agentId: "worker", model: "fast", description: "前端" }, { id: "c2", agentId: "replacement" }]);
+    const hired = await s.kernel.delegate(run.run.rootNodeId, { candidate: "c1", role: "frontend", title: "UI", task: "build" });
+    expect(hired.status).not.toBe("pending_approval");
+    expect(s.store.snapshot(run.run.id).run.team?.members.find((m) => m.role === "frontend")).toMatchObject({ agentId: "worker", model: "fast", candidateId: "c1", addedBy: "lead" });
+    const preset = await s.kernel.teams.savePreset({ name: "Pool", lead: { agentId: "lead" }, members: [], candidates: [pool[0]!] });
+    const mixed = await s.kernel.createRun({ projectId: await project(s), teamPresetId: preset.id, cwd: tmpdir(), prompt: "hire", candidates: [pool[0]!, { agentId: "replacement", description: "审查" }] });
+    expect(s.store.snapshot(mixed.run.id).run.team?.candidates?.map((c) => [c.id, c.agentId])).toEqual([["c1", "worker"], ["c2", "replacement"]]); // duplicate of the preset's candidate dropped
+    await expect(s.kernel.createRun({ projectId: await project(s), agent: "lead", cwd: tmpdir(), prompt: "x", policy: { mode: "solo" }, candidates: [{ agentId: "worker" }] })).rejects.toThrow(/Solo/);
+    await expect(s.kernel.createRun({ projectId: await project(s), agent: "lead", cwd: tmpdir(), prompt: "x", candidates: [{ agentId: "ghost" }] })).rejects.toThrow(/Unknown candidate agent: ghost/);
+  });
   it("copies candidates into the run; the lead hires them by delegate without approval, into several roles", async () => {
     const s = await setup();
     const preset = await s.kernel.teams.savePreset({ name: "Pool", lead: { agentId: "lead" }, members: [], candidates: pool });

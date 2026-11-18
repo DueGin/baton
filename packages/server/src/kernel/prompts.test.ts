@@ -54,7 +54,8 @@ describe("systemPrompt", () => {
     const without = systemPrompt(root, preset, [], { ...team, candidates: undefined });
     expect(without).not.toContain("candidate"); expect(without).toContain("2. Use the preset roster below. Delegate only by role");
     expect(systemPrompt({ ...child, role: "builder" }, preset, [], team)).not.toContain("candidate");
-    expect(systemPrompt(root, policy, [], team)).not.toContain("Preset candidates");
+    const dynamic = systemPrompt(root, policy, [], { ...team, source: "dynamic" });
+    expect(dynamic).not.toContain("Preset candidates"); expect(dynamic).toContain("Candidates the human picked for this run"); expect(dynamic).toContain("- c1: codex");
   });
   it("tells agents at the depth limit to do the work themselves", () => {
     const text = systemPrompt({ ...child, depth: 3 }, policy);

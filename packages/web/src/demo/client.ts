@@ -259,7 +259,8 @@ export class DemoClient implements BatonClient {
     this.emit(data, { type: "node.updated", nodeId: rootNodeId, patch: { status: "idle", activity: "等待下一条消息" } });
     this.emit(data, { type: "turn.updated", turnId: `${id}:t1`, patch: { status: "completed", endedAt: ts } });
     this.emit(data, { type: "run.updated", patch: { status: "idle" } });
-    const candidates = (preset?.candidates ?? []).map((candidate, index) => ({ ...cleanCandidate(candidate), id: `c${index + 1}` }));
+    const extra = mode === "solo" ? [] : (request.candidates ?? []).filter(candidate => !(preset?.candidates ?? []).some(existing => JSON.stringify(cleanCandidate(existing)) === JSON.stringify(cleanCandidate(candidate))));
+    const candidates = [...preset?.candidates ?? [], ...extra].map((candidate, index) => ({ ...cleanCandidate(candidate), id: `c${index + 1}` }));
     const pool = candidates.length ? { candidates } : {};
     if (mode !== "solo") {
       const specs = preset?.members ?? request.team;
@@ -269,7 +270,8 @@ export class DemoClient implements BatonClient {
         const members = specs.map(spec => this.member(spec, preset ? "preset" : "human", "由创建 Run 时指定"));
         const team: TeamRecord = { source: preset ? "preset" : "dynamic", ...(preset ? { presetId: preset.id, presetName: preset.name } : {}), members, proposals: [], changes: [], ...pool, updatedAt: ts };
         this.teamUpdate(data, team, { kind: "formed", by: preset ? "preset" : "human", at: ts, reason: "创建 Run 时带入名单" });
-      } else if (!preset) this.proposeTeam(id, [{ role: "engineer", ...defaultAgentSpec(demoAgents, "codex"), responsibilities: "实现功能与测试" }, ...((request.policy?.maxTeamSize ?? 5) > 1 ? [{ role: "reviewer", ...defaultAgentSpec(demoAgents, "pi"), responsibilities: "独立检查安全和边界" }] : [])], "实现与审查分开，由成员推进；名单确认后开工。");
+      } else if (!preset && candidates.length) this.teamUpdate(data, { source: "dynamic", members: [], proposals: [], changes: [], ...pool, updatedAt: ts }, { kind: "formed", by: "human", at: ts, reason: "创建 Run 时带入候选成员" });
+      else if (!preset) this.proposeTeam(id, [{ role: "engineer", ...defaultAgentSpec(demoAgents, "codex"), responsibilities: "实现功能与测试" }, ...((request.policy?.maxTeamSize ?? 5) > 1 ? [{ role: "reviewer", ...defaultAgentSpec(demoAgents, "pi"), responsibilities: "独立检查安全和边界" }] : [])], "实现与审查分开，由成员推进；名单确认后开工。");
       else this.teamUpdate(data, { source: "preset", presetId: preset.id, presetName: preset.name, members: [], proposals: [], changes: [], ...pool, updatedAt: ts }, { kind: "formed", by: "preset", at: ts, reason: candidates.length ? "预设只有候选成员，由主导者按任务招人" : "使用无成员预设，由 lead 处理任务" });
     }
     this.prompts.set(id, request.prompt);

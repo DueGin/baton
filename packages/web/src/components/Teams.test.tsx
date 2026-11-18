@@ -72,5 +72,15 @@ describe("preset candidates in the console", () => {
     const html = renderToStaticMarkup(<NewRun agents={demoAgents} presets={await client.teams()} defaults={{ maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "preset" }} close={noop} create={async () => true} busy={false} demo error={null} projects={await client.projects()} initialProjectId="project-atlas" selectProject={noop} addProject={noop} />);
     expect(html).toContain("产品交付小队 · 2 roles · 3 候选"); expect(html).toContain("候选成员 · 主导者按任务自主招入");
     expect(html).toContain("claude · claude-sonnet-4-6 · high"); expect(html).toContain("前端、CSS 动画与交互细节");
+    expect(html).toContain("在预设的候选之外再加几个");
+    const dynamic = renderToStaticMarkup(<NewRun agents={demoAgents} presets={await client.teams()} defaults={{ maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "dynamic" }} close={noop} create={async () => true} busy={false} demo error={null} projects={await client.projects()} initialProjectId="project-atlas" selectProject={noop} addProject={noop} />);
+    expect(dynamic).toContain("new-run-candidates"); expect(dynamic).toContain("不用填角色，"); expect(dynamic).toContain("预先指定成员");
+    const solo = renderToStaticMarkup(<NewRun agents={demoAgents} presets={await client.teams()} defaults={{ maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "solo" }} close={noop} create={async () => true} busy={false} demo error={null} projects={await client.projects()} initialProjectId="project-atlas" selectProject={noop} addProject={noop} />);
+    expect(solo).not.toContain("new-run-candidates");
+  });
+  it("demo: New Run candidates become the dynamic run's candidate pool", async () => {
+    const client = new DemoClient(() => Date.parse("2026-11-10T07:00:00Z"));
+    const run = await client.createRun({ projectId: "project-atlas", agent: "claude", prompt: "做个登录页", policy: { mode: "dynamic", teamApproval: true }, candidates: [{ agentId: "codex", model: "gpt-5.3-codex", description: "前端" }] });
+    expect(run.run.team?.candidates).toEqual([{ id: "c1", agentId: "codex", model: "gpt-5.3-codex", description: "前端" }]);
   });
 });

@@ -37,7 +37,7 @@ export function systemPrompt(
   const mode = policy.mode ?? "dynamic";
   if (mode === "solo") return "You are running inside baton in SOLO mode. Work alone: inspect, implement, verify and answer the human yourself. Only the baton ask_human tool is available: investigate first, then ask for human judgment calls or missing decisions. A blocking ask_human waits in the tool call; use its answer and continue in the same turn. If it returns no_answer_yet, work on something else or end your turn; the answer will arrive later. Load mcp__baton__ask_human with tool search if needed. Do not delegate or form a team. " + BACKGROUND_GUIDANCE + " " + PR_GUIDANCE;
   const roster = (team?.members ?? []).filter((m) => m.status === "active").map((m) => `- ${m.role}: ${m.agentId}${m.model ? ` / ${m.model}` : ""}. Responsibilities and file ownership: ${m.responsibilities ?? "See assignment"}`).join("\n");
-  const candidates = isRoot && canDelegate && mode === "preset" ? team?.candidates ?? [] : [];
+  const candidates = isRoot && canDelegate ? team?.candidates ?? [] : [];
   const lines = [
     "You are running inside baton, a local multi-agent workspace. Other coding agents on this machine — including agents from other vendors — can take work from you through the `baton` MCP tools.",
     BACKGROUND_GUIDANCE,
@@ -93,7 +93,7 @@ export function systemPrompt(
   if (roster) lines.push("", "Current team roster (respect file ownership):", roster);
   if (candidates.length) lines.push(
     "",
-    "Preset candidates you may hire (the human approved them in the preset; hiring needs no roster approval):",
+    mode === "preset" ? "Preset candidates you may hire (the human approved them in the preset; hiring needs no roster approval):" : "Candidates the human picked for this run — prefer hiring them over other agents (hiring a candidate needs no roster approval):",
     ...candidates.map((c) => describeCandidate(c, agents)),
     'Choose a candidate by matching the task to its model and description. To hire, call delegate with candidate: "<id>" and role: "<a new role name>" plus the usual title/task; it joins the team under that role and gets the task. Send later tasks to that role by role alone. A candidate can be hired into several roles; hires count toward the team size limit. get_team shows candidates and who was hired.',
   );

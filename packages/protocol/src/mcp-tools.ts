@@ -14,7 +14,7 @@ export const delegateInput = z.object({
   candidate: z
     .string()
     .optional()
-    .describe("Preset candidate id from get_team (preset runs): hires that candidate into the team under `role` (name a new role) and delegates to it. No roster approval is needed."),
+    .describe("Candidate id from get_team (c1, c2…): hires that candidate into the team under `role` (name a new role) and delegates to it. No roster approval is needed."),
   role: z
     .string()
     .optional()

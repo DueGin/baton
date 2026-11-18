@@ -1,6 +1,6 @@
 /** REST request/response bodies (DESIGN §7). */
 import type { AttachmentRef, PermissionResponse } from "./timeline.js";
-import type { AgentEntry, BackgroundProcess, PullRequestRecord, ProjectRecord, ProjectSummary, DelegationRecord, InboxItem, ItemRecord, PermissionRule, RunPolicy, RunSnapshot, RunSummary, TeamMemberSpec, TeamPreset } from "./records.js";
+import type { AgentEntry, BackgroundProcess, PullRequestRecord, ProjectRecord, ProjectSummary, DelegationRecord, InboxItem, ItemRecord, PermissionRule, RunPolicy, RunSnapshot, RunSummary, TeamCandidateSpec, TeamMemberSpec, TeamPreset } from "./records.js";
 
 export interface CreateRunRequest {
   /** Root agent. Optional when `teamPresetId` is given (the preset's lead is used). */
@@ -22,6 +22,11 @@ export interface CreateRunRequest {
   teamPresetId?: string;
   /** Dynamic mode only: members the human wants on the team from the start (the lead may add more). */
   team?: TeamMemberSpec[];
+  /**
+   * Candidates the lead may hire for this run (dynamic or preset mode; added after the preset's own).
+   * No role: the lead names one when it hires (delegate with `candidate` + `role`), without roster approval.
+   */
+  candidates?: TeamCandidateSpec[];
 }
 
 export interface PatchRunRequest {

@@ -226,6 +226,8 @@ export class Kernel {
     if (policy.mode === "preset" && !preset) throw new Error("Preset mode requires teamPresetId");
     if (input.team && policy.mode !== "dynamic") throw new Error("Initial team is only supported in dynamic mode");
     const members = await this.teams.validateMembers(preset?.members ?? input.team ?? []);
+    if (input.candidates?.length && policy.mode === "solo") throw new Error("Solo runs have no team, so no candidates");
+    const candidates = await this.teams.validateCandidates(input.candidates);
     if (members.length > (policy.maxTeamSize ?? 5)) throw new Error(`Team size exceeds maxTeamSize (${policy.maxTeamSize ?? 5})`);
     await this.available(agent); this.checkGlobalLimit();
     if (this.store.project(input.projectId).archived) throw new Error("Project is archived");
@@ -233,7 +235,7 @@ export class Kernel {
     const promptTitle = attachmentLabel(input.prompt).slice(0, 100);
     this.emit(runId, { type: "run.created", run: { id: runId, rootNodeId: nodeId, projectId: input.projectId, title: input.title || promptTitle, titleSource: input.title ? "human" : "prompt", cwd, status: "active", policy, createdAt: ts, updatedAt: ts, usage: emptyUsage() } });
     this.emit(runId, { type: "node.created", node: { id: nodeId, runId, parentNodeId: null, delegationId: null, depth: 0, agentId: agent, model: input.model ?? leadDefaults?.model, modeId: input.modeId ?? leadDefaults?.modeId, thinking: input.thinking ?? leadDefaults?.thinking, title: input.title || promptTitle, cwd, status: "starting", createdAt: ts, updatedAt: ts, usage: emptyUsage(), turns: 0 } });
-    if (preset || input.team) this.teams.initialize(runId, members, preset ? "preset" : "human", preset);
+    if (preset || input.team || candidates.length) this.teams.initialize(runId, members, preset ? "preset" : "human", preset, candidates);
     try { await this.startPrompts(nodeId, [{ text: input.prompt, trigger: "user", initial: true }]); } catch (error) { this.failNode(nodeId, error); }
     if (!input.title) void this.generateTitle(runId, attachmentLabel(input.prompt));
     return this.store.snapshot(runId);

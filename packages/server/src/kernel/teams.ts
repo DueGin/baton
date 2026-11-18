@@ -52,6 +52,13 @@ export class Teams {
     if (new Set(entries.map((m) => m.role)).size !== entries.length) throw new Error("Duplicate active roles; use replace_member to change a role");
     await Promise.all(entries.map((m) => this.ready(m.agentId))); return entries;
   }
+  /** Run candidates from New Run: normalized like preset candidates, and their agents must exist. */
+  async validateCandidates(specs: TeamCandidateSpec[] | undefined): Promise<TeamCandidateSpec[]> {
+    const entries = this.candidates(specs); if (!entries.length) return entries;
+    const catalog = await this.registry.detect();
+    for (const c of entries) if (!catalog.some((a) => a.id === c.agentId)) throw new Error(`Unknown candidate agent: ${c.agentId}`);
+    return entries;
+  }
   /** Normalizes preset candidates (no empty optional fields) and rejects duplicate configurations. */
   private candidates(specs: TeamCandidateSpec[] | undefined): TeamCandidateSpec[] {
     const entries = z.array(candidateSchema).max(12).parse(specs ?? []).map((c) => Object.fromEntries(Object.entries(c).filter(([, v]) => v !== undefined)) as unknown as TeamCandidateSpec);
@@ -60,9 +67,10 @@ export class Teams {
     if (repeated) throw new Error(`Duplicate preset candidate: ${repeated.agentId}${repeated.model ? ` / ${repeated.model}` : ""}; candidates must differ by agent, model, mode or thinking`);
     return entries;
   }
-  initialize(runId: string, specs: TeamMemberSpec[], by: TeamActor, preset?: TeamPreset): TeamRecord {
+  initialize(runId: string, specs: TeamMemberSpec[], by: TeamActor, preset?: TeamPreset, extra: TeamCandidateSpec[] = []): TeamRecord {
     const ts = new Date().toISOString();
-    const candidates: TeamCandidate[] = (preset?.candidates ?? []).map((c, i) => ({ ...c, id: `c${i + 1}` }));
+    const keys = new Set((preset?.candidates ?? []).map(candidateKey));
+    const candidates: TeamCandidate[] = [...preset?.candidates ?? [], ...extra.filter((c) => !keys.has(candidateKey(c)))].map((c, i) => ({ ...c, id: `c${i + 1}` }));
     const team: TeamRecord = { source: preset ? "preset" : "dynamic", presetId: preset?.id, presetName: preset?.name, members: specs.map((s) => ({ ...s, id: randomUUID(), status: "active", addedBy: by, addedAt: ts })), changes: [], proposals: [], ...(candidates.length ? { candidates } : {}), updatedAt: ts };
     return this.change(runId, team, { kind: "formed", by, reason: preset ? `Preset: ${preset.name}` : "Initial team" });
   }
