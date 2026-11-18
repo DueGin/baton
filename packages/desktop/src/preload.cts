@@ -1,5 +1,5 @@
-import { contextBridge, ipcRenderer } from "electron";
-import type { BatonDesktopBridge } from "./bridge.js";
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
+import type { BatonDesktopBridge, UpdateStatus } from "./bridge.js";
 
 const bridge: BatonDesktopBridge = {
   platform: process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "win32" : "linux",
@@ -9,6 +9,19 @@ const bridge: BatonDesktopBridge = {
   showItemInFolder: (path) => ipcRenderer.invoke("baton:show-item", path) as Promise<void>,
   setBadgeCount: (count) => { ipcRenderer.send("baton:badge", count); },
   setWindowChrome: (chrome) => { ipcRenderer.send("baton:window-chrome", chrome); },
+  updates: {
+    status: () => ipcRenderer.invoke("baton:update-status") as Promise<UpdateStatus | null>,
+    check: () => ipcRenderer.invoke("baton:update-check") as Promise<UpdateStatus | null>,
+    download: () => ipcRenderer.invoke("baton:update-download") as Promise<UpdateStatus | null>,
+    install: () => ipcRenderer.invoke("baton:update-install") as Promise<UpdateStatus | null>,
+    setToken: (token) => ipcRenderer.invoke("baton:update-token", token) as Promise<{ saved: boolean }>,
+    reveal: () => ipcRenderer.invoke("baton:update-reveal") as Promise<void>,
+    onStatus: (listener) => {
+      const handler = (_event: IpcRendererEvent, status: UpdateStatus) => listener(status);
+      ipcRenderer.on("baton:update-status", handler);
+      return () => { ipcRenderer.removeListener("baton:update-status", handler); };
+    },
+  },
 };
 // The console keeps room for the macOS traffic lights unless the window is in full screen (no lights there).
 // (The desktop package compiles without the DOM lib; the preload only needs this one call.)

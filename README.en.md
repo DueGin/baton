@@ -47,6 +47,18 @@ Screenshots are from the console's built-in demo mode (open without a token or w
 
 Get the desktop app from [Releases](https://github.com/DueGin/baton/releases): `baton-<version>-mac-arm64|x64.dmg/.zip` and `baton-<version>-win-x64.exe/.zip`. Builds are unsigned — on macOS right-click → Open (or `xattr -dr com.apple.quarantine /Applications/baton.app`); on Windows choose "More info → Run anyway" in SmartScreen.
 
+### Updating
+
+The desktop app updates itself; you don't have to come back for a new installer.
+
+1. Settings → **更新** (Updates) → **检查更新** (Check for updates).
+2. When a new version is listed, **下载** (Download) fetches it from GitHub Releases and verifies it against `SHA256SUMS.txt`.
+3. **立即安装并重启** (Install and restart) quits the app (asking first if runs are active), replaces it and reopens it. On macOS the `.app` is swapped in place; on Windows the NSIS installer runs silently. A failed swap restores the previous version.
+
+Because the repository is private, the first check needs a GitHub token — a fine-grained token with **Contents: Read** on this repository is enough (a classic token needs `repo`). Save it under Settings → Updates, or leave it out and export `GITHUB_TOKEN` in your login shell. The token is stored only in `<user data>/desktop-settings.json` (mode 0600) on your machine.
+
+You can still install manually from [Releases](https://github.com/DueGin/baton/releases) as before; projects, runs and settings live in `~/.baton` and are kept.
+
 ## Run
 
 ```bash

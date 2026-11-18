@@ -7,6 +7,7 @@ import { DaemonManager, type DaemonConnection } from "./daemon.js";
 import { parseNotification, subscribe } from "./events.js";
 import { loginShellEnv } from "./shell-env.js";
 import { absolutePath, badgeCount, directoryOptions, externalUrl, notificationRoute, windowChrome, type WindowChrome } from "./security.js";
+import { settingsPathFor, UpdateManager } from "./updater.js";
 import { windowState } from "./window-state.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -19,6 +20,7 @@ const smoke = process.env.BATON_DESKTOP_SMOKE === "1";
 let window: BrowserWindow | null = null;
 let tray: Tray | undefined;
 let manager: DaemonManager;
+let updater: UpdateManager;
 let connection: DaemonConnection;
 let streams: AbortController | undefined;
 let quitting = false, checkingQuit = false;
@@ -134,6 +136,13 @@ function setupIpc(): void {
   ipcMain.handle("baton:show-item", (event, input: unknown) => { authorize(event); shell.showItemInFolder(absolutePath(input)); });
   ipcMain.on("baton:badge", (event, input: unknown) => { try { authorize(event); setBadge(input); } catch { /* Reject malformed fire-and-forget IPC. */ } });
   ipcMain.on("baton:window-chrome", (event, input: unknown) => { try { authorize(event); applyChrome(windowChrome(input)); } catch { /* Reject malformed fire-and-forget IPC. */ } });
+  // In-app updates (DESIGN §4.15). Install hands over to the normal quit path so active runs are still confirmed.
+  ipcMain.handle("baton:update-status", (event) => { authorize(event); return updater?.get() ?? null; });
+  ipcMain.handle("baton:update-check", async (event) => { authorize(event); return updater?.check() ?? null; });
+  ipcMain.handle("baton:update-download", async (event) => { authorize(event); return updater?.download() ?? null; });
+  ipcMain.handle("baton:update-install", async (event) => { authorize(event); const status = await updater?.install(); if (updater?.get().phase === "installing") void quit(); return status ?? null; });
+  ipcMain.handle("baton:update-token", async (event, input: unknown) => { authorize(event); return updater?.setToken(input) ?? { saved: false }; });
+  ipcMain.handle("baton:update-reveal", (event) => { authorize(event); updater?.reveal(); });
 }
 
 function connectEvents(current: DaemonConnection): void {
@@ -193,7 +202,7 @@ async function smokeCheck(current: BrowserWindow): Promise<void> {
   })`);
   if (!renderer || typeof renderer !== "object") throw new Error("Smoke: no renderer result");
   const result = renderer as Record<string, unknown>;
-  if (result.nodeExposed || result.demo || JSON.stringify(result.bridge) !== JSON.stringify(["openExternal", "pickDirectory", "platform", "setBadgeCount", "setWindowChrome", "showItemInFolder", "version"])) throw new Error(`Smoke: invalid renderer ${JSON.stringify(result)}`);
+  if (result.nodeExposed || result.demo || JSON.stringify(result.bridge) !== JSON.stringify(["openExternal", "pickDirectory", "platform", "setBadgeCount", "setWindowChrome", "showItemInFolder", "updates", "version"])) throw new Error(`Smoke: invalid renderer ${JSON.stringify(result)}`);
   const rejected: unknown = await current.webContents.executeJavaScript(`window.batonDesktop.openExternal('javascript:alert(1)').then(() => false, () => true)`);
   if (rejected !== true) throw new Error("Smoke: IPC URL allowlist failed");
   // Exercise the real IPC + React + POST flow while replacing only the OS dialog interaction.
@@ -244,6 +253,7 @@ else {
       tray.setContextMenu(Menu.buildFromTemplate([{ label: "打开 baton", click: () => { void showWindow(); } }, { type: "separator" }, { label: "退出 baton", click: () => app.quit() }]));
     }
     const env = await loginShellEnv(process.env);
+    updater = new UpdateManager(() => window, { env, settingsPath: settingsPathFor(app.getPath("userData")), quitForUpdate: () => { void quit(); } });
     manager = new DaemonManager({ home, executable: process.execPath, entry: app.isPackaged ? join(process.resourcesPath, "runtime", "packages", "server", "dist", "cli", "main.js") : resolve(here, "../../server/dist/cli/main.js"), env,
       connected: current => {
         const reconnecting = Boolean(connection); connection = current;

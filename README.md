@@ -82,6 +82,18 @@
 
 桌面版会在后台自带并管理 baton 守护进程，并读取登录 shell 的环境变量，所以在终端里能用的 agent CLI，在桌面版里同样能被检测到。
 
+### 更新
+
+桌面版可以自己更新，不用回来下载安装包：
+
+1. 打开「设置 → 更新」，点「检查更新」。
+2. 有新版本时点「下载」，安装包从 GitHub Releases 下载，完成后会用 `SHA256SUMS.txt` 校验。
+3. 点「立即安装并重启」：应用退出（有活跃会话时会先确认），替换自身并自动重新打开。macOS 直接替换 `.app`，Windows 交给安装器静默安装。更新失败会恢复原来的版本。
+
+仓库是私有的，第一次检查需要一把 GitHub 令牌（Fine-grained token，对这个仓库有 **Contents: Read** 权限即可；经典令牌用 `repo` 权限）。把令牌填在「设置 → 更新」里保存，或者不保存、在登录 shell 里设置 `GITHUB_TOKEN`。令牌只存在本机的 `<用户数据目录>/desktop-settings.json`（权限 0600），不会上传到别处。
+
+也可以照旧到 [Releases](https://github.com/DueGin/baton/releases) 手动下载覆盖安装，已有的项目、会话和设置都保留在 `~/.baton`。
+
 ### 从源码运行
 
 需要 Node.js ≥ 22.13（推荐 24）。

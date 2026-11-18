@@ -436,6 +436,41 @@ interface BatonDesktopBridge {
 预设团队除了固定角色（`members`），还可以列候选成员（`candidates`）：只填 agent、模型、模式、思考级别，可选描述，不填角色。Run 开始时候选成员带上 id（`c1`、`c2`…）进入 `TeamRecord.candidates`，`get_team` 会列出来。主导者根据任务、模型和描述自己挑：`delegate({ candidate: "c1", role: "前端", … })` 把候选成员按它命名的角色招进团队（`TeamMember.candidateId`），不需要人再批准名单（人把他放进预设就是批准）。一个候选成员可以被招进多个角色。只有候选成员、没有固定角色的预设也合法。
 
 
+### 4.15 应用内更新
+
+仓库是私有的，所以检查更新和下载安装包都走 GitHub API：`GET https://api.github.com/repos/DueGin/baton/releases/latest`，安装包用 asset 的 `url`（`Accept: application/octet-stream`）下载。GitHub 需要令牌：设置页「更新」里填的令牌写进 `<userData>/desktop-settings.json`（0600），也可以不填，改用登录 shell 里的 `GITHUB_TOKEN` / `GH_TOKEN`。令牌只在主进程使用，不会回到页面；接口返回 401/404 时状态里带 `needsToken`，界面提示填写。
+
+**状态机**（`UpdateStatus`，主进程持有，每次变化通过 `baton:update-status` 推给页面，页面同时可以在挂载时拉一次当前状态）：
+
+`idle → checking → available | current | error`；`available → downloading → downloaded → installing`。`downloading` 期间带 `progress`（0–1）、`received`、`total`。
+
+**纯函数**（`update.ts`，不依赖 Electron 和网络，便于测试）：
+- `parseVersion` / `compareVersions`：按数字段比较，带 `-` 的标签视为预发布，低于同版本的正式版；标签必须带 `v` 前缀（和发版流水线一致）。
+- `updateTarget(platform, arch)`：macOS arm64 → `*-mac-arm64.zip`，macOS x64 → `*-mac-x64.zip`，Windows x64 → `*-win-x64.exe`；其他平台返回空，界面提示到 Releases 手动下载。
+- `readRelease`：从最新版里挑出适合本机的 asset，并顺带找 `SHA256SUMS.txt`。
+- `parseChecksums` / `responseSize`：解析校验文件和下载大小（`content-length`，缺失时读 `content-range`）。
+
+**下载**：`<userData>/updates/<version>/<asset>`，先清空该目录再写。有 `SHA256SUMS.txt` 时比对哈希，不一致就删掉文件并报错。
+
+**安装**：
+- **macOS**：`ditto -x -k` 解压 zip，取出其中的 `.app`；确认当前 bundle 和它所在的目录可写（从 `/tmp` 或 `~/Downloads` 里运行时就不可写，此时提示手动安装；`BATON_UPDATE_BUNDLE` 可覆盖目标路径，只给更新的冒烟测试用）。然后写一个 `swap.sh`：等本进程退出 → `mv` 旧 bundle 为 `.old` → `ditto` 拷入新 bundle → 去掉 quarantine → 重新打开；拷贝失败就还原旧版本并弹系统通知。脚本以 detached 方式启动，主进程随后走正常的退出流程（有活跃 Run 仍会先确认）。
+- **Windows**：写一个 `install.cmd`，轮询 `tasklist` 等到本进程退出，再运行 NSIS 安装器（`/S /D=<当前目录>`，静默、装回原位置），然后启动 `baton.exe`，最后删掉自己。NSIS 不能覆盖正在运行的 exe，所以必须先等进程退出；同理，不做原地替换，而是交给安装器。
+- 未签名构建无法使用 Squirrel / `autoUpdater` 的原生替换，这就是这两段脚本存在的原因。
+
+**IPC**（都在 `authorize` 之后，见 4.12 的桥）：
+
+| 通道 | 说明 |
+| --- | --- |
+| `baton:update-status` | 当前状态（页面挂载时调用一次） |
+| `baton:update-check` | 检查最新版 |
+| `baton:update-download` | 下载并校验 |
+| `baton:update-install` | 换装并退出；失败时状态为 `error`，不改动正在运行的应用 |
+| `baton:update-token` | 保存或清除令牌 |
+| `baton:update-reveal` | 在 Finder / 资源管理器中显示已下载的安装包 |
+
+页面（设置 → 更新）展示当前版本、检查、更新说明、下载进度、安装并重启，以及令牌输入。浏览器里没有这个桥，显示一行说明：浏览器版随守护进程一起更新。
+
+
 ## 5. Driver 接口（server 和 providers 之间的边界）
 
 契约文件是 `packages/server/src/driver/types.ts`。内核只依赖这个接口：

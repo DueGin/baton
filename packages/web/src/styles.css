@@ -1638,3 +1638,16 @@ html[data-desktop="win32"] .run-bar { padding-right: calc(100vw - env(titlebar-a
 /* Composer actions are icon-only (send / stop / resume share one slot, so the slot never changes width). */
 .composer .composer-icon-action { width: 30px; height: 30px; padding: 0; gap: 0; border-radius: 50%; flex: none; }
 .composer .composer-icon-action svg { flex: none; }
+
+/* Settings → 更新 (DESIGN §4.15): check, download and install a desktop build in place. */
+.update-settings .settings-row p { max-width: 62ch; }
+.update-settings .update-progress { height: 4px; margin-top: 10px; border-radius: 2px; background: var(--surface-active); overflow: hidden; }
+.update-settings .update-progress > span { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width .2s linear; }
+.update-settings .update-error { color: var(--red); }
+.update-settings .update-notes { margin-top: 8px; }
+.update-settings .update-notes summary { font-size: 10px; color: var(--text-dim); cursor: pointer; }
+.update-settings .update-notes pre { max-height: 180px; margin: 8px 0 0; padding: 10px 12px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text-secondary); font: 10px/1.6 var(--font-mono); white-space: pre-wrap; }
+.update-settings .update-token { align-items: flex-start; }
+.update-settings .update-token-input { display: flex; flex: none; align-items: center; gap: 6px; }
+.update-settings .update-token-input input { width: 220px; text-align: left; }
+.update-settings .update-token .field-hint { margin-top: 4px; }

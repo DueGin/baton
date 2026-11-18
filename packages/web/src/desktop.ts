@@ -8,6 +8,30 @@ export interface BatonDesktopBridge {
   setBadgeCount(count: number): void;
   /** Absent in desktop builds before the frameless window. */
   setWindowChrome?(chrome: WindowChrome): void;
+  /** In-app updates (DESIGN §4.15). Absent in desktop builds before the updater and in browsers. */
+  updates?: {
+    status(): Promise<UpdateStatus | null>;
+    check(): Promise<UpdateStatus | null>;
+    download(): Promise<UpdateStatus | null>;
+    install(): Promise<UpdateStatus | null>;
+    setToken(token: string): Promise<{ saved: boolean }>;
+    reveal(): Promise<void>;
+    onStatus(listener: (status: UpdateStatus) => void): () => void;
+  };
+}
+export type UpdatePhase = "idle" | "checking" | "current" | "available" | "downloading" | "downloaded" | "installing" | "error";
+export interface UpdateStatus {
+  phase: UpdatePhase;
+  currentVersion: string;
+  release?: { version: string; notes: string; pageUrl: string; publishedAt: string; asset: { name: string; size: number } };
+  /** 0–1 while downloading. */
+  progress?: number;
+  received?: number;
+  total?: number;
+  error?: string;
+  needsToken?: boolean;
+  savedPath?: string;
+  checkedAt?: string;
 }
 export interface WindowChrome { theme: "system" | "light" | "dark"; background: string; foreground: string }
 declare global { interface Window { batonDesktop?: BatonDesktopBridge } }
