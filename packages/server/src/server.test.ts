@@ -230,6 +230,15 @@ describe("lifecycle and demo", () => {
 });
 
 describe("HTTP and exports", () => {
+  it("accepts body-less POSTs the console sends (no Content-Type) and still rejects non-JSON bodies", async () => {
+    const server = await setup({ root: async () => {} });
+    const post = (path: string, init: RequestInit = {}) => fetch(server.url + path, { method: "POST", ...init, headers: { authorization: `Bearer ${server.token}`, ...(init.headers ?? {}) } });
+    const refreshed = await post("/api/agents/refresh");
+    expect(refreshed.status).toBe(200); expect(Array.isArray(await refreshed.json())).toBe(true);
+    expect((await post("/api/prs/missing/refresh")).status).not.toBe(415);
+    expect((await post("/api/agents/refresh", { headers: { "content-type": "text/plain" }, body: "hi" })).status).toBe(415);
+    expect((await post("/api/agents/refresh", { headers: { "content-type": "application/json" }, body: "{" })).status).toBe(400);
+  });
   it("exercises CLI agents/run/runs/export against the running daemon", async () => {
     const server = await setup({ root: idle });
     const cli = async (...args: string[]): Promise<string> => {

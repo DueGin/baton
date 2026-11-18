@@ -44,13 +44,17 @@ class HttpError extends Error { constructor(readonly status: number, message: st
 /** A captured path segment, percent-decoded (ids such as "<nodeId>:<toolUseId>" arrive as %3A). */
 function segment(value: string): string { try { return decodeURIComponent(value); } catch { throw new HttpError(400, "Malformed path segment"); } }
 function json(response: ServerResponse, status: number, body: unknown): void { response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }).end(JSON.stringify(body)); }
+/** JSON request body. A POST without a body (no Content-Type, nothing sent) reads as `{}`; a body
+ * that is present must be application/json. */
 async function body(request: IncomingMessage): Promise<unknown> {
-  if (request.headers["content-type"]?.split(";")[0]?.trim().toLowerCase() !== "application/json") throw new HttpError(415, "Only application/json request bodies are accepted");
+  const json = request.headers["content-type"]?.split(";")[0]?.trim().toLowerCase() === "application/json";
   const parts: Buffer[] = []; let length = 0;
   for await (const chunk of request) {
     const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array); length += part.length;
     if (length > 1024 * 1024) throw new HttpError(413, "Request body too large"); parts.push(part);
   }
+  if (!length) return {};
+  if (!json) throw new HttpError(415, "Only application/json request bodies are accepted");
   try { return JSON.parse(Buffer.concat(parts).toString("utf8")) as unknown; } catch { throw new HttpError(400, "Invalid JSON body"); }
 }
 /** Raw request bytes up to `limit`. An oversized body is drained (within reason) before the 413 so
@@ -215,7 +219,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
       if (method === "DELETE" && permissionRule) { store.deleteRule(segment(permissionRule[1]!)); json(response, 200, { deleted: true }); return; }
       const question = /^\/api\/questions\/([^/]+)\/answer$/.exec(path);
       const declineRoute = /^\/api\/questions\/([^/]+)\/decline$/.exec(path);
-      if (method === "POST" && declineRoute) { if (request.headers["content-length"] && request.headers["content-length"] !== "0") await body(request); json(response, 200, await kernel.human.decline(segment(declineRoute[1]!))); return; }
+      if (method === "POST" && declineRoute) { await body(request); json(response, 200, await kernel.human.decline(segment(declineRoute[1]!))); return; }
       if (method === "POST" && question) { const input = record(await body(request)); json(response, 200, await kernel.human.answer(segment(question[1]!), input)); return; }
       const escalation = /^\/api\/escalations\/([^/]+)\/resolve$/.exec(path);
       if (method === "POST" && escalation) { json(response, 200, await kernel.human.resolve(segment(escalation[1]!), record(await body(request)) as unknown as ResolveEscalationRequest)); return; }
