@@ -34,10 +34,10 @@ describe("safe agent content rendering", () => {
     const live = replay(createScenario(0), 30000); const node = live.nodes[0]!;
     expect(live.nodes.some(entry => nodeIsLive(live, entry))).toBe(true);
     const render = (snapshot: typeof live, actions = true) => renderToStaticMarkup(<Transcript snapshot={snapshot} store={store} items={{ [node.id]: [] }} itemStatus={{ [node.id]: "ready" }} nodeId={node.id} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} {...(actions ? { stopRun: () => undefined, resumeRun: () => undefined } : {})} />);
-    const working = render(live); expect(working).toContain("composer-stop"); expect(working).toContain("停止"); expect(working).not.toContain(">发送<");
-    const paused = render({ ...live, run: { ...live.run, status: "paused" } }); expect(paused).toContain("composer-resume"); expect(paused).toContain("继续");
+    const working = render(live); expect(working).toContain("composer-stop"); expect(working).toContain('aria-label="停止"'); expect(working).not.toContain('aria-label="发送"'); expect(working).not.toMatch(/<\/svg>(停止|发送|继续)<\/button>/);
+    const paused = render({ ...live, run: { ...live.run, status: "paused" } }); expect(paused).toContain("composer-resume"); expect(paused).toContain('aria-label="继续"'); expect(paused).not.toMatch(/<\/svg>继续<\/button>/);
     const restarted = render({ ...live, run: { ...live.run, status: "paused", pauses: [{ at: live.run.createdAt, by: "restart" }] } }); expect(restarted).toContain("baton 重启时有 agent 正在工作"); expect(restarted).toContain("composer-resume");
-    const done = render({ ...live, run: { ...live.run, status: "completed" } }); expect(done).not.toContain("composer-stop"); expect(done).toContain("发送");
+    const done = render({ ...live, run: { ...live.run, status: "completed" } }); expect(done).not.toContain("composer-stop"); expect(done).toContain('aria-label="发送"'); expect(done).not.toMatch(/<\/svg>发送<\/button>/);
     expect(render(live, false)).not.toContain("composer-stop");
   });
   it("keeps queued/retracted rows out of the transcript and places icon actions on steered messages", () => {

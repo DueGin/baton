@@ -1634,3 +1634,7 @@ html[data-desktop="darwin"]:not([data-fullscreen]) .navigation-sidebar.is-collap
 html[data-desktop="darwin"]:not([data-fullscreen]) .navigation-sidebar.is-collapsed ~ .main-shell > .run-bar { padding-left: 36px; }
 /* Windows: keep the run bar's right-hand buttons clear of the window controls overlay (about 138px wide). */
 html[data-desktop="win32"] .run-bar { padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, calc(100vw - 138px)) + 14px); }
+
+/* Composer actions are icon-only (send / stop / resume share one slot, so the slot never changes width). */
+.composer .composer-icon-action { width: 30px; height: 30px; padding: 0; gap: 0; border-radius: 50%; flex: none; }
+.composer .composer-icon-action svg { flex: none; }
