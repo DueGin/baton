@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, screen, shell, Tray, type IpcMainEvent, type IpcMainInvokeEvent, type MenuItemConstructorOptions, type NativeImage } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, shell, Tray, type BrowserWindowConstructorOptions, type IpcMainEvent, type IpcMainInvokeEvent, type MenuItemConstructorOptions, type NativeImage } from "electron";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { DaemonManager, type DaemonConnection } from "./daemon.js";
 import { parseNotification, subscribe } from "./events.js";
 import { loginShellEnv } from "./shell-env.js";
-import { absolutePath, badgeCount, directoryOptions, externalUrl, notificationRoute } from "./security.js";
+import { absolutePath, badgeCount, directoryOptions, externalUrl, notificationRoute, windowChrome, type WindowChrome } from "./security.js";
 import { windowState } from "./window-state.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -27,6 +27,23 @@ let consoleOrigin = "";
 const notifications = new Set<Notification>();
 const seenNotices = new Set<string>();
 const iconPath = join(app.isPackaged ? process.resourcesPath : resolve(here, ".."), "assets", "icon.png");
+// No native title bar (DESIGN §4.12): the console draws to the top edge and reserves a strip this tall — its run bar's
+// height — for dragging, the macOS traffic lights (top left) and the Windows window controls overlay (top right).
+const TITLE_BAR_HEIGHT = 44;
+/** Until the console reports its theme and colours: the last ones it reported, else the system appearance. */
+let chrome: WindowChrome | undefined;
+const fallbackChrome = (): Omit<WindowChrome, "theme"> => nativeTheme.shouldUseDarkColors ? { background: "#0f0f0f", foreground: "#e8e8e8" } : { background: "#f7f7f7", foreground: "#1a1a1a" };
+function frameOptions(colors: Omit<WindowChrome, "theme">): BrowserWindowConstructorOptions {
+  if (process.platform === "darwin") return { titleBarStyle: "hidden", trafficLightPosition: { x: 18, y: 15 } };
+  if (process.platform === "win32") return { titleBarStyle: "hidden", titleBarOverlay: { color: colors.background, symbolColor: colors.foreground, height: TITLE_BAR_HEIGHT } };
+  return {};
+}
+function applyChrome(next: WindowChrome): void {
+  chrome = next; nativeTheme.themeSource = next.theme;
+  if (!window || window.isDestroyed()) return;
+  window.setBackgroundColor(next.background);
+  if (process.platform === "win32") window.setTitleBarOverlay({ color: next.background, symbolColor: next.foreground, height: TITLE_BAR_HEIGHT });
+}
 
 function consoleUrl(route = "/"): string {
   const url = new URL(route, consoleOrigin);
@@ -61,7 +78,9 @@ async function showWindow(route?: string): Promise<BrowserWindow> {
     let saved: unknown;
     try { saved = JSON.parse(await readFile(join(app.getPath("userData"), "window-state.json"), "utf8")) as unknown; } catch { /* First launch. */ }
     const state = windowState(saved, screen.getAllDisplays().map(display => display.workArea));
-    const current = new BrowserWindow({ ...state, minWidth: 800, minHeight: 600, title: "baton", show: false, backgroundColor: "#101318", icon: iconPath,
+    if (!chrome) { try { applyChrome(windowChrome((saved as { chrome?: unknown } | undefined)?.chrome)); } catch { /* First launch or an older state file. */ } }
+    const colors = chrome ?? fallbackChrome();
+    const current = new BrowserWindow({ ...state, minWidth: 800, minHeight: 600, title: "baton", show: false, backgroundColor: colors.background, icon: iconPath, ...frameOptions(colors),
       webPreferences: { preload: join(here, "preload.cjs"), contextIsolation: true, sandbox: true, nodeIntegration: false, webviewTag: false, additionalArguments: [`--baton-version=${app.getVersion()}`] },
     });
     window = current;
@@ -76,9 +95,12 @@ async function showWindow(route?: string): Promise<BrowserWindow> {
     current.webContents.session.setPermissionCheckHandler(() => false);
     current.webContents.on("render-process-gone", () => { if (!quitting) void current.loadURL(consoleUrl()); });
     current.once("ready-to-show", () => { if (!smoke) current.show(); });
+    // macOS hides the traffic lights in full screen; the console then drops the space it keeps for them.
+    const fullScreen = () => { if (!current.isDestroyed()) current.webContents.send("baton:fullscreen", current.isFullScreen()); };
+    current.on("enter-full-screen", fullScreen); current.on("leave-full-screen", fullScreen); current.webContents.on("did-finish-load", fullScreen);
     current.on("close", () => {
       const bounds = current.getNormalBounds();
-      const saved = JSON.stringify({ ...bounds, maximized: current.isMaximized() });
+      const saved = JSON.stringify({ ...bounds, maximized: current.isMaximized(), ...(chrome ? { chrome } : {}) });
       void mkdir(app.getPath("userData"), { recursive: true }).then(() => writeFile(join(app.getPath("userData"), "window-state.json"), saved)).catch(console.error);
     });
     current.on("closed", () => { if (window === current) window = null; });
@@ -111,6 +133,7 @@ function setupIpc(): void {
   ipcMain.handle("baton:open-external", async (event, input: unknown) => { authorize(event); await openExternal(input); });
   ipcMain.handle("baton:show-item", (event, input: unknown) => { authorize(event); shell.showItemInFolder(absolutePath(input)); });
   ipcMain.on("baton:badge", (event, input: unknown) => { try { authorize(event); setBadge(input); } catch { /* Reject malformed fire-and-forget IPC. */ } });
+  ipcMain.on("baton:window-chrome", (event, input: unknown) => { try { authorize(event); applyChrome(windowChrome(input)); } catch { /* Reject malformed fire-and-forget IPC. */ } });
 }
 
 function connectEvents(current: DaemonConnection): void {
@@ -170,7 +193,7 @@ async function smokeCheck(current: BrowserWindow): Promise<void> {
   })`);
   if (!renderer || typeof renderer !== "object") throw new Error("Smoke: no renderer result");
   const result = renderer as Record<string, unknown>;
-  if (result.nodeExposed || result.demo || JSON.stringify(result.bridge) !== JSON.stringify(["openExternal", "pickDirectory", "platform", "setBadgeCount", "showItemInFolder", "version"])) throw new Error(`Smoke: invalid renderer ${JSON.stringify(result)}`);
+  if (result.nodeExposed || result.demo || JSON.stringify(result.bridge) !== JSON.stringify(["openExternal", "pickDirectory", "platform", "setBadgeCount", "setWindowChrome", "showItemInFolder", "version"])) throw new Error(`Smoke: invalid renderer ${JSON.stringify(result)}`);
   const rejected: unknown = await current.webContents.executeJavaScript(`window.batonDesktop.openExternal('javascript:alert(1)').then(() => false, () => true)`);
   if (rejected !== true) throw new Error("Smoke: IPC URL allowlist failed");
   // Exercise the real IPC + React + POST flow while replacing only the OS dialog interaction.

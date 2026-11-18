@@ -6,9 +6,33 @@ export interface BatonDesktopBridge {
   openExternal(url: string): Promise<void>;
   showItemInFolder(path: string): Promise<void>;
   setBadgeCount(count: number): void;
+  /** Absent in desktop builds before the frameless window. */
+  setWindowChrome?(chrome: WindowChrome): void;
 }
+export interface WindowChrome { theme: "system" | "light" | "dark"; background: string; foreground: string }
 declare global { interface Window { batonDesktop?: BatonDesktopBridge } }
 export function desktopBridge(): BatonDesktopBridge | undefined { return typeof window === "undefined" ? undefined : window.batonDesktop; }
+
+/**
+ * The desktop window has no native title bar (DESIGN §4.12). `data-desktop` on <html> lets the stylesheet keep the top
+ * strip for dragging, the macOS traffic lights and the Windows window controls.
+ */
+export function installDesktopChrome(): void { const bridge = desktopBridge(); if (bridge) document.documentElement.dataset.desktop = bridge.platform; }
+/** "rgb(24, 24, 24)" → "#181818"; transparent colours give null. */
+export function cssColorHex(value: string): string | null {
+  const match = /^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)$/u.exec(value.trim());
+  if (!match || (match[4] !== undefined && Number(match[4]) === 0)) return null;
+  return `#${match.slice(1, 4).map(channel => Math.min(255, Number(channel)).toString(16).padStart(2, "0")).join("")}`;
+}
+/** What the native window controls sit on: the first painted background under the top-right corner, and the text colour. */
+export function windowChrome(theme: string): WindowChrome | null {
+  let background: string | null = null;
+  for (const element of document.elementsFromPoint(Math.max(0, window.innerWidth - 70), 20)) { background = cssColorHex(getComputedStyle(element).backgroundColor); if (background) break; }
+  const foreground = cssColorHex(getComputedStyle(document.documentElement).color);
+  background ??= cssColorHex(getComputedStyle(document.body).backgroundColor) ?? cssColorHex(getComputedStyle(document.documentElement).backgroundColor);
+  if (!background || !foreground) return null;
+  return { theme: theme === "light" || theme === "dark" ? theme : "system", background, foreground };
+}
 
 /** Covers Markdown, PR links, and localhost ports, including dynamically inserted anchors. */
 export function installDesktopLinks(): void {

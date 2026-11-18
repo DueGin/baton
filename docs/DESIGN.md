@@ -368,7 +368,13 @@ URL 识别规则：
 **窗口**：
 - BrowserWindow 加载 `http://127.0.0.1:<port>/#token=<token>`，token 从 `$BATON_HOME/token` 读取。
 - 安全设置：`contextIsolation`、`sandbox`、禁用 `nodeIntegration`。只允许在 daemon 这个 origin 内导航。外部 http、https 链接（PR、localhost 端口等）用 `shell.openExternal` 在系统浏览器打开。
-- 记住窗口的大小和位置。
+- 记住窗口的大小、位置和最近一次的主题与配色，下次启动时窗口背景直接用这个颜色，不会先闪白。
+- **没有原生标题栏**，控制台一直画到窗口顶边：
+  - 顶部 44px（和 Run 顶栏一样高）是拖动窗口的区域：Run 页面就是 Run 顶栏本身，其他页面在内容上方留一条 44px 的空条；侧栏顶部也可以拖动。区域内的按钮、标签、输入框不参与拖动。
+  - macOS：`titleBarStyle: "hidden"`，红绿灯放在左上角（`trafficLightPosition` 18,15），和 Run 顶栏的文字在同一行。展开的侧栏在 logo 上方留出红绿灯的位置；收起时，窄栏的按钮和 Run 顶栏的标题都往后让开。全屏时红绿灯隐藏，主进程通过 `baton:fullscreen` 通知 preload 给 `<html>` 加 `data-fullscreen`，预留的空间随之去掉。
+  - Windows：`titleBarStyle: "hidden"` 加 `titleBarOverlay`（高 44px），最小化、最大化、关闭按钮叠在右上角。Run 顶栏右侧按 `env(titlebar-area-*)` 让出这块位置；按钮的底色和图标颜色由控制台通过 `setWindowChrome` 告诉主进程，跟随主题变化。
+  - Linux 保留原生标题栏。
+- web 端发现桥后给 `<html>` 加 `data-desktop="<platform>"`，以上布局只在这个属性存在时生效，普通浏览器不受影响。
 - 提供标准菜单：编辑（复制、粘贴、全选）、视图（重新加载、开发者工具、缩放）、窗口、帮助。macOS 上 Dock 图标的角标显示待处理数，Windows 上用任务栏的 overlay 图标显示。
 
 **preload 桥**：通过 `window.batonDesktop` 暴露，只提供以下方法：
@@ -380,6 +386,9 @@ interface BatonDesktopBridge {
   openExternal(url: string): Promise<void>;          // 只接受 http(s) / mailto
   showItemInFolder(path: string): Promise<void>;      // 在 Finder / 资源管理器中显示
   setBadgeCount(count: number): void;
+  // 主题选择（system / light / dark）和窗口右上角的底色、文字颜色（#rrggbb）。主进程据此设置 nativeTheme.themeSource、
+  // 窗口背景色，以及 Windows 上窗口按钮叠层的颜色；参数不合法时忽略。
+  setWindowChrome(chrome: { theme: "system" | "light" | "dark"; background: string; foreground: string }): void;
 }
 ```
 - web 端检测到这个桥时：

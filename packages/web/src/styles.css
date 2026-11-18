@@ -1613,3 +1613,24 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .project-menu > div, .reasoning-bulk-menu > div { padding: 4px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface-raised); box-shadow: var(--popover-shadow); }
 .project-menu button, .reasoning-bulk-menu button { min-height: 28px; padding: 5px 8px; border-radius: 5px; color: var(--text); font-size: 11px; }
 .project-menu button:hover:not(:disabled), .reasoning-bulk-menu button:hover:not(:disabled) { background: var(--surface-hover); }
+
+/* Desktop window chrome (DESIGN §4.12). The window has no native title bar: the console runs to the top edge and its
+   top 44px — the run bar's height — is the drag area. macOS traffic lights sit at its left (main process:
+   trafficLightPosition 18,15); the Windows window controls overlay sits at its right. */
+.window-titlebar { display: none; }
+html[data-desktop] .window-titlebar { display: block; flex: 0 0 44px; }
+html[data-desktop] .main-shell:has(> .run-bar) > .window-titlebar { display: none; }
+html[data-desktop] :is(.window-titlebar, .sidebar-top, .run-bar) { -webkit-app-region: drag; app-region: drag; }
+html[data-desktop] :is(.sidebar-top, .run-bar) :is(button, a, input, select, textarea, label, [role], [tabindex]),
+html[data-desktop] :is(dialog, [popover], .sidebar-resizer, .sidebar-overlay-backdrop, .right-panel-backdrop, .rail-popover-dismiss, .global-error) { -webkit-app-region: no-drag; app-region: no-drag; }
+/* Pages without a run bar: the drag strip takes the place of most of the top padding. */
+html[data-desktop] .main-shell > .page-content { padding-top: 16px; }
+html[data-desktop] .settings-tabs { padding-top: 0; }
+/* macOS: room for the traffic lights, except in full screen where they are hidden. */
+html[data-desktop="darwin"]:not([data-fullscreen]) .navigation-sidebar:not(.is-collapsed) .sidebar-top { padding-top: 34px; }
+html[data-desktop="darwin"]:not([data-fullscreen]) .navigation-sidebar:not(.is-collapsed) .brand { height: 66px; padding-top: 12px; padding-bottom: 20px; }
+html[data-desktop="darwin"]:not([data-fullscreen]) .navigation-sidebar.is-collapsed .sidebar-top { padding-top: 40px; }
+html[data-desktop="darwin"]:not([data-fullscreen]) .navigation-sidebar.is-collapsed .rail-run-popover { top: 120px; }
+html[data-desktop="darwin"]:not([data-fullscreen]) .navigation-sidebar.is-collapsed ~ .main-shell > .run-bar { padding-left: 36px; }
+/* Windows: keep the run bar's right-hand buttons clear of the window controls overlay (about 138px wide). */
+html[data-desktop="win32"] .run-bar { padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, calc(100vw - 138px)) + 14px); }

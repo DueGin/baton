@@ -6,4 +6,6 @@ export interface BatonDesktopBridge {
   openExternal(url: string): Promise<void>;
   showItemInFolder(path: string): Promise<void>;
   setBadgeCount(count: number): void;
+  /** Theme choice plus the colours behind the window controls; sets the native appearance and the Windows overlay. */
+  setWindowChrome(chrome: { theme: "system" | "light" | "dark"; background: string; foreground: string }): void;
 }

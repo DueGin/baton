@@ -32,3 +32,14 @@ export function badgeCount(value: unknown): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error("Invalid badge count");
   return Math.min(9999, value);
 }
+
+export type WindowTheme = "system" | "light" | "dark";
+export interface WindowChrome { theme: WindowTheme; background: string; foreground: string }
+const hexColor = /^#[0-9a-f]{6}$/iu;
+/** The console's theme choice and the colours behind the window controls (DESIGN §4.12). */
+export function windowChrome(value: unknown): WindowChrome {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid window chrome");
+  const { theme, background, foreground, ...rest } = value as Record<string, unknown>;
+  if (Object.keys(rest).length || (theme !== "system" && theme !== "light" && theme !== "dark") || typeof background !== "string" || !hexColor.test(background) || typeof foreground !== "string" || !hexColor.test(foreground)) throw new Error("Invalid window chrome");
+  return { theme, background: background.toLowerCase(), foreground: foreground.toLowerCase() };
+}

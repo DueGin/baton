@@ -33,7 +33,8 @@ import { AgentsPage } from "./components/Agents.js";
 import { agentReady } from "./lib/agents.js";
 import { ImageContext } from "./lib/images.js";
 import { NewRun } from "./components/NewRun.js";
-import { desktopBridge, desktopRoute } from "./desktop.js";
+import { desktopBridge, desktopRoute, windowChrome } from "./desktop.js";
+import { useColorTheme } from "./lib/theme.js";
 
 import { Sidebar, type Page } from "./components/Sidebar.js";
 const Topology = lazy(() => import("./components/Topology.js").then(module => ({ default: module.Topology })));
@@ -182,6 +183,13 @@ export default function App({ client }: { client: BatonClient }) {
   useEffect(() => { if (runId) { void store.open(runId); setInspected(null); setConversation(""); setTeamDialog(null); setReassignId(null); setCancelingRun(false); } return () => store.close(); }, [store, runId, setInspected]);
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem("baton.theme", theme); }, [theme]);
+  // Desktop: the native window controls and appearance follow the console's theme and what sits under the top-right corner.
+  const colorTheme = useColorTheme(); const hasRunBar = page === "runs" && Boolean(snapshot);
+  useEffect(() => {
+    const bridge = desktopBridge(); if (!bridge?.setWindowChrome) return;
+    const frame = requestAnimationFrame(() => { const chrome = windowChrome(theme); if (chrome) bridge.setWindowChrome?.(chrome); });
+    return () => cancelAnimationFrame(frame);
+  }, [theme, colorTheme, hasRunBar, page]);
   useEffect(() => { if (snapshot && pendingNavigation.current?.runId === snapshot.run.id) { setInspected(pendingNavigation.current.nodeId ?? null); pendingNavigation.current = null; } }, [snapshot, setInspected]);
   useEffect(() => { if (snapshot) { setRuns(current => current.map(entry => entry.id === snapshot.run.id ? summarize(snapshot) : entry)); setConversation(current => current || snapshot.run.rootNodeId); } }, [snapshot]);
   useEffect(() => { const handler = (event: KeyboardEvent): void => { if (event.key === "Escape" && !document.querySelector('[aria-modal="true"], dialog[open]')) dispatchPanel({ type: "close" }); }; window.addEventListener("keydown", handler); return () => window.removeEventListener("keydown", handler); }, []);
@@ -209,6 +217,7 @@ export default function App({ client }: { client: BatonClient }) {
   return <ImageContext value={images}><div className="app-shell">
     <Sidebar pullRequests={visiblePrs} projects={projects} currentProjectId={currentProjectId} reveal={projectReveal} selectProject={rememberProject} addProject={() => { resumeNewRun.current = false; setAddProject(true); }} mutateProject={async (id, request) => { await client.patchProject(id, request); await refreshProjects(); }} runs={runs} runId={runId} page={page} navigate={setPage} selectRun={id => { const projectId = runs.find(run => run.id === id)?.projectId; if (projectId) rememberProject(projectId); setRunId(id); setPage("runs"); }} newRun={openNewRun} canCreate={agents.some(agentReady)} pendingCount={inboxState.loaded ? inboxState.items.length : runs.reduce((sum, run) => sum + run.pendingTotal, 0)} presetCount={presets.length} theme={theme} toggleTheme={() => setTheme(current => current === "dark" ? "light" : "dark")} demo={client.demo} loading={initialLoading} />
     <main className="main-shell">
+      <div className="window-titlebar" aria-hidden="true" />
       {client.demo && <div className="demo-banner"><span className="demo-tag">DEMO</span><span>浏览器内实时模拟 · 尝试处理授权、查看委派结果，或给任意节点发消息</span><span className="demo-local">无服务端连接</span></div>}
       {(error || state.error) && <div className={`global-error ${state.connection === "reconnecting" && !error ? "reconnect-warning" : ""}`} role="alert"><span>{error ?? state.error}</span><div>{state.connection === "offline" && runId && <button className="text-button" onClick={() => { void store.open(runId); }}>重试</button>}{error && <button className="icon-button" title="关闭提示" onClick={() => setError(null)}><Icon name="close" size={14} /></button>}</div></div>}
       {warnings.length > 0 && <div className="global-error reconnect-warning preset-warnings" role="status"><div><strong>预设已保存 · Agent 可用性提示</strong>{warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div><button className="icon-button" title="关闭提示" onClick={() => setWarnings([])}><Icon name="close" size={14} /></button></div>}
