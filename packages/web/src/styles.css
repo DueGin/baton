@@ -1552,3 +1552,31 @@ h1, h2, h3, h4, p { margin-top: 0; }
 @keyframes outline-flash { 0%, 35% { box-shadow: 0 0 0 2px var(--text); } 100% { box-shadow: 0 0 0 2px transparent; } }
 @media (max-width: 760px) { .conversation-outline { display: none; } }
 @media (prefers-reduced-motion: reduce) { .message.outline-flash { animation: none; outline: 2px solid var(--text); } .outline-tick > i { transition: none; } }
+
+/* Run team table: fixed column widths so 加入者 and 操作 never wrap; 职责 takes the remaining width. */
+.roster-table { table-layout: fixed; min-width: 960px; }
+.roster-table col.col-role { width: 152px; }
+.roster-table col.col-agent { width: 172px; }
+.roster-table col.col-by { width: 80px; }
+.roster-table col.col-work { width: 200px; }
+.roster-table col.col-actions { width: 116px; }
+.roster-table td { max-width: none; }
+.roster-table td:nth-child(4), .roster-table td:nth-child(4) .muted { white-space: nowrap; overflow-wrap: normal; }
+.roster-actions { flex-wrap: nowrap; white-space: nowrap; }
+.roster-actions > * { flex: none; white-space: nowrap; }
+/* Long ids: shortened with a copy button. */
+.copyable-id { display: inline-flex; align-items: center; gap: 3px; max-width: 100%; vertical-align: middle; }
+.roster-table td > .copyable-id { display: flex; margin-top: 7px; }
+.copyable-id code { font: 9px var(--font-mono); color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.copyable-id-button { flex: none; width: 18px; height: 18px; padding: 0; color: var(--text-dim); }
+.copyable-id-button:hover { color: var(--text); }
+/* 职责 / 理由: three lines in the table, full text in a dialog on click. */
+.duty-cell { cursor: pointer; border-radius: 5px; margin: -4px -6px; padding: 4px 6px; outline: none; }
+.duty-cell:hover, .duty-cell:focus-visible { background: var(--surface-hover); }
+.duty-cell:focus-visible { box-shadow: 0 0 0 2px var(--accent-soft); }
+.duty-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+.duty-preview .markdown, .duty-preview .markdown p { display: inline; margin: 0; }
+.duty-preview .markdown + .markdown::before { content: " · "; color: var(--text-dim); }
+.duty-detail { margin-bottom: 14px; }
+.duty-detail h3 { margin: 0 0 6px; font-size: 11px; font-weight: 600; color: var(--text-secondary); }
+.duty-detail .markdown { font-size: 12.5px; line-height: 1.75; overflow-wrap: anywhere; }

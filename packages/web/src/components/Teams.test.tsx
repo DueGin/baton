@@ -27,6 +27,10 @@ describe("team views", () => {
     const client = new DemoClient(() => Date.parse("2026-11-10T07:00:00Z")); const snapshot = await client.run("run-demo");
     const html = renderToStaticMarkup(<RunTeam snapshot={snapshot} add={() => undefined} replace={() => undefined} remove={() => undefined} save={() => undefined} busy={false} inspect={() => undefined} />);
     expect(html).toContain("主导者的组队理由"); expect(html).toContain("已替换"); expect(html).toContain("member-replaced"); expect(html).toContain("换人"); expect(html).toContain("另存为预设");
+    // Member ids are shortened with a copy button; the table has fixed columns so 操作 never wraps.
+    const member = snapshot.run.team!.members[0]!;
+    expect(html).toContain(`<code title="${member.id}">${member.id.slice(0, 8)}…</code>`); expect(html).toContain('aria-label="复制成员 ID"');
+    expect(html).not.toContain(`<span class="muted mono">${member.id}</span>`); expect(html).toContain('<col class="col-actions"/>'); expect(html).toContain(`aria-label="查看 ${member.role} 的完整职责与理由"`); expect(html).toContain('class="duty-preview"');
   });
 });
 
