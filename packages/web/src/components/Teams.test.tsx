@@ -43,7 +43,7 @@ describe("preset candidates in the console", () => {
     const rows = html.split("candidate-editor-row").slice(1);
     expect(rows).toHaveLength(3);
     for (const row of rows) { expect(row).toContain('aria-label="Agent"'); expect(row).toContain('aria-label="Model"'); expect(row).toContain('aria-label="Thinking"'); expect(row).toContain("描述（可选）"); expect(row).not.toContain('aria-label="Mode"'); expect(row).not.toContain("角色"); }
-    expect(rows[0]).toContain("候选 1"); expect(rows[0]).toContain('value="gpt-5.3-codex"'); expect(rows[0]).toContain('value="前端、CSS 动画与交互细节"');
+    expect(rows[0]).toContain("候选 1"); expect(rows[0]).toContain('title="GPT-5.3 Codex · gpt-5.3-codex"'); expect(rows[0]).toContain('value="前端、CSS 动画与交互细节"');
     const blank = renderToStaticMarkup(<CandidatesEditor agents={demoAgents} candidates={[]} onChange={noop} />);
     expect(blank).not.toContain("candidate-editor-row"); expect(blank).toContain("添加候选");
   });

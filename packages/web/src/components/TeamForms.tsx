@@ -1,9 +1,13 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { AddMemberRequest, AgentEntry, ReassignRequest, ReplaceMemberRequest, RunSnapshot, TeamCandidateSpec, TeamMember, TeamMemberSpec, TeamPresetInput } from "@baton/protocol";
 import { activeMembers, cleanMember, defaultAgentSpec, validateMembers } from "../lib/teams.js";
 import { AgentPicker } from "./AgentPicker.js";
 import { agentReady, unavailableMembers } from "../lib/agents.js";
-import { Icon, Toggle } from "./common.js";
+import { keepUnlisted, type SelectOption } from "../lib/listbox.js";
+import { thinkingOptions, withAgent, withModel } from "../lib/models.js";
+import { AgentMark, Icon, Toggle } from "./common.js";
+import { ModelPicker } from "./ModelPicker.js";
+import { Select } from "./Select.js";
 
 export function Modal({ title, close, children, wide = false }: { title: string; close: () => void; children: ReactNode; wide?: boolean }) {
   const dialog = useRef<HTMLDialogElement>(null);
@@ -12,10 +16,11 @@ export function Modal({ title, close, children, wide = false }: { title: string;
 }
 type AgentSpec = TeamPresetInput["lead"];
 export function AgentFields({ agents, value, onChange, mode = true }: { agents: AgentEntry[]; value: AgentSpec; onChange: (value: AgentSpec) => void; /** False hides the Mode field (preset candidates). */ mode?: boolean }) {
-  const modelList = useId();
   const agent = agents.find(entry => entry.id === value.agentId);
-  const thinking = agent?.models.find(model => model.id === value.model)?.thinkingOptions ?? [];
-  return <div className={`agent-fields${mode ? "" : " without-mode"}`}><AgentPicker agents={agents} value={value.agentId} change={id => onChange(defaultAgentSpec(agents, id))} /><label>Model<input aria-label="Model" list={modelList} value={value.model ?? ""} onChange={event => onChange({ ...value, model: event.target.value, thinking: undefined })} placeholder="默认模型" /><datalist id={modelList}>{agent?.models.map(model => <option key={model.id} value={model.id}>{model.label}</option>)}</datalist></label>{mode && <label>Mode<select aria-label="Mode" value={value.modeId ?? ""} onChange={event => onChange({ ...value, modeId: event.target.value })}><option value="">默认</option>{agent?.modes.map(mode => <option key={mode.id} value={mode.id}>{mode.label}</option>)}</select></label>}<label>Thinking<select aria-label="Thinking" value={value.thinking ?? ""} onChange={event => onChange({ ...value, thinking: event.target.value })} disabled={!thinking.length}><option value="">默认</option>{thinking.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label></div>;
+  const modes: SelectOption[] = keepUnlisted([{ value: "", label: "默认", description: "agent 的默认模式" }, ...(agent?.modes ?? []).map(entry => ({ value: entry.id, label: entry.label, ...(entry.description ? { description: entry.description } : {}), ...(entry.isReadOnly ? { hint: "只读" } : entry.isUnattended ? { hint: "免确认" } : {}) }))], value.modeId);
+  const levels = thinkingOptions(agent, value.model);
+  const thinking: SelectOption[] = keepUnlisted([{ value: "", label: "默认" }, ...levels.map(option => ({ value: option.id, label: option.label, ...(option.isDefault ? { hint: "默认" } : {}) }))], value.thinking);
+  return <div className={`agent-fields${mode ? "" : " without-mode"}`}><AgentPicker agents={agents} value={value.agentId} change={id => onChange(withAgent(agents, value, id))} /><label>Model<ModelPicker agent={agent} value={value.model} onChange={model => onChange(withModel(agents, value, model))} /></label>{mode && <label>Mode<Select label="Mode" value={value.modeId ?? ""} options={modes} onChange={modeId => onChange({ ...value, modeId: modeId || undefined })} /></label>}<label>Thinking<Select label="Thinking" value={value.thinking ?? ""} options={thinking} onChange={level => onChange({ ...value, thinking: level || undefined })} disabled={!levels.length && !value.thinking} title={levels.length ? undefined : "所选模型没有可选的思考级别"} /></label></div>;
 }
 export function MembersEditor({ agents, members, onChange }: { agents: AgentEntry[]; members: TeamMemberSpec[]; onChange: (members: TeamMemberSpec[]) => void }) {
   const update = (index: number, patch: Partial<TeamMemberSpec>): void => onChange(members.map((member, i) => i === index ? { ...member, ...patch } : member));
@@ -41,8 +46,9 @@ export function ReassignDialog({ snapshot, agents, delegationId, close, submit, 
   const [spec, setSpec] = useState(defaultAgentSpec(agents)); const [reason, setReason] = useState("");
   const preset = snapshot.run.policy.mode === "preset";
   const edge = snapshot.delegations.find(entry => entry.id === delegationId);
+  const takeoverOptions: SelectOption[] = [...(preset ? [] : [{ value: "", label: "直接指定 agent", description: "不交给现有成员，按下方配置新建" }]), ...members.map(member => { const ready = agentReady(agents.find(agent => agent.id === member.agentId)); return { value: member.id, label: member.role, description: `${member.agentId} · ${member.model ?? "默认模型"}`, icon: <AgentMark agent={member.agentId} small />, ...(ready ? {} : { disabled: true, hint: "不可用" }) }; })];
   const canSubmit = memberId ? agentReady(agents.find(agent => agent.id === members.find(member => member.id === memberId)?.agentId)) : !preset && agentReady(agents.find(agent => agent.id === spec.agentId));
-  return <Modal title="改派任务" close={close}><form onSubmit={event => { event.preventDefault(); if (busy || !canSubmit) return; submit({ ...(memberId ? { memberId } : spec), reason: reason.trim() }); }}><p className="muted">{edge?.brief.title} · 前任的进展摘要将附加到新任务书。</p><label className="form-field">接手成员<select value={memberId} onChange={event => setMember(event.target.value)}>{!preset && <option value="">直接指定 agent</option>}{members.map(member => <option key={member.id} value={member.id} disabled={!agentReady(agents.find(agent => agent.id === member.agentId))}>{member.role} · {member.agentId} · {member.model ?? "默认模型"}</option>)}</select></label>{!memberId && !preset && <AgentFields agents={agents} value={spec} onChange={setSpec} />}<label className="form-field">改派理由<textarea rows={3} value={reason} onChange={event => setReason(event.target.value)} placeholder="说明新成员接手的原因" /></label>{preset && !members.length && <p className="error-text">预设团队没有可用成员，请先加入成员。</p>}{error && <div className="error-panel" role="alert">{error}</div>}<div className="dialog-footer"><button className="button" type="button" onClick={close}>取消</button><button className="button primary" disabled={busy || !canSubmit}>{busy ? "改派中…" : "确认改派"}</button></div></form></Modal>;
+  return <Modal title="改派任务" close={close}><form onSubmit={event => { event.preventDefault(); if (busy || !canSubmit) return; submit({ ...(memberId ? { memberId } : spec), reason: reason.trim() }); }}><p className="muted">{edge?.brief.title} · 前任的进展摘要将附加到新任务书。</p><label className="form-field">接手成员<Select label="接手成员" value={memberId} onChange={setMember} options={takeoverOptions} placeholder="选择成员" /></label>{!memberId && !preset && <AgentFields agents={agents} value={spec} onChange={setSpec} />}<label className="form-field">改派理由<textarea rows={3} value={reason} onChange={event => setReason(event.target.value)} placeholder="说明新成员接手的原因" /></label>{preset && !members.length && <p className="error-text">预设团队没有可用成员，请先加入成员。</p>}{error && <div className="error-panel" role="alert">{error}</div>}<div className="dialog-footer"><button className="button" type="button" onClick={close}>取消</button><button className="button primary" disabled={busy || !canSubmit}>{busy ? "改派中…" : "确认改派"}</button></div></form></Modal>;
 }
 export function SavePresetDialog({ close, submit, busy, error }: { close: () => void; submit: (name: string, description: string) => void; busy: boolean; error: string | null }) {
   const [name, setName] = useState(""); const [description, setDescription] = useState("");

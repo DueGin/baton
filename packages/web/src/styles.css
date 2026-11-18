@@ -435,7 +435,7 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .team-modal-content .dialog-heading h2 { margin: 0; font-size: 21px; }
 .agent-fields { display: grid; grid-template-columns: 1fr 1.4fr 1fr 1fr; gap: 10px; margin: 12px 0 18px; }
 .agent-fields label { display: flex; flex-direction: column; gap: 7px; color: var(--text-secondary); font-size: 11px; min-width: 0; }
-.agent-fields input, .agent-fields select { width: 100%; font-size: 11px; }
+.agent-fields input { width: 100%; font-size: 11px; }
 .form-section-title { font-size: 12px; font-weight: 600; margin: 22px 0 12px; }
 .member-editor-row { border: 1px solid var(--border); border-radius: 7px; padding: 13px 15px; margin-bottom: 10px; background: var(--bg); }
 .member-editor-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -559,7 +559,7 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .proposal-roster { width: 100%; min-width: 570px; border-collapse: collapse; }
 .proposal-roster th { text-align: left; font-size: 9px; font-weight: 500; color: var(--text-dim); padding: 4px 5px; }
 .proposal-roster td { padding: 3px 5px; }
-.proposal-roster input, .proposal-roster select { width: 100%; padding: 6px; font-size: 10px; }
+.proposal-roster input { width: 100%; padding: 6px; font-size: 10px; }
 .proposal-roster td:first-child { width: 18%; }
 .proposal-roster td:nth-child(2) { width: 20%; }
 .proposal-roster td:nth-child(3) { width: 23%; }
@@ -1384,7 +1384,7 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .proposal-roster { --control-height: 30px; --control-font: 10px; }
 .proposal-roster input { height: var(--control-height); }
 .proposal-roster td { vertical-align: middle; }
-.agent-fields input, .agent-fields select, .member-editor-row input, .member-editor-row select { height: 34px; padding-top: 0; padding-bottom: 0; }
+.agent-fields input, .member-editor-row input { height: 34px; padding-top: 0; padding-bottom: 0; }
 
 /* Settings shell: 通用 / Agents tabs share one page; the Agents catalog lives here instead of the sidebar. */
 .settings-shell { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
@@ -1599,3 +1599,9 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .select-option.is-warning .select-option-hint { color: var(--amber); }
 .select-option-check { flex: none; display: inline-flex; width: 13px; color: var(--text); }
 .select-empty { padding: 7px 9px; color: var(--text-dim); font-size: 10px; }
+
+/* 自定义… in the model picker: a text box in the trigger's place. */
+.model-picker-custom { flex-direction: row; align-items: center; gap: 4px; }
+.model-picker-custom > input { flex: 1; min-width: 0; height: var(--control-height, 34px); padding: 0 9px; font: var(--control-font, 11px) var(--font-mono); }
+.model-picker-custom > button { flex: none; display: inline-flex; align-items: center; justify-content: center; width: var(--control-height, 34px); height: var(--control-height, 34px); border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--text-secondary); }
+.model-picker-custom > button:hover { background: var(--surface-hover); color: var(--text); }
