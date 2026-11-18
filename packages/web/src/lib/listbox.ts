@@ -82,6 +82,13 @@ export function initialActive(options: SelectOption[], value: string): number {
   return selected >= 0 ? selected : enabledIndex(options, 0, 1);
 }
 
+/** Where the active row goes as the search changes: the first enabled real match (not merely a pinned row), else as on open. */
+export function searchActive(shown: SelectOption[], query: string, value: string): number {
+  if (!query.trim()) return initialActive(shown, value);
+  const match = shown.findIndex(option => !option.disabled && optionMatches(option, query));
+  return match >= 0 ? match : initialActive(shown, value);
+}
+
 /**
  * Type-ahead: the next enabled row whose label starts with `typed`. Repeating one character ("ddd") cycles through the
  * rows starting with it; a longer prefix may stay on the current row while it still matches.
@@ -103,9 +110,9 @@ export function isTypeAheadKey(event: { key: string; ctrlKey: boolean; metaKey: 
   return event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
 }
 
-/** The list's width range: never narrower than its trigger (or `minWidth`), never wider than `maxWidth` or the viewport. */
+/** The list's width range: never narrower than its trigger (or `minWidth`); wider only up to `maxWidth`; always inside the viewport. */
 export function popoverWidths(anchorWidth: number, viewportWidth: number, { minWidth = 0, maxWidth = 420, margin = 10 }: { minWidth?: number; maxWidth?: number; margin?: number } = {}): { min: number; max: number } {
-  const max = Math.min(maxWidth, Math.max(0, viewportWidth - margin * 2));
+  const max = Math.min(Math.max(maxWidth, anchorWidth), Math.max(0, viewportWidth - margin * 2));
   return { min: Math.min(max, Math.max(anchorWidth, minWidth)), max };
 }
 
@@ -113,14 +120,16 @@ export interface PopoverPlacement { top: number; left: number; maxHeight: number
 
 /**
  * Places a list under its trigger, or above it when it does not fit below and there is more room above, inside the
- * viewport with a margin. `natural` is the list's full content height and `width` its rendered width.
+ * viewport with a margin; left-aligned with the trigger, or right-aligned on the right side of the screen. `natural` is the list's full content height and `width` its rendered width.
  */
-export function placePopover({ anchor, viewport, natural, width, maxHeight = 340, gap = 4, margin = 10 }: { anchor: { top: number; bottom: number; left: number }; viewport: { width: number; height: number }; natural: number; width: number; maxHeight?: number; gap?: number; margin?: number }): PopoverPlacement {
+export function placePopover({ anchor, viewport, natural, width, maxHeight = 340, gap = 4, margin = 10 }: { anchor: { top: number; bottom: number; left: number; right: number }; viewport: { width: number; height: number }; natural: number; width: number; maxHeight?: number; gap?: number; margin?: number }): PopoverPlacement {
   const wanted = Math.min(natural, maxHeight);
   const below = viewport.height - anchor.bottom - gap - margin; const above = anchor.top - gap - margin;
   const side = below >= wanted || below >= above ? "bottom" : "top";
   // Squeezed against the viewport edge, still show a few rows (the page can scroll).
   const height = Math.max(Math.min(wanted, side === "bottom" ? below : above), Math.min(wanted, 96));
-  const left = Math.max(margin, Math.min(viewport.width - width - margin, anchor.left));
+  // A list wider than a trigger on the right side of the screen (settings rows) grows leftwards, ending under the trigger's right edge.
+  const start = (anchor.left + anchor.right) / 2 > viewport.width * .6 ? anchor.right - width : anchor.left;
+  const left = Math.max(margin, Math.min(viewport.width - width - margin, start));
   return { side, left, maxHeight: height, top: side === "bottom" ? anchor.bottom + gap : Math.max(margin, anchor.top - gap - height) };
 }

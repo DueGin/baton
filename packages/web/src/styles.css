@@ -431,7 +431,7 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .team-modal-content { padding: 25px 28px 22px; }
 .wide-dialog { width: 820px; }
 .team-modal-content .dialog-heading h2 { margin: 0; font-size: 21px; }
-.agent-fields { display: grid; grid-template-columns: 1fr 1.4fr 1fr 1fr; gap: 10px; margin: 12px 0 18px; }
+.agent-fields { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1.4fr) minmax(0, .9fr) minmax(0, .9fr); gap: 10px; margin: 12px 0 18px; }
 .agent-fields label { display: flex; flex-direction: column; gap: 7px; color: var(--text-secondary); font-size: 11px; min-width: 0; }
 .agent-fields input { width: 100%; font-size: 11px; }
 .form-section-title { font-size: 12px; font-weight: 600; margin: 22px 0 12px; }
@@ -1583,6 +1583,7 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .select-popover { position: fixed; inset: auto; margin: 0; z-index: 1000; display: flex; flex-direction: column; width: max-content; max-height: 340px; padding: 4px; overflow: hidden; background: var(--surface-raised); color: var(--text); border: 1px solid var(--border-strong); border-radius: 8px; box-shadow: var(--popover-shadow); font-size: 11px; }
 .select-popover::backdrop { background: transparent; }
 .select-search { flex: none; width: 100%; height: 30px; margin: 0 0 4px; padding: 0 9px; font-size: 11px; }
+.select-search:focus { outline: none; border-color: var(--text-dim); }
 .select-options { position: relative; flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .select-option { position: relative; display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 5px 8px 5px calc(8px + var(--depth, 0) * 14px); border-radius: 5px; color: var(--text); cursor: pointer; user-select: none; }
 .select-option.is-active { background: var(--surface-hover); }

@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
-import { filterOptions, initialActive, isTypeAheadKey, moveActive, navigationKeys, placePopover, popoverWidths, SEARCH_THRESHOLD, typeAhead, TYPE_AHEAD_MS, type NavigationKey, type SelectOption } from "../lib/listbox.js";
+import { filterOptions, initialActive, isTypeAheadKey, searchActive, moveActive, navigationKeys, placePopover, popoverWidths, SEARCH_THRESHOLD, typeAhead, TYPE_AHEAD_MS, type NavigationKey, type SelectOption } from "../lib/listbox.js";
 import { useDismiss } from "../lib/dismiss.js";
 import { Icon } from "./common.js";
 
@@ -63,7 +63,7 @@ export function Select({ value, options, onChange, label, placeholder = "请选�
   const unmatched = shown.every(option => option.pinned) && (query.trim() !== "" || !shown.length);
 
   const activate = (index: number): void => { reveal.current = true; setActive(index); };
-  const show = (text = "", start?: number): void => { setQuery(text); activate(start ?? initialActive(withSearch ? filterOptions(options, text) : options, value)); setOpen(true); };
+  const show = (text = "", start?: number): void => { setQuery(text); activate(start ?? searchActive(withSearch ? filterOptions(options, text) : options, text, value)); setOpen(true); };
   const close = (refocus: boolean): void => { setOpen(false); setQuery(""); typed.current.text = ""; if (refocus) trigger.current?.focus(); };
   const choose = (option: SelectOption | undefined): void => {
     if (!option || option.disabled) return;
@@ -85,10 +85,15 @@ export function Select({ value, options, onChange, label, placeholder = "请选�
     if (!open) return;
     const element = panel.current; const anchor = trigger.current; if (!element || !anchor) return;
     try { element.showPopover?.(); } catch { /* already showing */ }
+    // The width is measured from the full list once (and on window resize), so filtering does not make the list jump sideways.
+    let measured = false;
     const place = (): void => {
       const rect = anchor.getBoundingClientRect(); const viewport = { width: window.innerWidth, height: window.innerHeight };
-      const widths = popoverWidths(rect.width, viewport.width, { minWidth: popoverMinWidth, maxWidth: popoverMaxWidth });
-      element.style.minWidth = `${widths.min}px`; element.style.maxWidth = `${widths.max}px`;
+      if (!measured) {
+        const widths = popoverWidths(rect.width, viewport.width, { minWidth: popoverMinWidth, maxWidth: popoverMaxWidth });
+        element.style.width = ""; element.style.minWidth = `${widths.min}px`; element.style.maxWidth = `${widths.max}px`;
+        element.style.width = `${Math.ceil(element.getBoundingClientRect().width)}px`; measured = true;
+      }
       const list = element.querySelector<HTMLElement>(".select-options");
       const natural = element.offsetHeight + (list ? list.scrollHeight - list.clientHeight : 0);
       const placement = placePopover({ anchor: rect, viewport, natural, width: element.offsetWidth });
@@ -96,9 +101,10 @@ export function Select({ value, options, onChange, label, placeholder = "请选�
     };
     // Scrolling the list itself must not re-place (and so re-measure) the popover.
     const scrolled = (event: Event): void => { if (!(event.target instanceof Node && element.contains(event.target))) place(); };
+    const resized = (): void => { measured = false; place(); };
     const resize = new ResizeObserver(place); resize.observe(element); resize.observe(anchor);
-    place(); window.addEventListener("resize", place); window.addEventListener("scroll", scrolled, true);
-    return () => { resize.disconnect(); window.removeEventListener("resize", place); window.removeEventListener("scroll", scrolled, true); try { element.hidePopover?.(); } catch { /* already hidden */ } };
+    place(); window.addEventListener("resize", resized); window.addEventListener("scroll", scrolled, true);
+    return () => { resize.disconnect(); window.removeEventListener("resize", resized); window.removeEventListener("scroll", scrolled, true); try { element.hidePopover?.(); } catch { /* already hidden */ } };
   }, [open, popoverMinWidth, popoverMaxWidth]);
   useEffect(() => { if (open && withSearch) search.current?.focus(); }, [open, withSearch]);
   useEffect(() => {
@@ -153,7 +159,7 @@ export function Select({ value, options, onChange, label, placeholder = "请选�
       // Keep focus on the trigger or the search box; and inside a <label>, a click on a row must not re-click the trigger.
       onMouseDown={event => { if (event.target !== search.current) event.preventDefault(); }} onClick={event => event.preventDefault()}>
       {withSearch && <input ref={search} type="search" className="select-search" aria-label={`搜索 ${label}`} aria-controls={listId} aria-autocomplete="list" aria-activedescendant={activeId} placeholder={searchPlaceholder} value={query}
-        onChange={event => { const text = event.target.value; setQuery(text); activate(initialActive(filterOptions(options, text), value)); }} />}
+        onChange={event => { const text = event.target.value; setQuery(text); activate(searchActive(filterOptions(options, text), text, value)); }} />}
       {unmatched && <div className="select-empty">{emptyText}</div>}
       <SelectListbox id={listId} label={label} options={shown} value={value} active={active} optionId={optionId} choose={choose} hover={setActive} />
     </div>}

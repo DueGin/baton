@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { enabledIndex, filterOptions, initialActive, isTypeAheadKey, keepUnlisted, moveActive, optionMatches, placePopover, popoverWidths, typeAhead, type SelectOption } from "./listbox.js";
+import { enabledIndex, filterOptions, initialActive, searchActive, isTypeAheadKey, keepUnlisted, moveActive, optionMatches, placePopover, popoverWidths, typeAhead, type SelectOption } from "./listbox.js";
 
 const options: SelectOption[] = [
   { value: "", label: "默认" },
@@ -32,6 +32,13 @@ describe("listbox helpers", () => {
     expect(initialActive(options, "charlie")).toBe(4); expect(initialActive(options, "beta")).toBe(0); expect(initialActive(options, "missing")).toBe(0);
     expect(initialActive([{ value: "a", label: "a", disabled: true }, { value: "b", label: "b" }], "a")).toBe(1);
   });
+  it("moves the active row to the first real match while searching, not to a pinned row", () => {
+    const listed: SelectOption[] = [{ value: "", label: "默认模型", pinned: true }, { value: "claude", label: "Claude Code", pinned: true }, { value: "gemini", label: "Gemini CLI", disabled: true }, { value: "codex", label: "Codex" }];
+    expect(searchActive(filterOptions(listed, "c"), "c", "claude")).toBe(1);
+    expect(searchActive(filterOptions(listed, "codex"), "codex", "claude")).toBe(2);
+    expect(searchActive(filterOptions(listed, "zzz"), "zzz", "claude")).toBe(1);
+    expect(searchActive(listed, "", "codex")).toBe(3);
+  });
   it("types ahead by prefix, cycles on a repeated letter and skips disabled rows", () => {
     expect(typeAhead(options, "b", 0)).toBe(3); expect(typeAhead(options, "bb", 3)).toBe(3); expect(typeAhead(options, "br", 0)).toBe(3);
     expect(typeAhead(options, "c", 4)).toBe(4); expect(typeAhead(options, "a", 1)).toBe(1);
@@ -47,11 +54,14 @@ describe("listbox helpers", () => {
   });
   it("places the list under the trigger, above it when there is more room there, inside the viewport", () => {
     const viewport = { width: 800, height: 600 };
-    expect(popoverWidths(120, 800, { minWidth: 240 })).toEqual({ min: 240, max: 420 }); expect(popoverWidths(500, 800)).toEqual({ min: 420, max: 420 }); expect(popoverWidths(100, 300)).toEqual({ min: 100, max: 280 });
-    expect(placePopover({ anchor: { top: 100, bottom: 134, left: 40 }, viewport, natural: 200, width: 240 })).toEqual({ side: "bottom", top: 138, left: 40, maxHeight: 200 });
-    const above = placePopover({ anchor: { top: 500, bottom: 534, left: 700 }, viewport, natural: 300, width: 240 });
-    expect(above).toEqual({ side: "top", top: 196, left: 550, maxHeight: 300 });
+    expect(popoverWidths(120, 800, { minWidth: 240 })).toEqual({ min: 240, max: 420 }); expect(popoverWidths(500, 800)).toEqual({ min: 500, max: 500 }); expect(popoverWidths(900, 800)).toEqual({ min: 780, max: 780 }); expect(popoverWidths(100, 300)).toEqual({ min: 100, max: 280 });
+    expect(placePopover({ anchor: { top: 100, bottom: 134, left: 40, right: 200 }, viewport, natural: 200, width: 240 })).toEqual({ side: "bottom", top: 138, left: 40, maxHeight: 200 });
+    // Near the bottom-right: above the trigger, right edges aligned.
+    expect(placePopover({ anchor: { top: 500, bottom: 534, left: 600, right: 750 }, viewport, natural: 300, width: 240 })).toEqual({ side: "top", top: 196, left: 510, maxHeight: 300 });
+    // Clamped into the viewport.
+    expect(placePopover({ anchor: { top: 100, bottom: 134, left: 700, right: 790 }, viewport, natural: 100, width: 300 }).left).toBe(490);
+    expect(placePopover({ anchor: { top: 100, bottom: 134, left: 0, right: 100 }, viewport, natural: 100, width: 300 }).left).toBe(10);
     // Taller than the room on either side: the larger side, capped, scrolling inside.
-    expect(placePopover({ anchor: { top: 200, bottom: 234, left: 0 }, viewport, natural: 900, width: 200 })).toMatchObject({ side: "bottom", top: 238, left: 10, maxHeight: 340 });
+    expect(placePopover({ anchor: { top: 200, bottom: 234, left: 0, right: 150 }, viewport, natural: 900, width: 200 })).toMatchObject({ side: "bottom", top: 238, left: 10, maxHeight: 340 });
   });
 });
