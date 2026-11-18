@@ -418,6 +418,8 @@ interface BatonDesktopBridge {
 - `files`：把 cwd 还原到快照（之后新建的文件删除，被删的文件恢复）。回退前可用 `GET /api/checkpoints/:id/changes` 预览会改动哪些文件。
 - `both`：两者都做。
 
+接口：`GET /api/nodes/:nodeId/checkpoints`、`GET /api/checkpoints/:id/changes`、`POST /api/nodes/:nodeId/rollback`。会话回退：Claude（SDK forkSession）、Codex（`thread/fork`，旧版 `thread/rollback`）、Pi（RPC fork）为原生；ACP agent 用 replay。快照上限：2 万个文件、512 MB 变更、git 单次 30 秒；cwd 是家目录、临时目录根或 `/` 时不做文件快照。多个节点共用 cwd 时，回退文件也会撤销其他节点的改动，这些节点会收到「请重新读取文件」的通知。
+
 控制台在每条人发出的消息上提供「回退」，弹出三选一：回退会话、回退文件、回退会话和文件；不可用的选项置灰并说明原因。
 
 ### 4.14 预设团队的候选成员
