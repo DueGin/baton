@@ -97,7 +97,7 @@ export class UpdateManager {
       const headers: Record<string, string> = { accept: "application/vnd.github+json", "user-agent": "baton-updater" };
       if (token) headers.authorization = `Bearer ${token}`;
       const response = await this.fetchImpl(`https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, { headers });
-      if (response.status === 401 || response.status === 404) return this.set({ phase: "error", needsToken: true, error: "仓库是私有的，检查更新需要一个有读取权限的 GitHub 令牌。填在下面再试。" });
+      if (response.status === 401 || response.status === 404) return this.set({ phase: "error", needsToken: true, error: "GitHub 找不到这个仓库的最新版本。如果仓库是私有的，需要一个有读取权限的令牌（填在下面）；否则请稍后重试。" });
       if (!response.ok) return this.set({ phase: "error", error: `GitHub 返回 ${response.status}${response.status === 403 ? "：匿名请求的调用次数可能已经用完，填一个令牌即可。" : ""}` });
       const release = readRelease(await response.json() as unknown, this.target);
       if (!release) return this.set({ phase: "error", error: "最新版本没有适合这台电脑的安装包。" });

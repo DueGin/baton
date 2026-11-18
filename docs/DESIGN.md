@@ -438,7 +438,7 @@ interface BatonDesktopBridge {
 
 ### 4.15 应用内更新
 
-仓库是私有的，所以检查更新和下载安装包都走 GitHub API：`GET https://api.github.com/repos/DueGin/baton/releases/latest`，安装包用 asset 的 `url`（`Accept: application/octet-stream`）下载。GitHub 需要令牌：设置页「更新」里填的令牌写进 `<userData>/desktop-settings.json`（0600），也可以不填，改用登录 shell 里的 `GITHUB_TOKEN` / `GH_TOKEN`。令牌只在主进程使用，不会回到页面；接口返回 401/404 时状态里带 `needsToken`，界面提示填写。
+检查更新和下载安装包都走 GitHub API：`GET https://api.github.com/repos/DueGin/baton/releases/latest`，安装包用 asset 的 `url`（`Accept: application/octet-stream`）下载。仓库是公开的，匿名即可；令牌是可选的（GitHub 对匿名请求按 IP 限制每小时 60 次，私有仓库则必须要）。设置页「更新」里填的令牌写进 `<userData>/desktop-settings.json`（0600），也可以不填，改用登录 shell 里的 `GITHUB_TOKEN` / `GH_TOKEN`。令牌只在主进程使用，不会回到页面；接口返回 401/404 时状态里带 `needsToken`，界面提示填写。
 
 **状态机**（`UpdateStatus`，主进程持有，每次变化通过 `baton:update-status` 推给页面，页面同时可以在挂载时拉一次当前状态）：
 

@@ -55,7 +55,7 @@ The desktop app updates itself; you don't have to come back for a new installer.
 2. When a new version is listed, **下载** (Download) fetches it from GitHub Releases and verifies it against `SHA256SUMS.txt`.
 3. **立即安装并重启** (Install and restart) quits the app (asking first if runs are active), replaces it and reopens it. On macOS the `.app` is swapped in place; on Windows the NSIS installer runs silently. A failed swap restores the previous version.
 
-Because the repository is private, the first check needs a GitHub token — a fine-grained token with **Contents: Read** on this repository is enough (a classic token needs `repo`). Save it under Settings → Updates, or leave it out and export `GITHUB_TOKEN` in your login shell. The token is stored only in `<user data>/desktop-settings.json` (mode 0600) on your machine.
+The repository is public, so no token is needed to check for or download updates. A token is optional: anonymous GitHub API calls are limited to 60 per hour per IP, and private forks/releases need one. Set it under Settings → Updates (a fine-grained token with **Contents: Read**, or a classic one with `repo`) or export `GITHUB_TOKEN` in your login shell; it is stored only in `<user data>/desktop-settings.json` (mode 0600) on your machine.
 
 You can still install manually from [Releases](https://github.com/DueGin/baton/releases) as before; projects, runs and settings live in `~/.baton` and are kept.
 
