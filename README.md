@@ -150,20 +150,12 @@ baton export <runId> --format json|md|otlp [-o FILE]   # 导出记录（JSON / M
 
 ## 架构
 
-```mermaid
-flowchart LR
-  UI["桌面端 / Web 控制台<br/>拓扑 · 时间线 · 会话 · 待处理"]
-  D["baton 守护进程<br/>内核 · 事件存储 SQLite · REST/SSE"]
-  M["每节点 MCP<br/>delegate / wait / send …"]
-  A1["Claude Code<br/>Agent SDK"]
-  A2["Codex<br/>app-server"]
-  A3["pi<br/>RPC"]
-  A4["ACP agents<br/>OpenCode · Qwen · Gemini …"]
-  UI <-->|"HTTP + SSE"| D
-  D --> A1 & A2 & A3 & A4
-  A1 & A2 & A3 & A4 -->|"委派调用"| M
-  M --> D
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.png">
+  <img src="docs/images/architecture.png" width="706" alt="架构：桌面端 / Web 控制台通过 HTTP + SSE 连接 baton 守护进程；守护进程驱动 Claude Code、Codex、pi 和 ACP agents；它们通过每节点 MCP 委派调用，再回到守护进程">
+</picture>
+
+图的源文件：[docs/architecture.mmd](docs/architecture.mmd)（Mermaid）。
 
 | 包 | 说明 |
 | --- | --- |

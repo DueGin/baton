@@ -1,0 +1,14 @@
+%% Source of docs/images/architecture.png and architecture-dark.png (README → 架构).
+%% The README shows the rendered images so every viewer can display them; edit this file, then re-render both PNGs.
+flowchart TB
+  UI["桌面端 / Web 控制台<br/>拓扑 · 时间线 · 会话 · 待处理"]
+  D["baton 守护进程<br/>内核 · 事件存储 SQLite · REST/SSE"]
+  M["每节点 MCP<br/>delegate / wait / send …"]
+  A1["Claude Code<br/>Agent SDK"]
+  A2["Codex<br/>app-server"]
+  A3["pi<br/>RPC"]
+  A4["ACP agents<br/>OpenCode · Qwen · Gemini …"]
+  UI <-->|"HTTP + SSE"| D
+  D --> A1 & A2 & A3 & A4
+  A1 & A2 & A3 & A4 -->|"委派调用"| M
+  M --> D
