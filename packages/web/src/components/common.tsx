@@ -9,7 +9,7 @@ export function AgentMark({ agent, small = false }: { agent: string; small?: boo
 export function Status({ status, dot = true }: { status: string; dot?: boolean }) {
   return <span className={`status status-${status}`}>{dot && <i className="status-dot" />}{statusLabels[status] ?? status}</span>;
 }
-export function Icon({ name, size = 18 }: { name: "copy" | "pause" | "play" | "trash" | "clock" | "steer" | "lightning" | "undo" | "grip" | "up" | "down" | "warning" | "folder" | "server" | "edit" | "panel" | "inbox" | "graph" | "timeline" | "chat" | "agents" | "settings" | "plus" | "close" | "sun" | "moon" | "arrow" | "stop" | "chevron" | "refresh" | "check" | "image"; size?: number }) {
+export function Icon({ name, size = 18 }: { name: "copy" | "pause" | "play" | "trash" | "clock" | "steer" | "lightning" | "undo" | "grip" | "up" | "down" | "warning" | "folder" | "server" | "edit" | "panel" | "inbox" | "graph" | "timeline" | "chat" | "agents" | "settings" | "plus" | "close" | "sun" | "moon" | "arrow" | "stop" | "chevron" | "refresh" | "check" | "image" | "back" | "shield" | "info"; size?: number }) {
   const paths: Record<typeof name, ReactNode> = {
     copy: <><rect x="8" y="8" width="13" height="13" rx="2" /><path d="M16 8V3H3v13h5" /></>,
     folder: <path d="M3 6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v10H3V6Z" />,
@@ -29,6 +29,9 @@ export function Icon({ name, size = 18 }: { name: "copy" | "pause" | "play" | "t
     arrow: <path d="M12 20V4m-6 6 6-6 6 6" />,
     stop: <rect x="5" y="5" width="14" height="14" rx="2" />,
     chevron: <path d="m9 5 7 7-7 7" />,
+    back: <path d="M20 12H4m6-6-6 6 6 6" />,
+    shield: <path d="M12 3 4 6v6c0 4.6 3.4 8.3 8 9 4.6-.7 8-4.4 8-9V6l-8-3Z" />,
+    info: <><circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 7.5h.01" /></>,
     refresh: <><path d="M20 7a9 9 0 1 0 1 9M20 2v6h-6" /></>,
     check: <path d="m5 12 4 4L19 6" />,
     image: <><rect x="3" y="4" width="18" height="16" rx="2.5" /><circle cx="9" cy="9.5" r="1.8" /><path d="m21 15.5-4.6-4.6L7 20.3" /></>,
