@@ -21,23 +21,35 @@ export interface DeliveredResult {
   note?: string;
 }
 export type NoticeKind = "team" | "system" | "correction";
-export type BatonMessagePart = { type: "text"; text: string } | { type: "notice"; text: string; kind?: NoticeKind } | { type: "followup"; delegationId: string; text: string } | { type: "answer"; questionId: string; text: string } | AssignmentMessage | { type: "results"; results: DeliveredResult[] };
+/** <baton-message>: another agent session (send_message), DESIGN §4.16. */
+export type SessionMessagePart = { type: "message"; from: string; agent: string; role?: string; nodeTitle?: string; run: string; runTitle?: string; project?: string; text: string };
+export type BatonMessagePart = { type: "text"; text: string } | SessionMessagePart | { type: "notice"; text: string; kind?: NoticeKind } | { type: "followup"; delegationId: string; text: string } | { type: "answer"; questionId: string; text: string } | AssignmentMessage | { type: "results"; results: DeliveredResult[] };
 
 function decodeAttribute(value: string): string {
   return value.replace(/&(amp|quot|lt|gt|apos);/g, (_, entity: string) => ({ amp: "&", quot: '"', lt: "<", gt: ">", apos: "'" })[entity] ?? "");
 }
-function attributes(source: string, expected: string[]): Record<string, string> | null {
+function optionalAttributes(source: string, keys: string[]): Record<string, string> | null {
   const values: Record<string, string> = {};
   const matcher = /\s+([a-z]+)="([^"<\r\n]*)"/gy;
   let position = 0;
   while (position < source.length) {
     matcher.lastIndex = position;
     const match = matcher.exec(source);
-    if (!match || !expected.includes(match[1]!) || Object.hasOwn(values, match[1]!)) return null;
+    if (!match || !keys.includes(match[1]!) || Object.hasOwn(values, match[1]!)) return null;
     values[match[1]!] = decodeAttribute(match[2]!);
     position = matcher.lastIndex;
   }
-  return expected.every(key => Object.hasOwn(values, key) && values[key] !== "") ? values : null;
+  return values;
+}
+function attributes(source: string, expected: string[]): Record<string, string> | null {
+  const values = optionalAttributes(source, expected);
+  return values && expected.every(key => (values[key] ?? "") !== "") ? values : null;
+}
+function sessionMessage(attrs: string, body: string): SessionMessagePart | null {
+  const values = optionalAttributes(attrs, ["from", "agent", "role", "title", "run", "session", "project"]);
+  // Bodies are kept verbatim: a quoted multi-line snippet in a message is not an instruction wrapper.
+  if (!values?.from || !values.agent || !values.run || !body.trim()) return null;
+  return { type: "message", from: values.from, agent: values.agent, ...(values.role ? { role: values.role } : {}), ...(values.title ? { nodeTitle: values.title } : {}), run: values.run, ...(values.session ? { runTitle: values.session } : {}), ...(values.project ? { project: values.project } : {}), text: body };
 }
 
 function assignment(attrs: string, body: string): AssignmentMessage | null {
@@ -100,12 +112,12 @@ function deliveredResult(attrs: string, body: string): DeliveredResult | null {
 /** Return null on an incomplete/malformed wrapper so the transcript can show the original. */
 export function parseBatonMessage(text: string): BatonMessagePart[] | null {
   const parts: BatonMessagePart[] = [];
-  const opener = /<(baton-assignment|baton-results|baton-notice|baton-answer|baton-followup)\b/;
+  const opener = /<(baton-assignment|baton-results|baton-notice|baton-answer|baton-followup|baton-message)\b/;
   let rest = text.replace(/\r\n/g, "\n");
   let recognized = false;
   while (rest) {
     const start = opener.exec(rest);
-    if (!start) { if (/<\/(?:baton-assignment|baton-results|baton-notice|baton-answer|baton-followup)>/.test(rest)) return null; parts.push({ type: "text", text: rest }); break; }
+    if (!start) { if (/<\/(?:baton-assignment|baton-results|baton-notice|baton-answer|baton-followup|baton-message)>/.test(rest)) return null; parts.push({ type: "text", text: rest }); break; }
     if (start.index > 0) parts.push({ type: "text", text: rest.slice(0, start.index) });
     rest = rest.slice(start.index);
     const tag = start[1]!;
@@ -113,8 +125,12 @@ export function parseBatonMessage(text: string): BatonMessagePart[] | null {
     const end = rest.indexOf(`</${tag}>`);
     if (!head || end < head[0].length) return null;
     const body = rest.slice(head[0].length, end);
-    if (/<\/?(?:baton-assignment|baton-results|baton-notice|baton-answer|baton-followup)\b/.test(body)) return null;
-    if (tag === "baton-followup") {
+    if (/<\/?(?:baton-assignment|baton-results|baton-notice|baton-answer|baton-followup|baton-message)\b/.test(body)) return null;
+    if (tag === "baton-message") {
+      const parsed = sessionMessage(head[1]!, body);
+      if (!parsed) return null;
+      parts.push(parsed);
+    } else if (tag === "baton-followup") {
       const values = attributes(head[1]!, ["delegation"]);
       if (!values || !body.trim()) return null;
       parts.push({ type: "followup", delegationId: values.delegation!, text: body.trim() });

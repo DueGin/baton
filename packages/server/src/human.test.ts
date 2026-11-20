@@ -78,13 +78,13 @@ describe("human questions", () => {
     await s.kernel.tool(run.run.rootNodeId, "ask_human", { question: "Still needed?", blocking: false }); await s.kernel.cancelRun(run.run.id);
     expect(s.store.snapshot(run.run.id).questions.filter((q) => q.status === "pending")).toHaveLength(0);
   });
-  it("solo advertises only ask_human and calls it through real MCP", async () => {
+  it("solo advertises only the session tools (ask_human, list_sessions, send_message) and calls ask_human through real MCP", async () => {
     const s = await setup({ root: async (c) => { if (c.turn === 1) await c.call("ask_human", { question: "Solo decision?", blocking: true }); } });
     const run = await create(s, { mode: "solo" }); await until(() => s.store.snapshot(run.run.id).questions.length === 1);
     const config = (s.kernel.registry as FakeDriverRegistry).get("root")!.sessions[0]!.spec.mcpServers.baton;
     if (!config || config.type !== "http") throw new Error("No MCP");
     const client = new Client({ name: "test", version: "1" }); await client.connect(new StreamableHTTPClientTransport(new URL(config.url)));
-    try { expect((await client.listTools()).tools.map((t) => t.name)).toEqual(["ask_human"]); expect((await client.callTool({ name: "delegate", arguments: {} })).isError).toBe(true); }
+    try { expect((await client.listTools()).tools.map((t) => t.name)).toEqual(["ask_human", "list_sessions", "send_message"]); expect((await client.callTool({ name: "delegate", arguments: {} })).isError).toBe(true); }
     finally { await client.close(); }
     await api(s, `/api/questions/${s.store.snapshot(run.run.id).questions[0]!.id}/answer`, "POST", { answer: "Continue" });
   });

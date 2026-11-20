@@ -1,5 +1,6 @@
 import { useId, useState, useSyncExternalStore } from "react";
 import { agentCardPreferences } from "../lib/agent-card-preferences.js";
+import { useSessionNav } from "../lib/session-nav.js";
 import { outcomeIcons, type AgentCardData } from "../lib/agent-messages.js";
 import { clock, statusLabels } from "../lib/derive.js";
 import { AgentIcon, ModelIcon } from "./AgentIcon.js";
@@ -30,13 +31,19 @@ export function AgentMessageCard({ card, inspect }: { card: AgentCardData; inspe
   const open = state.overrides.get(card.id) ?? state.defaultOpen; const headingId = useId(); const bodyId = useId();
   const [copied, setCopied] = useState<"idle" | "copied" | "failed">("idle");
   const to = card.counterpart;
+  // A card naming a session in another run jumps there; inside this run it inspects the node as before.
+  const nav = useSessionNav();
+  const jump = () => { if (to.session) nav?.open(to.session); else if (to.nodeId) (nav?.inspect ?? inspect)?.(to.nodeId); };
+  const reachable = Boolean(to.session) || Boolean(to.nodeId && (nav?.inspect ?? inspect));
+  const origin = to.session ? [to.session.project, to.session.title].filter(Boolean).join(" · ") : undefined;
   const copy = () => { void Promise.resolve().then(() => navigator.clipboard.writeText(card.copyText)).then(() => setCopied("copied"), () => setCopied("failed")); };
   return <article className={`agent-message-card agent-card-${card.kind}${open ? " is-open" : ""}`} data-agent-card={card.kind}>
     <div className="agent-card-row"><button type="button" className="agent-card-toggle" title={`${card.heading} · ${card.title}`} aria-labelledby={headingId} aria-expanded={open} aria-controls={bodyId} onClick={() => agentCardPreferences.toggle(card.id)} />
       <span className="agent-card-avatar"><AgentIcon agent={to.agentId} size={17} /><i className={`agent-card-state state-${to.status}`} title={statusLabels[to.status] ?? to.status} /></span>
       <span className="agent-card-direction" title={card.heading}>{card.heading}</span>
-      <button type="button" className="agent-card-counterpart" disabled={!to.nodeId || !inspect} title={`${to.title ?? to.role}\n${to.agentId}${to.model ? ` · ${to.model}` : ""}${to.nodeId ? " · 查看节点详情" : " · 节点尚未创建或不可用"}`} aria-label={`查看 ${to.role} 节点`} onClick={() => { if (to.nodeId) inspect?.(to.nodeId); }}><strong>{to.role}</strong><span>{to.agentId}{to.model ? <> · <ModelIcon model={to.model} size={11} />{to.model}</> : ""}</span></button>
+      <button type="button" className={`agent-card-counterpart${to.session ? " is-session" : ""}`} disabled={!reachable} title={`${to.title ?? to.role}\n${to.agentId}${to.model ? ` · ${to.model}` : ""}${to.session ? `\n${origin || "其他会话"} · 跳到这个会话` : to.nodeId ? " · 查看节点详情" : " · 节点尚未创建或不可用"}`} aria-label={to.session ? `跳到 ${to.role} 的会话` : `查看 ${to.role} 节点`} onClick={jump}><strong>{to.role}</strong><span>{to.agentId}{to.model ? <> · <ModelIcon model={to.model} size={11} />{to.model}</> : ""}</span></button>
       <strong className="agent-card-title" id={headingId} title={card.title}>{card.title}</strong>
+      {origin && <span className="agent-card-origin" title={origin}>{origin}</span>}
       {card.outcome && <span className={`agent-card-outcome outcome-${card.outcome}`} title={{ success: "完成", partial: "部分完成", failed: "失败" }[card.outcome]} aria-label={`结果：${card.outcome}`}>{outcomeIcons[card.outcome]}</span>}
       <button type="button" className="icon-button agent-card-copy" aria-label={copied === "copied" ? "已复制消息" : copied === "failed" ? "复制失败，重试" : "复制消息"} title={copied === "copied" ? "已复制" : copied === "failed" ? "复制失败，重试" : "复制消息"} onClick={copy}><Icon name={copied === "copied" ? "check" : "copy"} size={12} /></button>
       <time className="agent-card-time" dateTime={card.ts} title={new Date(card.ts).toLocaleString("zh-CN", { hour12: false })}>{clock(card.ts)}</time><Icon name="chevron" size={12} />

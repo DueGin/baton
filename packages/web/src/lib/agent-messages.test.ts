@@ -14,7 +14,7 @@ describe("agent-to-agent message mapping", () => {
       if (row.item.type === "user_message") return (parseBatonMessage(row.item.text) ?? []).flatMap((part, index) => partAgentCards(part, row, node, snapshot, index));
       const card = toolAgentCard(row, node, snapshot); return card ? [card] : [];
     });
-    expect(new Set(cards.map(card => card.kind))).toEqual(new Set(["delegate", "send", "reassign", "result", "notice", "assignment", "followup", "report_result"]));
+    expect(new Set(cards.map(card => card.kind))).toEqual(new Set(["delegate", "send", "send_message", "reassign", "result", "notice", "assignment", "followup", "message", "report_result"]));
     for (const kind of ["delegate", "send", "result"] as const) expect(cards.find(card => card.kind === kind)!.counterpart.nodeId).toBe(child.id);
     for (const kind of ["assignment", "followup", "report_result"] as const) expect(cards.find(card => card.kind === kind)!.counterpart.nodeId).toBe(root.id);
     expect(cards.find(card => card.kind === "assignment")?.heading).toBe("来自 Lead 的任务");

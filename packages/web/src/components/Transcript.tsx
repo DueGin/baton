@@ -60,11 +60,11 @@ export function toolSummary(detail: ToolCallDetail, name = "tool"): string {
   if (detail.type === "baton") return detail.tool;
   return detail.type;
 }
-function BatonMessage({ parts, row, node, snapshot, inspect }: { parts: BatonMessagePart[]; row: ItemRecord; node: NodeRecord; snapshot?: RunSnapshot; inspect?: (id: string) => void }) {
+function BatonMessage({ parts, row, node, snapshot, inspect, refs }: { parts: BatonMessagePart[]; row: ItemRecord; node: NodeRecord; snapshot?: RunSnapshot; inspect?: (id: string) => void; refs: ReadonlyMap<string, RunSnapshot> }) {
   return <div className="baton-message agent-message-stack">{parts.map((part, index) => {
     if (part.type === "text") return <Markdown key={index} text={part.text} />;
     if (part.type === "answer") return <article key={index} className="message message-user_message human-answer"><div className="message-meta"><span className="user-avatar">U</span><strong>你的回答</strong><time dateTime={row.ts}>{clock(row.ts)}</time><code>{part.questionId}</code></div><Markdown text={part.text} /></article>;
-    return <Fragment key={index}>{partAgentCards(part, row, node, snapshot, index).map(card => <AgentMessageCard key={card.id} card={card} inspect={inspect} />)}</Fragment>;
+    return <Fragment key={index}>{partAgentCards(part, row, node, snapshot, index, refs).map(card => <AgentMessageCard key={card.id} card={card} inspect={inspect} />)}</Fragment>;
   })}</div>;
 }
 
@@ -73,14 +73,14 @@ function ReasoningRow({ id, text, streaming }: { id: string; text: string; strea
   const open = reasoningOpen(state.preference, streaming, state.overrides.get(id));
   return <details className={`reasoning-row${streaming ? " reasoning-live" : ""}`} open={open}><summary onClick={event => { event.preventDefault(); reasoningPreferences.setBlocks([id], !open); }}>{streaming && <span className="live-dot" />}思考过程 <span>{text.length} 字{streaming ? " · 生成中" : ""}</span></summary><Markdown text={text} streaming={streaming} /></details>;
 }
-export function TranscriptRow({ row, node, snapshot, inspect, client, streaming = false, outgoing, retry, actionState, act, rollback }: { row: ItemRecord; node: NodeRecord; snapshot?: RunSnapshot; client?: BatonClient; inspect?: (id: string) => void; streaming?: boolean; outgoing?: OutgoingMessage; retry?: () => void; actionState?: MessageActionState; act?: (action: MessageAction) => void; rollback?: RollbackProps }) {
+export function TranscriptRow({ row, node, snapshot, inspect, client, streaming = false, outgoing, retry, actionState, act, rollback, refs = EMPTY_REFS }: { row: ItemRecord; node: NodeRecord; snapshot?: RunSnapshot; refs?: ReadonlyMap<string, RunSnapshot>; client?: BatonClient; inspect?: (id: string) => void; streaming?: boolean; outgoing?: OutgoingMessage; retry?: () => void; actionState?: MessageActionState; act?: (action: MessageAction) => void; rollback?: RollbackProps }) {
   const item = row.item;
   if (item.type === "user_message" && ["queued", "retracted"].includes(item.delivery ?? "")) return null;
   if (item.type === "user_message") {
     const parts = parseBatonMessage(item.text);
-    if (parts && !item.delivery && !outgoing) return <BatonMessage parts={parts} row={row} node={node} snapshot={snapshot} inspect={inspect} />;
+    if (parts && !item.delivery && !outgoing) return <BatonMessage parts={parts} row={row} node={node} snapshot={snapshot} inspect={inspect} refs={refs} />;
   }
-  const card = toolAgentCard(row, node, snapshot);
+  const card = toolAgentCard(row, node, snapshot, refs);
   if (card) return <div className="agent-message-stack"><AgentMessageCard card={card} inspect={inspect} /></div>;
   if (item.type === "reasoning") return <ReasoningRow id={reasoningBlockId(row.nodeId, row.seq)} text={item.text} streaming={streaming} />;
   if (item.type === "tool_call") return <><details className={`tool-row tool-${item.status}`}><summary><span className="tool-type">{item.detail.type === "unknown" ? "tool" : item.detail.type}</span><span className="tool-summary">{toolSummary(item.detail, item.name)}</span><span className="tool-state">{item.status === "completed" ? "✓" : item.status === "running" ? "◌" : "✗"}</span></summary><div className="tool-body"><ToolDetail detail={item.detail} />{item.error && <Markdown text={item.error} />}</div></details>{item.images?.length ? <ToolImages images={item.images} /> : null}{snapshot && pullRequestsAtRow(snapshot, row).map(pr => <InlinePullRequest key={pr.id} pr={pr} snapshot={snapshot} client={client} inspect={inspect} />)}</>;
@@ -112,7 +112,10 @@ export function nodeOptions(snapshot: RunSnapshot): SelectOption[] {
     return { value: entry.id, label: entry.title, description: [entry.agentId, entry.role, entry.model].filter(Boolean).join(" · "), icon: <AgentMark agent={entry.agentId} small />, depth: entry.depth, ...(paused ? { hint: "已暂停" } : live ? { hint: "运行中" } : {}) };
   });
 }
-export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNodeId, now, inspect, projectName, answer, decline, busy, stopRun, resumeRun, agents = [] }: {
+const EMPTY_REFS: ReadonlyMap<string, RunSnapshot> = new Map();
+/** Snapshots of the other runs, so a session message shows its sender even after switching runs (DESIGN §4.16). */
+export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNodeId, now, inspect, projectName, answer, decline, busy, stopRun, resumeRun, agents = [], refs = EMPTY_REFS }: {
+  refs?: ReadonlyMap<string, RunSnapshot>;
   agents?: AgentEntry[]; answer: HumanActions["answer"]; decline?: HumanActions["decline"]; busy: boolean; projectName?: string; stopRun?: () => void; resumeRun?: () => void; snapshot: RunSnapshot; store: RunStore; items: Record<string, ItemRecord[]>; itemStatus: Record<string, string>;
   nodeId: string; setNodeId: (id: string) => void; now: number; inspect: (id: string) => void;
 }) {
@@ -173,7 +176,7 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
       const start = rolled.start[index]!, key = start >= 0 ? groupKey(start) : "", hidden = start >= 0 && !revealed.has(key);
       const toggle = start === index ? <RolledBackToggle count={rolled.size.get(index)!} open={!hidden} toggle={() => setRevealed(current => { const next = new Set(current); if (next.has(key)) next.delete(key); else next.add(key); return next; })} /> : null;
       if (hidden) return toggle && <Fragment key={`rolled:${key}`}>{toggle}</Fragment>;
-      const content = <>{entry.type === "question" ? entry.question.status === "pending" ? <QuestionMarker question={entry.question} jump={jumpQuestion} /> : <QuestionCard inline compact question={entry.question} answer={answer} busy={busy} /> : (() => { const { row, outgoing } = entry.entry; return <TranscriptRow client={store.client} row={row} node={node} snapshot={snapshot} inspect={inspect} outgoing={outgoing} actionState={state.messageActions[messageActionKey(node.id, row.seq)]} act={action => { void store.actOnMessage(node.id, row.seq, action); }} retry={outgoing ? () => { void store.sendMessage(node.id, outgoing.text, outgoing.clientId); } : undefined} streaming={live && inTurn(row) && (row.item.type === "reasoning" || (row.seq === latestText?.seq && phase?.kind === "reply"))} rollback={rollbackTarget(row, row.seq === firstHuman) ? rollback : undefined} />; })()}{footers.get(index)?.map(turn => <TurnFooter key={turn.id} turn={turn} />)}</>;
+      const content = <>{entry.type === "question" ? entry.question.status === "pending" ? <QuestionMarker question={entry.question} jump={jumpQuestion} /> : <QuestionCard inline compact question={entry.question} answer={answer} busy={busy} /> : (() => { const { row, outgoing } = entry.entry; return <TranscriptRow client={store.client} refs={refs} row={row} node={node} snapshot={snapshot} inspect={inspect} outgoing={outgoing} actionState={state.messageActions[messageActionKey(node.id, row.seq)]} act={action => { void store.actOnMessage(node.id, row.seq, action); }} retry={outgoing ? () => { void store.sendMessage(node.id, outgoing.text, outgoing.clientId); } : undefined} streaming={live && inTurn(row) && (row.item.type === "reasoning" || (row.seq === latestText?.seq && phase?.kind === "reply"))} rollback={rollbackTarget(row, row.seq === firstHuman) ? rollback : undefined} />; })()}{footers.get(index)?.map(turn => <TurnFooter key={turn.id} turn={turn} />)}</>;
       return <Fragment key={entry.type === "question" ? entry.question.id : entry.entry.outgoing?.clientId ?? entry.entry.row.seq}>{toggle}{start >= 0 ? <div className="rolled-back-row">{content}</div> : content}</Fragment>;
     })}{!entries.length && itemStatus[node.id] === "ready" && <Empty>这个节点还没有消息。</Empty>}{phase && <TurnIndicator key={node.id} phase={phase} snapshot={snapshot} now={now} inspect={inspect} jumpQuestion={jumpQuestion} />}<div ref={bottom} /></div></div><ConversationOutline items={outline} scroll={scroll} /></div>
     <div className="composer-stack">{dockQuestions.length > 0 && <div className="question-dock" aria-label="待回答的问题">{dockQuestions.map(question => <QuestionCard key={question.id} inline compact question={question} answer={answer} decline={decline} busy={busy} />)}</div>}

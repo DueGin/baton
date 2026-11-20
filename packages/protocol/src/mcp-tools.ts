@@ -136,6 +136,17 @@ export const askHumanInput = z.object({
     .describe("True (default): this call waits until the human answers and returns the answer — then continue your work in the same turn. False: returns immediately; the answer arrives later as a <baton-answer> message."),
 });
 
+export const listSessionsInput = z.object({
+  query: z.string().optional().describe("Filter by words in the session title, run title, project name or path, role, agent or agent ID."),
+  project: z.string().optional().describe("Only sessions in this project (name, path or id)."),
+  limit: z.number().int().min(1).max(100).optional().describe("At most this many sessions, newest activity first (default 30)."),
+});
+
+export const sendMessageInput = z.object({
+  to: z.string().min(1).describe("The Agent ID of the receiving session (from list_sessions, or the `from` of a <baton-message> you received)."),
+  message: z.string().min(1).max(20000).describe("What you want to tell or ask. The receiver cannot see your conversation, so include the context it needs."),
+});
+
 export const BATON_TOOLS = {
   list_agents: {
     input: listAgentsInput,
@@ -192,6 +203,16 @@ export const BATON_TOOLS = {
     description:
       "Ask the human a judgment question (a decision, missing information, a risky trade-off). Do not use it for things you can find out yourself. By default the call waits for the answer and returns it, so you can continue right away. If it returns \"no answer yet\", continue with other work or end your turn; the answer will arrive as a <baton-answer> message. If it returns \"declined\" (or a <baton-answer declined=\"true\"> arrives), the human chose not to answer: do not ask again, decide yourself and say which assumption you made.",
   },
+  list_sessions: {
+    input: listSessionsInput,
+    description:
+      "List agent sessions on this machine across every run and project — yours included — with their Agent ID, agent, role, status, run and project. Use it to find the Agent ID to message.",
+  },
+  send_message: {
+    input: sendMessageInput,
+    description:
+      "Send a message to any agent session by its Agent ID — in this run, another run or another project. It arrives as a <baton-message> once the receiver finishes its current turn (a finished session is woken up). Returns immediately; a reply, if any, arrives later as a <baton-message> to you. Do not poll.",
+  },
   report_result: {
     input: reportResultInput,
     description:
@@ -202,6 +223,8 @@ export const BATON_TOOLS = {
 export type BatonToolName = keyof typeof BATON_TOOLS;
 /** Tools only the root (lead) may call. */
 export const LEAD_ONLY_TOOLS: readonly BatonToolName[] = ["form_team", "replace_member"];
+/** Tools every session has, solo runs included (they talk to other sessions; they do not delegate). */
+export const SESSION_TOOLS: readonly BatonToolName[] = ["ask_human", "list_sessions", "send_message"];
 export type FormTeamInput = z.infer<typeof formTeamInput>;
 export type AskHumanInput = z.infer<typeof askHumanInput>;
 export type ReplaceMemberInput = z.infer<typeof replaceMemberInput>;
@@ -214,3 +237,18 @@ export type CancelInput = z.infer<typeof cancelInput>;
 export type StatusInput = z.infer<typeof statusInput>;
 export type GetResultInput = z.infer<typeof getResultInput>;
 export type ReportResultInput = z.infer<typeof reportResultInput>;
+export type ListSessionsInput = z.infer<typeof listSessionsInput>;
+/** One row of list_sessions: an agent session (a run's node) anywhere on this machine. */
+export interface AgentSessionEntry {
+  agentId: string;
+  agent: string;
+  model?: string;
+  role?: string;
+  title: string;
+  status: string;
+  you?: boolean;
+  run: { id: string; title: string; status: string };
+  project?: { id: string; name: string; path: string };
+  updatedAt: string;
+}
+export type SendMessageInput = z.infer<typeof sendMessageInput>;

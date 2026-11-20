@@ -62,6 +62,17 @@ describe("baton protocol transcript messages", () => {
     expect(parseBatonMessage('<baton-answer question="q1">unfinished')).toBeNull();
   });
 
+  it("parses session messages, tolerating only optional attributes and keeping the body verbatim", () => {
+    const tag = '<baton-message from="n1" agent="claude" role="lead" title="Lead" run="r1" session="会话 A" project="Atlas">搜索用 limit 还是 pageSize？</baton-message>';
+    expect(parseBatonMessage(tag)).toEqual([{ type: "message", from: "n1", agent: "claude", role: "lead", nodeTitle: "Lead", run: "r1", runTitle: "会话 A", project: "Atlas", text: "搜索用 limit 还是 pageSize？" }]);
+    expect(parseBatonMessage('<baton-message from="n1" agent="claude" run="r1">\n第一行\n\n```\n代码\n```\n</baton-message>')?.[0]).toMatchObject({ text: "\n第一行\n\n```\n代码\n```\n" });
+    for (const text of ['<baton-message agent="claude" run="r1">缺 from</baton-message>', '<baton-message from="n1" run="r1">缺 agent</baton-message>', '<baton-message from="n1" agent="claude">缺 run</baton-message>', '<baton-message from="n1" agent="claude" run="r1"> </baton-message>', '<baton-message from="n1" agent="claude" run="r1" onclick="x">bad</baton-message>', '<baton-message from="n1" agent="claude" run="r1">unfinished</baton-message>'.replace('</baton-message>', '')]) expect(parseBatonMessage(text)).toBeNull();
+    // A marked-up snippet quoted inside a message is not a wrapper.
+    expect(parseBatonMessage('<baton-message from="n1" agent="claude" run="r1">看这段：<baton-notice>x</baton-notice></baton-message>')).toBeNull();
+    const mixed = parseBatonMessage(`${tag}\n<baton-followup delegation="d1">追问</baton-followup>`);
+    expect(mixed?.map(part => part.type)).toEqual(["message", "followup"]);
+  });
+
   it("keeps browser demo format exactly equal to server output", () => {
     expect(demoFollowupPrompt('d"<&', "追问\n正文")).toBe(followupPrompt('d"<&', "追问\n正文"));
     for (const kind of ["team", "system", "correction"] as const) expect(demoNoticePrompt(kind, "内容")).toBe(noticePrompt(kind, "内容"));

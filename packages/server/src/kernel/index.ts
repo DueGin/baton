@@ -1,12 +1,12 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { descendantProcessIds, terminateProcessIds } from "@baton/providers";
-import { ATTACHMENT_MAX_BYTES, BATON_TOOLS, LEAD_ONLY_TOOLS, emptyUsage, type AgentEntry, type AskHumanInput, type PermissionDecision, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionRequest, type PermissionResponse, type ReportResultInput, type FormTeamInput, type ReplaceMemberInput, type ReassignInput, type ReorderQueueResponse, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type SendMessageResponse, type SendMode, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
+import { ATTACHMENT_MAX_BYTES, BATON_TOOLS, LEAD_ONLY_TOOLS, SESSION_TOOLS, emptyUsage, type AgentEntry, type AgentSessionEntry, type ListSessionsInput, type ProjectRecord, type SendMessageInput, type AskHumanInput, type PermissionDecision, type BatonToolName, type CreateRunRequest, type DelegateInput, type DelegationRecord, type DelegationResult, type ItemRecord, type JsonValue, type NodeRecord, type PatchRunRequest, type PermissionRecord, type PermissionRequest, type PermissionResponse, type ReportResultInput, type FormTeamInput, type ReplaceMemberInput, type ReassignInput, type ReorderQueueResponse, type RunEvent, type RunPolicy, type RunSnapshot, type RunStatus, type SendMessageResponse, type SendMode, type TimelineItem, type ToolSpanRecord, type TurnTrigger, type Usage, type UsageTotals } from "@baton/protocol";
 import type { DriverEvent, DriverRegistry, DriverSession, OpenSessionSpec, PromptInput } from "../driver/types.js";
 import type { Attachments } from "../attachments/index.js";
 import { attachmentLabel, attachmentPrompt, attachmentText, type AttachmentFile } from "./images.js";
 import { Store } from "../store/index.js";
-import { briefPrompt, correctionPrompt, followupPrompt, noticePrompt, resultsPrompt, systemPrompt } from "./prompts.js";
+import { briefPrompt, correctionPrompt, followupPrompt, messagePrompt, noticePrompt, resultsPrompt, systemPrompt } from "./prompts.js";
 import { Teams, type ResolvedMember } from "./teams.js";
 import { HumanInteraction } from "./human.js";
 import { PermissionRules, HUMAN_DENIAL } from "./permission-rules.js";
@@ -30,6 +30,7 @@ export function isBatonToolPermission(request: PermissionRequest): boolean {
 export const DEFAULT_POLICY: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "dynamic", teamApproval: true, maxTeamSize: 5, stallMinutes: 10, prFeedback: "notify" };
 const now = (): string => new Date().toISOString();
 const active = (status: string): boolean => ["starting", "running", "waiting_permission", "queued"].includes(status);
+const sessionRole = (node: NodeRecord): string | undefined => node.role ?? (node.parentNodeId === null ? "lead" : undefined);
 const done = (d: DelegationRecord): boolean => ["completed", "failed", "canceled", "replaced"].includes(d.status);
 const addUsage = (a: UsageTotals, b: UsageTotals): UsageTotals => ({ inputTokens: a.inputTokens + b.inputTokens, cachedInputTokens: a.cachedInputTokens + b.cachedInputTokens, outputTokens: a.outputTokens + b.outputTokens, costUsd: a.costUsd + b.costUsd });
 /** `initial`: the run's first prompt, a human message without its own queued row. */
@@ -52,7 +53,15 @@ interface Runtime {
   interrupting?: string;
   interruptReason?: string;
   starting?: Promise<{ turnId: string }>;
+  /**
+   * Set while a turn answers only messages from other sessions on a delegate whose assignment is
+   * already finished: the turn must not reopen or overwrite the delegation. Holds the node status
+   * to return to.
+   */
+  sideTurn?: NodeRecord["status"];
 }
+/** Messages between the same two sessions without a human message to either (DESIGN §4.16). */
+export const MESSAGE_CHAIN_LIMIT = 10;
 export interface KernelOptions { baseUrl: string; maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; askTimeoutMinutes?: number; titles?: TitleNaming; platform?: NodeJS.Platform; attachments?: Attachments; /** Rollback checkpoints (DESIGN §4.13); absent = no checkpoints. */ checkpoints?: Checkpoints }
 export class Kernel {
   private runtimes = new Map<string, Runtime>();
@@ -69,6 +78,7 @@ export class Kernel {
   private drainingMessages = new Set<string>();
   private pausing = new Map<string, Promise<void>>();
   private resuming = new Set<string>();
+  private messageChains = new Map<string, number>();
   readonly teams: Teams;
   readonly human: HumanInteraction;
   readonly rules: PermissionRules;
@@ -355,6 +365,8 @@ export class Kernel {
     prompts = prompts.map((p) => p.humanItem ? humans[humanIndex++]! : p);
     clearTimeout(rt.idleTimer);
     const trigger = prompts[0]!.trigger, text = prompts.map((p) => p.text).join("\n\n");
+    // Only messages from other sessions, to a delegate that already delivered: answer them without reopening the assignment.
+    rt.sideTurn = n.delegationId && prompts.every((p) => p.trigger === "message") && done(this.store.delegation(n.delegationId)) ? n.status : undefined;
     const turnId = randomUUID(); rt.turnId = turnId; rt.driverTurnId = undefined; rt.report = undefined; rt.finalText = ""; rt.usage = emptyUsage(); rt.lastItem = undefined;
     const checkpointAt = now();
     this.emit(n.runId, { type: "turn.started", turn: { id: turnId, runId: n.runId, nodeId: id, trigger, delegationId: n.delegationId ?? undefined, status: "running", startedAt: now() } });
@@ -368,7 +380,7 @@ export class Kernel {
     const checkpoint = files && checkpointSeq !== undefined ? this.options.checkpoints!.create({ runId: n.runId, nodeId: id, itemSeq: checkpointSeq, createdAt: checkpointAt, ...("ref" in files ? { files: { cwd: n.cwd, ref: files.ref } } : {}), conversation: session.rewindConversation ? "native" : "replay" }, turnId) : undefined;
     // A rollback's replayed transcript or file notice rides ahead of the next prompt.
     const preamble = this.options.checkpoints?.preamble(id);
-    if (n.delegationId) this.patchDelegation(n.delegationId, { status: "running", startedAt: now(), endedAt: undefined, ...(n.status === "completed" || n.status === "failed" ? { deliveredAt: undefined, deliveredVia: undefined, result: undefined } : {}) });
+    if (n.delegationId && rt.sideTurn === undefined) this.patchDelegation(n.delegationId, { status: "running", startedAt: now(), endedAt: undefined, ...(n.status === "completed" || n.status === "failed" ? { deliveredAt: undefined, deliveredVia: undefined, result: undefined } : {}) });
     this.updateRun(n.runId); this.armStall(id);
     try {
       const starting = session.startTurn(this.promptFor(id, preamble ? `${preamble}\n\n${text}` : text)); rt.starting = starting;
@@ -392,6 +404,7 @@ export class Kernel {
     const n = this.store.node(id), rt = this.runtime(id);
     if (this.stopped) throw new Error("Daemon is shutting down");
     if (["canceled", "replaced"].includes(n.status) || this.canceling.has(id)) throw new Error("Node is canceled");
+    this.resetMessageChains(id);
     const queuePosition = Math.max(0, ...this.queuedHumanMessages(id).map((r) => r.item.queuePosition ?? r.seq)) + 1;
     const row = this.addItem(id, { type: "user_message", text, delivery: "queued", queuePosition, ...(clientId !== undefined ? { clientId } : {}) });
     rt.pendingMessages.set(row.seq, row);
@@ -633,11 +646,13 @@ export class Kernel {
   async tool(nodeId: string, name: BatonToolName, raw: unknown): Promise<unknown> {
     if (this.canceling.has(nodeId) || this.stopped) throw new Error("Node is canceling or daemon is stopping");
     const node = this.store.node(nodeId);
-    if (name !== "ask_human" && this.store.snapshot(node.runId).run.policy.mode === "solo") throw new Error("Solo runs have no baton tools and cannot delegate");
+    if (!SESSION_TOOLS.includes(name) && this.store.snapshot(node.runId).run.policy.mode === "solo") throw new Error("Solo runs cannot delegate; only ask_human, list_sessions and send_message are available");
     if (LEAD_ONLY_TOOLS.includes(name) && node.parentNodeId !== null) throw new Error(`${name} is lead only`);
     const input = BATON_TOOLS[name].input.parse(raw) as Record<string, unknown>;
     switch (name) {
       case "list_agents": return this.agents();
+      case "list_sessions": return this.sessions(nodeId, input as unknown as ListSessionsInput);
+      case "send_message": return this.sendMessage(nodeId, input as unknown as SendMessageInput);
       case "ask_human": {
         if (["completed", "failed", "canceled", "replaced"].includes(node.status)) throw new Error("Node is terminal");
         const session = this.runtime(nodeId).session;
@@ -663,6 +678,7 @@ export class Kernel {
         const n = this.store.node(nodeId), rt = this.runtime(nodeId);
         if (!n.delegationId) throw new Error("Root nodes cannot report_result; answer the human");
         if (!rt.turnId) throw new Error("No active assignment");
+        if (rt.sideTurn !== undefined) throw new Error("This turn answers a message from another session and your assignment is already reported; reply with send_message instead");
         if (rt.report) throw new Error("report_result already called for this turn");
         rt.report = input as unknown as ReportResultInput; return { accepted: true, note: "End your turn now." };
       }
@@ -702,6 +718,52 @@ export class Kernel {
     if (Array.isArray(value)) return value.map((entry) => this.textAttachments(entry));
     if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, this.textAttachments(entry)]));
     return value;
+  }
+  /** Every agent session on this machine (nodes of runs in non-archived projects), newest activity first. */
+  private sessions(nodeId: string, input: ListSessionsInput): { you: string; total: number; sessions: AgentSessionEntry[] } {
+    const projects = new Map(this.store.projects().map((p) => [p.id, p]));
+    const words = (input.query ?? "").toLowerCase().split(/\s+/).filter(Boolean), scope = input.project?.trim().toLowerCase();
+    const entries: AgentSessionEntry[] = [];
+    for (const summary of this.store.list()) {
+      const project = summary.projectId ? projects.get(summary.projectId) : undefined;
+      if (project?.archived) continue;
+      if (scope && !(project && [project.id, project.name, project.path].some((value) => value.toLowerCase() === scope || value.toLowerCase().includes(scope)))) continue;
+      const snapshot = this.store.snapshot(summary.id);
+      for (const node of snapshot.nodes) {
+        if (["canceled", "replaced"].includes(node.status)) continue;
+        const entry: AgentSessionEntry = { agentId: node.id, agent: node.agentId, ...(node.model ? { model: node.model } : {}), ...(sessionRole(node) ? { role: sessionRole(node) } : {}), title: node.title, status: node.status, ...(node.id === nodeId ? { you: true } : {}), run: { id: snapshot.run.id, title: snapshot.run.title, status: snapshot.run.status }, ...(project ? { project: { id: project.id, name: project.name, path: project.path } } : {}), updatedAt: node.updatedAt };
+        const haystack = [entry.agentId, entry.agent, entry.model, entry.role, entry.title, entry.run.title, project?.name, project?.path].filter(Boolean).join(" ").toLowerCase();
+        if (words.every((word) => haystack.includes(word))) entries.push(entry);
+      }
+    }
+    entries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return { you: nodeId, total: entries.length, sessions: entries.slice(0, input.limit ?? 30) };
+  }
+  /** Deliver a <baton-message> to another session: queued behind its current turn, or a new turn that wakes it. */
+  private async sendMessage(nodeId: string, input: SendMessageInput): Promise<unknown> {
+    const sender = this.store.node(nodeId), to = input.to.trim();
+    if (to === nodeId) throw new Error("That Agent ID is your own session");
+    let target: NodeRecord;
+    try { target = this.store.node(to); } catch { throw new Error(`No agent session has Agent ID ${to}. Use list_sessions to find one.`); }
+    if (["canceled", "replaced"].includes(target.status) || this.canceling.has(target.id)) throw new Error(`Session ${to} is ${target.status} and cannot receive messages`);
+    const targetRun = this.store.snapshot(target.runId).run, targetProject = this.projectOf(targetRun.projectId);
+    if (targetProject?.archived) throw new Error(`Session ${to} belongs to the archived project ${targetProject.name}`);
+    const chain = [nodeId, target.id].sort().join("|"), count = (this.messageChains.get(chain) ?? 0) + 1;
+    if (count > MESSAGE_CHAIN_LIMIT) throw new Error(`Message limit reached: ${MESSAGE_CHAIN_LIMIT} messages between these two sessions without a human message to either. Stop messaging; if more back-and-forth is really needed, ask the human first (ask_human).`);
+    this.budget(target.runId);
+    const senderRun = this.store.snapshot(sender.runId).run;
+    const text = messagePrompt({ agentId: sender.id, agent: sender.agentId, role: sessionRole(sender), title: sender.title, runId: sender.runId, runTitle: senderRun.title, project: this.projectOf(senderRun.projectId)?.name }, input.message);
+    const delivery = await this.startPrompts(target.id, [{ text, trigger: "message" }]);
+    this.messageChains.set(chain, count);
+    return { sent: true, delivery: delivery === "queued" ? "queued until the receiver finishes its current turn" : "delivered; the receiver started a turn", to: { agentId: target.id, agent: target.agentId, ...(sessionRole(target) ? { role: sessionRole(target) } : {}), title: target.title, run: { id: targetRun.id, title: targetRun.title }, ...(targetProject ? { project: targetProject.name } : {}) } };
+  }
+  private projectOf(id: string | undefined): ProjectRecord | undefined {
+    if (!id) return undefined;
+    try { return this.store.project(id); } catch { return undefined; }
+  }
+  /** A human message to either session ends the agents' exchange: the limit counts from zero again. */
+  private resetMessageChains(nodeId: string): void {
+    for (const key of this.messageChains.keys()) if (key.split("|").includes(nodeId)) this.messageChains.delete(key);
   }
   private async sendFollowup(id: string, message: string): Promise<void> {
     const d = this.store.delegation(id); this.budget(d.runId);
@@ -903,7 +965,10 @@ export class Kernel {
     if (status === "completed" && blocking && !rt.report) {
       this.patchNode(id, { status: "idle", activity: `等你回答: ${blocking.question}` }); this.updateRun(n.runId); this.armIdle(id); await this.drainMessages(id); await this.deliver(id); return;
     }
-    if (n.delegationId) {
+    const sideTurn = rt.sideTurn; rt.sideTurn = undefined;
+    // The assignment's outcome stands: return to the delivered status whatever happened in this turn.
+    if (n.delegationId && sideTurn !== undefined) this.patchNode(id, { status: sideTurn, activity: status === "completed" ? "Answered a session message" : `Session message turn ${status}${error ? `: ${error}` : ""}`, endedAt: now() });
+    else if (n.delegationId) {
       const d = this.store.delegation(n.delegationId);
       const result: DelegationResult = { status: status === "completed" ? rt.report?.status ?? "success" : "failed", summary: rt.report?.summary ?? (rt.finalText || error || "No final response"), result: rt.report?.result as JsonValue | undefined, artifacts: rt.report?.artifacts, reported: !!rt.report, finalText: rt.finalText, error };
       const errors = d.brief.outputSchema && status === "completed" ? validateSchema(d.brief.outputSchema, result.result) : [];

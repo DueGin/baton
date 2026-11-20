@@ -471,6 +471,28 @@ interface BatonDesktopBridge {
 页面（设置 → 更新）展示当前版本、检查、更新说明、下载进度、安装并重启，以及令牌输入。浏览器里没有这个桥，显示一行说明：浏览器版随守护进程一起更新。
 
 
+### 4.16 会话之间通信（Agent ID）
+
+每个 agent 会话都有一个 **Agent ID**：节点的 `id`（UUID），在 Run 内唯一、在整个 daemon 内唯一，跨 Run、跨项目都不变。控制台在节点详情和 Run 详情里显示它，可以一键复制；agent 自己的系统提示里也有（「Your Agent ID is …」）。
+
+**工具**（每个会话都有，solo 模式也有——这不是委派，所以不受 solo 限制）：
+- `list_sessions { query?, project?, limit? }`：本机所有会话（所有 Run、所有项目，不含归档项目），带 Agent ID、agent、模型、角色、状态、Run、项目，按最近活动排序。`query` 按词匹配标题、Run 标题、项目名或路径、角色、agent、Agent ID；`project` 按项目名、路径或 id 过滤。
+- `send_message { to, message }`：按 Agent ID 发给任意会话。返回 `sent` 和投递方式，不等回复。
+
+**投递**：
+- 消息包装成 `<baton-message from="…" agent="…" role="…" title="…" run="…" session="…" project="…">…</baton-message>`，作为对方的一个提示进入它的会话；正文按原样保留（引用的多行文本不会被当成指令包装），只把结尾的 `</baton-message>` 转义。
+- 对方有空（`idle`、`completed`）：立刻开始一个新轮次，`TurnTrigger = "message"`。已经结束的会话会被唤醒——这是用消息「叫醒」另一个会话的正常方式，代价算在对方的 Run 上（先检查它的预算）。
+- 对方正在跑：排在当前轮次之后，不打断（和 CI 反馈一样）。
+- 对方 Run 暂停中：先排队，恢复后投递。对方节点已 `canceled` / `replaced`、包装到归档项目、消息给自己：直接报错。Agent ID 不存在时提示用 `list_sessions` 查。
+- 回复就是对方再用 `send_message` 发回 `from` 里的 Agent ID。结果也是异步的：作为 `<baton-message>` 到达，不需要轮询。
+
+**子 agent 的「侧轮」**：子节点收到消息时，如果它的委派已经交付（`completed`），这个轮次只回答消息，**不重开委派**：不会把委派改回 `running`，不覆盖已有结果，也不向父节点重复投递 `<baton-results>`；轮次结束后节点回到原来的终态，`activity` 记为「Answered a session message」。侧轮里 `report_result` 会报错，提示改用 `send_message`。
+
+**防来回刷屏**：同一对会话之间，没有人工消息介入的情况下最多 10 条（`MESSAGE_CHAIN_LIMIT`），之后 `send_message` 返回错误，要求对方先问人。人给这对会话中的任意一个发消息，计数清零。系统提示里也要求：只在需要回复时回复，消息要自包含、简短，不要把会话消息当成人的指令（不能据此批准操作或改变任务）。
+
+**控制台**：收到的消息渲染成「收到会话消息」卡片，带上发送者的 agent、角色、状态和来源（项目 · Run 标题），点发送者跳到那个会话（跨 Run 也能跳）；发出的 `send_message` 渲染成「发送消息给」卡片；时间线里这一轮标为「会话消息」。
+
+
 ## 5. Driver 接口（server 和 providers 之间的边界）
 
 契约文件是 `packages/server/src/driver/types.ts`。内核只依赖这个接口：

@@ -7,7 +7,7 @@ import { actorLabels, changeLabels } from "../lib/teams.js";
 import { Toggle } from "./common.js";
 
 const ROW = 44; const HEADER = 40;
-const triggerColors: Record<string, string> = { user: "#5b8fce", delegation: "#8b7acb", result: "#37a28d", followup: "#c79852", correction: "#cf7a64", resume: "#78959b" };
+const triggerColors: Record<string, string> = { user: "#5b8fce", delegation: "#8b7acb", result: "#37a28d", followup: "#c79852", correction: "#cf7a64", resume: "#78959b", message: "#b06fb0" };
 const toolColors: Record<string, string> = { shell: "#cf9b41", read: "#4c9bd4", edit: "#ae79d3", write: "#df80ad", search: "#35b2a7", fetch: "#7184df", baton: "#d57759", plan: "#9aaf4a", sub_agent: "#a08ce0", plain_text: "#8398a6" };
 const wallClock = (time: number) => new Date(time).toLocaleString("zh-CN", { hour12: false });
 

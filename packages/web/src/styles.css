@@ -1673,3 +1673,11 @@ html[data-desktop="win32"] .run-bar { padding-right: calc(100vw - env(titlebar-a
   .settings-nav-item { justify-content: center; padding: 9px 0; }
 }
 html[data-desktop="darwin"]:not([data-fullscreen]) .settings-sidebar .sidebar-top { padding-top: 40px; }
+
+/* Session messages (DESIGN §4.16): a card that points at another run keeps its origin visible and jumps there. */
+.agent-message-card[data-agent-card="message"] .agent-card-direction { color: var(--purple); }
+.agent-card-counterpart.is-session strong::after { content: " ↗"; color: var(--text-dim); font-weight: 400; }
+.agent-card-origin { flex: none; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 6px; border: 1px solid var(--border); border-radius: 9px; color: var(--text-dim); font-size: 9.5px; }
+.detail-agent-id { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 10px; color: var(--text-dim); }
+.detail-agent-id code { min-width: 0; overflow: hidden; text-overflow: ellipsis; font: 10px var(--font-mono); color: var(--text-secondary); }
+.meta-grid dd .code-copy { margin-left: 4px; }
