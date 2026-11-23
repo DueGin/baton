@@ -140,7 +140,8 @@ function setupIpc(): void {
   ipcMain.handle("baton:update-status", (event) => { authorize(event); return updater?.get() ?? null; });
   ipcMain.handle("baton:update-check", async (event) => { authorize(event); return updater?.check() ?? null; });
   ipcMain.handle("baton:update-download", async (event) => { authorize(event); return updater?.download() ?? null; });
-  ipcMain.handle("baton:update-install", async (event) => { authorize(event); const status = await updater?.install(); if (updater?.get().phase === "installing") void quit(); return status ?? null; });
+  // The updater asks (confirmInstall) before handing over, then exits through quitForUpdate (quitNow).
+  ipcMain.handle("baton:update-install", async (event) => { authorize(event); return (await updater?.install()) ?? null; });
   ipcMain.handle("baton:update-token", async (event, input: unknown) => { authorize(event); return updater?.setToken(input) ?? { saved: false }; });
   ipcMain.handle("baton:update-reveal", (event) => { authorize(event); updater?.reveal(); });
 }
@@ -184,6 +185,27 @@ async function quit(): Promise<void> {
     quitting = true; streams?.abort(); for (const notice of notifications) notice.close();
     await manager?.stop(); tray?.destroy(); app.quit();
   } finally { checkingQuit = false; }
+}
+
+/** Before installing an update: the same active-runs question as quitting, asked while nothing has been handed over yet. */
+async function confirmInstall(): Promise<boolean> {
+  let active: number | null = null;
+  try { active = await manager?.activeRuns() ?? 0; } catch { /* Ask conservatively when daemon is unavailable. */ }
+  if (smoke || active === 0) return true;
+  const options = { type: "question" as const, title: "安装更新", message: active === null ? "暂时无法确认是否有活跃会话，仍然安装更新？" : `还有 ${active} 个活跃会话，安装更新会退出 baton，继续吗？`, detail: manager?.owned ? "安装会停止此应用启动的 daemon 和 agent，正在运行的会话会暂停，重新打开后可以继续。" : "daemon 由外部启动，安装更新时会话继续运行。", buttons: ["暂不安装", "安装并重启"], defaultId: 0, cancelId: 0, noLink: true };
+  const answer = window && !window.isDestroyed() ? await dialog.showMessageBox(window, options) : await dialog.showMessageBox(options);
+  return answer.response === 1;
+}
+/**
+ * The updater has handed over (the swap script waits for this pid): leave now, without asking again. The daemon gets
+ * a bounded stop; app.exit skips before-quit, whose confirmation could otherwise keep this process alive.
+ */
+async function quitNow(): Promise<void> {
+  quitting = true; checkingQuit = true; streams?.abort();
+  for (const notice of notifications) notice.close();
+  if (window && !window.isDestroyed()) window.close();   // saves the window state
+  await Promise.race([manager?.stop() ?? Promise.resolve(), new Promise((resolve) => setTimeout(resolve, 10_000))]).catch(() => undefined);
+  tray?.destroy(); app.exit(0);
 }
 
 async function smokeCheck(current: BrowserWindow): Promise<void> {
@@ -253,7 +275,7 @@ else {
       tray.setContextMenu(Menu.buildFromTemplate([{ label: "打开 baton", click: () => { void showWindow(); } }, { type: "separator" }, { label: "退出 baton", click: () => app.quit() }]));
     }
     const env = await loginShellEnv(process.env);
-    updater = new UpdateManager(() => window, { env, settingsPath: settingsPathFor(app.getPath("userData")), quitForUpdate: () => { void quit(); } });
+    updater = new UpdateManager(() => window, { env, settingsPath: settingsPathFor(app.getPath("userData")), confirmInstall, quitForUpdate: () => { void quitNow(); } });
     manager = new DaemonManager({ home, executable: process.execPath, entry: app.isPackaged ? join(process.resourcesPath, "runtime", "packages", "server", "dist", "cli", "main.js") : resolve(here, "../../server/dist/cli/main.js"), env,
       connected: current => {
         const reconnecting = Boolean(connection); connection = current;

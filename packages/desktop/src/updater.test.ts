@@ -7,11 +7,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Every test gets its own userData so a token saved by one never leaks into the next.
 let userData = await mkdtemp(join(tmpdir(), "baton-updater-"));
 beforeEach(async () => { userData = await mkdtemp(join(tmpdir(), "baton-updater-")); await rm(join(userData, "desktop-settings.json"), { force: true }); });
+const netFetch = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>();
 vi.mock("electron", () => ({
   app: { getPath: (name: string) => name === "userData" ? userData : join(userData, name), getVersion: () => "0.1.0" },
   shell: { showItemInFolder: () => undefined },
+  net: { fetch: (url: string, init?: RequestInit) => netFetch(url, init) },
 }));
 
+// Unpacking runs the real ditto; launching the swap script is recorded instead (it would wait for this test's pid).
+const launched: { command: string; args: string[] }[] = [];
+vi.mock("node:child_process", async (load) => {
+  const real = await load<typeof import("node:child_process")>();
+  return { ...real, spawn: (command: string, args: string[] = [], options = {}) => {
+    if (command === "/bin/bash" || command === "cmd.exe") { launched.push({ command, args }); return { unref() {} }; }
+    return real.spawn(command, args, options);
+  } };
+});
 const { UpdateManager } = await import("./updater.js");
 const { DOWNLOAD_ATTEMPTS } = await import("./update.js");
 type Options = ConstructorParameters<typeof UpdateManager>[1];
@@ -277,5 +288,132 @@ describe("UpdateManager on an unreliable network", () => {
     expect((await instance.download()).phase).toBe("downloaded");
     expect(calls.find((call) => call.url === API_ASSET)).toMatchObject({ authorization: "Bearer private-token" });
     expect(calls.find((call) => call.url === DOWNLOAD)?.authorization).toBeUndefined();
+  });
+});
+
+describe("installing a downloaded update", () => {
+  /** A downloaded update whose zip holds a real .app, and a writable "installed" bundle to replace. */
+  async function downloaded(confirm: boolean | undefined) {
+    const { execFileSync } = await import("node:child_process");
+    const { mkdir } = await import("node:fs/promises");
+    const build = await mkdtemp(join(tmpdir(), "baton-install-"));
+    await mkdir(join(build, "baton.app", "Contents", "MacOS"), { recursive: true });
+    await writeFile(join(build, "baton.app", "Contents", "marker.txt"), "new");
+    const zip = join(build, "baton-0.2.0-mac-arm64.zip");
+    execFileSync("ditto", ["-c", "-k", "--keepParent", join(build, "baton.app"), zip]);
+    const zipped = await readFile(zip), zipSha = createHash("sha256").update(zipped).digest("hex");
+    const installed = join(build, "installed", "baton.app");
+    await mkdir(join(installed, "Contents"), { recursive: true });
+    process.env.BATON_UPDATE_BUNDLE = installed;
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === API_LATEST) return respond(JSON.stringify({ ...release, assets: [{ name: "baton-0.2.0-mac-arm64.zip", size: zipped.length, url: API_ASSET, browser_download_url: DOWNLOAD }, { name: "SHA256SUMS.txt", size: 100, url: "x", browser_download_url: SUMS }] }));
+      if (url === SUMS) return respond(`${zipSha}  baton-0.2.0-mac-arm64.zip\n`);
+      if (url === DOWNLOAD) return respond(zipped, { headers: { "content-length": String(zipped.length) } });
+      return respond("nope", { status: 404 });
+    }) as typeof fetch;
+    const asked = vi.fn(async () => confirm ?? true);
+    const made = manager(fetchImpl, "darwin", {}, confirm === undefined ? {} : { confirmInstall: asked });
+    await made.instance.check();
+    expect((await made.instance.download()).phase).toBe("downloaded");
+    launched.length = 0;
+    return { ...made, asked, installed, script: join(userData, "updates", "0.2.0", "swap.sh") };
+  }
+  afterEach(() => { delete process.env.BATON_UPDATE_BUNDLE; });
+
+  it.runIf(process.platform === "darwin")("asks first; cancelling keeps the download ready and starts nothing", async () => {
+    const { instance, quit, asked, installed } = await downloaded(false);
+    const status = await instance.install();
+    expect(asked).toHaveBeenCalledOnce();
+    expect(status).toMatchObject({ phase: "downloaded", savedPath: expect.stringContaining("baton-0.2.0-mac-arm64.zip") as unknown as string });
+    expect(launched).toHaveLength(0);
+    expect(quit).not.toHaveBeenCalled();
+    await expect(stat(installed)).resolves.toBeTruthy();
+    // It can be installed later from the same download.
+    expect((await instance.install()).phase).toBe("downloaded");
+  });
+
+  it.runIf(process.platform === "darwin")("after confirming, starts the swap and exits; the script never replaces a running app", async () => {
+    const { instance, quit, asked, installed, script } = await downloaded(true);
+    const status = await instance.install();
+    expect(asked).toHaveBeenCalledOnce();
+    expect(status.phase).toBe("installing");
+    expect(launched).toEqual([{ command: "/bin/bash", args: [script, installed, expect.stringMatching(/unpacked\/baton\.app$/u) as unknown as string] }]);
+    expect(quit).toHaveBeenCalledOnce();
+    const body = await readFile(script, "utf8");
+    expect(body).toContain(`kill -0 ${process.pid}`);
+    expect(body.indexOf("更新未安装")).toBeLessThan(body.indexOf('mv "$1" "$1.old"'));
+  });
+
+  it.runIf(process.platform === "darwin")("installs without asking when no confirmation is configured", async () => {
+    const { instance, quit } = await downloaded(undefined);
+    expect((await instance.install()).phase).toBe("installing");
+    expect(launched).toHaveLength(1); expect(quit).toHaveBeenCalledOnce();
+  });
+});
+
+describe("network paths", () => {
+  const sums = `${bigSha}  baton-0.2.0-mac-arm64.zip\n`;
+  const reset = (code: string) => new TypeError("fetch failed", { cause: Object.assign(new Error(code), { code }) });
+  it("uses Chromium's stack first and retries a failed connection once on Node's", async () => {
+    netFetch.mockReset().mockImplementation(async (url) => { if (url.includes("api.github.com")) throw new Error("net::ERR_CONNECTION_CLOSED"); return respond(sums); });
+    const direct = vi.fn(async () => respond("{}", { status: 403 }));
+    vi.stubGlobal("fetch", direct);
+    const logs: string[] = [];
+    const instance = new UpdateManager(() => null, { platform: "darwin", arch: "arm64", version: "0.1.0", env: {}, settingsPath: join(userData, "s.json"), quitForUpdate: () => undefined, log: (line) => { logs.push(line); }, retryDelayMs: 1 });
+    expect(await instance.check()).toMatchObject({ phase: "available", release: { version: "0.2.0", sha256: bigSha } });
+    expect(netFetch.mock.calls.map(([url]) => url)).toEqual([API_LATEST, SUMS_LATEST]);
+    expect(direct).toHaveBeenCalledOnce();   // only the API request failed on Chromium's stack
+  });
+  it("reports both stacks' codes when neither connects", async () => {
+    netFetch.mockReset().mockRejectedValue(new Error("net::ERR_CONNECTION_CLOSED"));
+    vi.stubGlobal("fetch", vi.fn(async () => { throw reset("ECONNRESET"); }));
+    const logs: string[] = [];
+    const instance = new UpdateManager(() => null, { platform: "darwin", arch: "arm64", version: "0.1.0", env: {}, settingsPath: join(userData, "s.json"), quitForUpdate: () => undefined, log: (line) => { logs.push(line); }, retryDelayMs: 1 });
+    expect((await instance.check()).error).toBe("检查更新失败：网络连接中断，备用地址也没有连上（网络连接中断）。请检查网络或代理后重试。");
+    expect(logs.at(-1)).toContain("net::ERR_CONNECTION_CLOSED; direct: fetch failed <- ECONNRESET");
+    expect(netFetch).toHaveBeenCalledTimes(4);   // the API once, SHA256SUMS.txt three times
+  });
+  it("retries the SHA256SUMS.txt check through a short outage", async () => {
+    let sumsCalls = 0;
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === API_LATEST) return respond("limited", { status: 403 });
+      if (url === SUMS_LATEST && ++sumsCalls < 3) throw reset("ECONNRESET");
+      return respond(sums);
+    }) as typeof fetch;
+    const { instance } = manager(fetchImpl);
+    expect(await instance.check()).toMatchObject({ phase: "available", release: { version: "0.2.0" } });
+    expect(sumsCalls).toBe(3);
+  });
+});
+
+describe("the update directory", () => {
+  it("downloads even when a leftover from an earlier install cannot be removed", async () => {
+    const { chmod, mkdir } = await import("node:fs/promises");
+    const stuck = join(userData, "updates", "0.2.0", "unpacked", "baton.app", "Contents");
+    await mkdir(stuck, { recursive: true }); await writeFile(join(stuck, "app.asar"), "x"); await chmod(stuck, 0o000);
+    try {
+      const { fetchImpl } = flaky([{}]);
+      const { instance, logs } = manager(fetchImpl);
+      await instance.check();
+      expect((await instance.download()).phase).toBe("downloaded");
+      expect(logs.some((line) => line.startsWith("could not remove"))).toBe(true);
+    } finally { await chmod(stuck, 0o755); }
+  });
+
+  it("names a file-system failure as such and does not retry it as a network error", async () => {
+    const { chmod, mkdir } = await import("node:fs/promises");
+    await mkdir(join(userData, "updates", "0.2.0"), { recursive: true });
+    await writeFile(part(), big.subarray(0, 1000)); await chmod(part(), 0o444);
+    try {
+      const { fetchImpl, downloadCalls } = flaky([{}]);
+      const { instance } = manager(fetchImpl);
+      await instance.check();
+      const status = await instance.download();
+      expect(status).toMatchObject({ phase: "error", failedStep: "download" });
+      expect(status.error).toBe(`无法写入下载目录（没有写入权限）：${join(userData, "updates", "0.2.0")}。处理后点「继续下载」。`);
+      expect(downloadCalls()).toHaveLength(1);
+    } finally { await chmod(part(), 0o644); }
   });
 });
