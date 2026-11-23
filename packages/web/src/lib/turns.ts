@@ -3,7 +3,7 @@ import type { QuestionTranscriptEntry } from "./questions.js";
 import { duration } from "./derive.js";
 import { usageTokens } from "./conversation.js";
 
-export const turnTriggerLabels: Record<TurnRecord["trigger"], string> = { user: "", delegation: "委派任务", result: "子任务结果", followup: "后续消息", correction: "结果修正", resume: "继续会话" };
+export const turnTriggerLabels: Record<TurnRecord["trigger"], string> = { user: "", delegation: "委派任务", result: "子任务结果", followup: "后续消息", correction: "结果修正", resume: "继续会话", message: "会话消息" };
 export function turnTokens(value: number): string {
   return value >= 1_000_000 ? `${(value / 1_000_000).toFixed(2).replace(/\.?0+$/, "")}M` : value >= 1000 ? `${(value / 1000).toFixed(2).replace(/\.?0+$/, "")}k` : String(Math.round(value));
 }

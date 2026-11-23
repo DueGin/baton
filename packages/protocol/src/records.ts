@@ -415,7 +415,8 @@ export interface DelegationRecord {
   subtreeUsage: UsageTotals;
 }
 
-export type TurnTrigger = "user" | "delegation" | "result" | "followup" | "correction" | "resume";
+/** `message`: a <baton-message> from another agent session (send_message). */
+export type TurnTrigger = "user" | "delegation" | "result" | "followup" | "correction" | "resume" | "message";
 export type TurnStatus = "running" | "completed" | "failed" | "canceled" | "interrupted";
 
 export interface TurnRecord {

@@ -26,6 +26,7 @@
   - 动态组队和预设团队都可以带**候选成员**：只填 agent、模型、思考级别和可选描述，不用定角色，主导者按任务自主招人。
 - **人在回路**：跨会话的「待处理」收件箱，汇总权限请求、团队名单、内联问答卡片和升级事项。另有权限规则，消息支持排队、引导、立即发送（中断）三种发送模式，会话可以暂停和恢复，也可以把消息**回退**到之前（只回退会话、只回退文件，或两者一起）。
 - **会话体验**：输入框实时渲染 Markdown；支持图片的 agent 可以在消息里插入图片（以胶囊显示），对话中直接显示图片；会话右侧的目录栏可以跳到你发过的每条消息。
+- **会话之间通信**：每个 agent 会话都有一个 **Agent ID**（在节点详情 / Run 详情里可复制）。任意 agent 都能用 `list_sessions` 找到别的会话——同一个 Run、别的 Run、别的项目——再用 `send_message` 定向发消息；对方忙时消息排在当前轮次之后，已经结束的会话会被叫醒，回复同样以消息回到发起方。同一对会话之间连续 10 条没有人工介入就会停下，要求先问人。
 - **可观测性**：实时委派拓扑图；会话时间线（自动折叠空闲时段）；完整对话记录（支持 GFM、Mermaid、中日韩排版）；每轮计时与思考动画；agent 在后台启动的常驻进程登记；agent 提交的 Pull Request 及其 CI 和评审状态。
 - **项目与桌面端**：每个会话都归属一个项目（工作目录）。提供 macOS 和 Windows 桌面应用，选择目录时直接唤起系统对话框；同一套控制台也可以在浏览器里使用。亮色、暗色主题可切换。
 
@@ -133,7 +134,7 @@ baton export <runId> --format json|md|otlp [-o FILE]   # 导出记录（JSON / M
 
 ## 委派工具
 
-每个 agent 节点都会通过自己的 MCP 端点 `/mcp/n/<token>` 拿到下面这些工具。单人模式下只保留 `ask_human`。
+每个 agent 节点都会通过自己的 MCP 端点 `/mcp/n/<token>` 拿到下面这些工具。单人模式下只保留 `ask_human`、`list_sessions` 和 `send_message`（它们不是委派）。
 
 | 工具 | 作用 |
 | --- | --- |
@@ -145,6 +146,8 @@ baton export <runId> --format json|md|otlp [-o FILE]   # 导出记录（JSON / M
 | `report_result` | 子节点提交结构化结果 |
 | `ask_human` | 向人提问，在会话里显示为内联问答卡片 |
 | `form_team` / `get_team` / `replace_member` / `reassign` | 组队、查看团队、换人、改派（组队和换人仅限主导者） |
+| `list_sessions` | 列出本机所有 agent 会话（跨 Run、跨项目）及其 Agent ID |
+| `send_message` | 按 Agent ID 给任意会话的 agent 发消息；对方的回复也以消息回到你 |
 
 设计细节见 [docs/DESIGN.md](docs/DESIGN.md)。
 

@@ -13,9 +13,14 @@ describe("agent message demo transcript", () => {
       const { items } = await client.items(node.id);
       all += items.map(row => renderToStaticMarkup(<TranscriptRow row={row} node={node} snapshot={snapshot} inspect={() => undefined} />)).join("");
     }
-    for (const kind of ["delegate", "send", "reassign", "result", "notice", "assignment", "followup", "report_result"]) expect(all).toContain(`data-agent-card="${kind}"`);
+    for (const kind of ["delegate", "send", "send_message", "reassign", "result", "notice", "assignment", "followup", "message", "report_result"]) expect(all).toContain(`data-agent-card="${kind}"`);
     expect(all.match(/data-agent-card="result"/g)).toHaveLength(3);
     for (const raw of ["baton-followup", "baton-results", "baton-assignment", "mcp__baton__send", "mcp__baton__delegate", "baton-notice"]) expect(all).not.toContain(raw);
+    // The <baton-message> wrapper only survives inside the collapsed raw call detail / copy text, never as visible text.
+    const visible = all.replace(/<pre>[\s\S]*?<\/pre>/g, "").replace(/<[^>]+>/g, " ");
+    expect(visible).not.toContain("baton-message"); expect(visible).not.toContain("from=");
+    // A session message keeps its origin visible and jumps to that session's run.
+    expect(all).toContain("收到会话消息"); expect(all).toContain("发送消息给"); expect(all).toContain("Atlas · Agent 消息 · 派活、追问与结果");
     expect(all).toContain("系统纠正"); expect(all).toContain("human-answer"); expect(all).toContain("优先验证跨项目访问权限");
     expect(all).toContain('aria-expanded="false"'); expect(all).not.toContain('aria-expanded="true"');
     expect(all).toContain("ToolSearch ·"); expect(all).not.toContain("unknown unknown");

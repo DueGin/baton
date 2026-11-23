@@ -28,6 +28,10 @@ export function agentMessageDemo(now: number): { snapshot: RunSnapshot; items: I
   row(api.toNodeId, { type: "user_message", text: demoNoticePrompt("correction", "结果结构需要修正\n\n`tests` 必须是数字。请修正并重新调用 report_result。") });
   tool(api.toNodeId, "report_result", { status: "success", summary: "搜索 API 与中文短词测试通过。\n已覆盖访问边界。", result: { tests: 18, summary: "实现完成" }, artifacts: [{ kind: "file", value: "src/search.ts", description: "实现与测试" }] }, { accepted: true });
   row(api.toNodeId, { type: "user_message", text: '<baton-answer question="demo-risk">优先验证跨项目访问权限。</baton-answer>' });
+  // Another run's session messages this one (DESIGN §4.16), then the reply goes back with send_message.
+  const from = snapshot.delegations.find(edge => edge.toNodeId.endsWith(":review"))?.toNodeId ?? api.toNodeId;
+  row(root.id, { type: "user_message", text: `<baton-message from="${from}" agent="claude" role="review" title="审查搜索边界与安全" run="run-notes" session="后台服务 · Vite 与 Python" project="Atlas">搜索接口的分页参数用 limit 还是 pageSize？我们这边想统一命名。</baton-message>` });
+  tool(root.id, "send_message", { to: from, message: "统一用 limit + cursor；语料侧我们同步改，本周内完成。" }, { sent: true, delivery: "delivered; the receiver started a turn", to: { agentId: from, agent: "claude", role: "review", title: "审查搜索边界与安全", run: { id: "run-notes", title: "后台服务 · Vite 与 Python" }, project: "Atlas" } });
   for (const edge of snapshot.delegations.filter(edge => edge.toNodeId !== api.toNodeId)) row(edge.toNodeId, { type: "user_message", text: demoBriefPrompt(edge) });
   return { snapshot, items };
 }

@@ -107,10 +107,9 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .sidebar-footer { padding: 14px 14px 10px; border-top: 1px solid var(--border); }
 .sidebar-nav { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px; background: transparent; border: none; text-align: left; color: var(--text-secondary); border-radius: 5px; font-size: 12px; }
 .sidebar-nav:hover, .sidebar-nav.selected { background: var(--surface-active); color: var(--text); }
-.nav-count { margin-left: auto; font-family: var(--font-mono); color: var(--text-dim); font-size: 10px; }
-.sidebar-bottom { display: flex; justify-content: space-between; align-items: center; padding: 10px 4px 0 10px; }
 .local-indicator { display: inline-flex; align-items: center; gap: 6px; color: var(--text-dim); font-size: 10px; }
 .local-indicator i { width: 5px; height: 5px; background: var(--text-dim); border-radius: 50%; }
+.local-indicator i.is-live { background: var(--green); }
 .main-shell { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .demo-banner { display: flex; gap: 9px; align-items: center; padding: 7px 27px; background: var(--accent-soft); color: var(--accent); border-bottom: 1px solid color-mix(in srgb, var(--accent) 15%, transparent); font-size: 10px; }
 .demo-tag { font-family: var(--font-mono); font-size: 8px; font-weight: 700; letter-spacing: 1px; border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); border-radius: 3px; padding: 1px 4px; }
@@ -390,8 +389,6 @@ h1, h2, h3, h4, p { margin-top: 0; }
   .run-list-heading { gap: 0; }
   .sidebar-footer { padding: 10px 9px; }
   .sidebar-nav { font-size: 0; justify-content: center; padding: 12px 0; gap: 0; }
-  .nav-count, .local-indicator { display: none; }
-  .sidebar-bottom { padding: 10px 0 0; justify-content: center; }
   .demo-banner { font-size: 8px; padding: 6px 12px; }
   .demo-banner > span:nth-child(2) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .toolbar-actions { gap: 9px; }
@@ -598,8 +595,6 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .status-member_active { color: var(--green); }
 .status-waiting_answer { color: var(--blue); }
 .status-stalled { color: var(--red); }
-.inbox-nav { margin: 0 14px 10px; width: calc(100% - 28px); }
-.inbox-nav .nav-count { background: var(--amber-soft); color: var(--amber); }
 .inbox-heading-count { color: var(--text-dim); font: 18px var(--font-mono); margin-left: 8px; }
 .inbox-page { overflow: auto; }
 .inbox-run-group { max-width: 1080px; margin: 0 0 30px; }
@@ -852,21 +847,16 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .navigation-sidebar .run-list-heading > span:first-of-type { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .navigation-sidebar .run-list-meta, .navigation-sidebar .run-list-bottom { display: flex; }
 .navigation-sidebar .sidebar-nav { display: flex; justify-content: flex-start; font-size: 12px; gap: 9px; padding: 10px; }
-.navigation-sidebar .nav-count { display: inline; }
 .navigation-sidebar .sidebar-footer { margin-top: auto; padding: 12px; }
-.navigation-sidebar .sidebar-bottom { justify-content: space-between; padding: 10px 4px 0 8px; }
-.navigation-sidebar .local-indicator { display: inline-flex; }
 .sidebar-resizer { position: absolute; top: 0; right: -3px; bottom: 0; width: 7px; cursor: col-resize; touch-action: none; z-index: 20; }
 .sidebar-resizer:hover, .sidebar-resizer:focus-visible { background: color-mix(in srgb, var(--accent) 30%, transparent); outline: none; }
 .navigation-sidebar.is-collapsed { width: 48px; min-width: 48px; }
 .navigation-sidebar.is-collapsed .sidebar-top { padding: 10px 0 8px; justify-content: center; }
-.navigation-sidebar.is-collapsed .brand, .navigation-sidebar.is-collapsed .sidebar-label, .navigation-sidebar.is-collapsed .sidebar-footer .nav-count, .navigation-sidebar.is-collapsed .local-indicator { display: none; }
+.navigation-sidebar.is-collapsed .brand, .navigation-sidebar.is-collapsed .sidebar-label { display: none; }
 .navigation-sidebar.is-collapsed .sidebar-toggle { width: 30px; }
 .navigation-sidebar.is-collapsed .new-run-button { margin: 2px 8px 12px; padding: 7px; width: 32px; height: 32px; }
 .navigation-sidebar.is-collapsed .sidebar-nav { width: 34px; height: 36px; justify-content: center; padding: 7px; margin: 2px 7px; position: relative; }
-.navigation-sidebar.is-collapsed .inbox-nav .nav-count { position: absolute; top: 0; right: -3px; margin: 0; padding: 1px 3px; font: 8px var(--font-mono); border-radius: 4px; background: var(--amber-soft); color: var(--amber); }
 .navigation-sidebar.is-collapsed .sidebar-footer { padding: 9px 0; }
-.navigation-sidebar.is-collapsed .sidebar-bottom { justify-content: center; padding: 9px 0 0; }
 .rail-runs { position: relative; }
 .rail-popover-dismiss { position: fixed; inset: 0; background: transparent; border: 0; z-index: 15; cursor: default; }
 .rail-run-popover { position: fixed; top: 90px; left: 48px; width: min(320px, calc(100vw - 56px)); max-height: calc(100dvh - 110px); display: flex; flex-direction: column; border: 1px solid var(--border-strong); border-radius: 8px; box-shadow: 0 8px 30px #0003; background: var(--sidebar); z-index: 16; }
@@ -1385,12 +1375,6 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .agent-fields input, .member-editor-row input { height: 34px; padding-top: 0; padding-bottom: 0; }
 
 /* Settings shell: 通用 / Agents tabs share one page; the Agents catalog lives here instead of the sidebar. */
-.settings-shell { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
-.settings-tabs { position: sticky; top: 0; z-index: 5; display: flex; gap: 4px; padding: 14px 28px 0; max-width: 1050px; width: 100%; align-self: center; background: var(--bg); border-bottom: 1px solid var(--border); }
-.settings-tab { border: 0; background: none; color: var(--text-secondary); padding: 8px 12px 9px; font-size: 13px; border-bottom: 2px solid transparent; margin-bottom: -1px; cursor: pointer; }
-.settings-tab:hover { color: var(--text); }
-.settings-tab.selected { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
-.settings-shell > .page-content { overflow: visible; flex: none; }
 .agent-baton-icon { border-radius: 22%; background: center / contain no-repeat; max-width: none; max-height: none; }
 .composer .composer-stop { display: inline-flex; align-items: center; gap: 5px; background: var(--text); border-color: var(--text); color: var(--surface); }
 .composer .composer-stop:hover:not(:disabled) { background: var(--red, #c4473a); border-color: var(--red, #c4473a); }
@@ -1625,7 +1609,6 @@ html[data-desktop] :is(.sidebar-top, .run-bar) :is(button, a, input, select, tex
 html[data-desktop] :is(dialog, [popover], .sidebar-resizer, .sidebar-overlay-backdrop, .right-panel-backdrop, .rail-popover-dismiss, .global-error) { -webkit-app-region: no-drag; app-region: no-drag; }
 /* Pages without a run bar: the drag strip takes the place of most of the top padding. */
 html[data-desktop] .main-shell > .page-content { padding-top: 16px; }
-html[data-desktop] .settings-tabs { padding-top: 0; }
 /* macOS: room for the traffic lights, except in full screen where they are hidden. */
 html[data-desktop="darwin"]:not([data-fullscreen]) .navigation-sidebar:not(.is-collapsed) .sidebar-top { padding-top: 34px; }
 html[data-desktop="darwin"]:not([data-fullscreen]) .navigation-sidebar:not(.is-collapsed) .brand { height: 66px; padding-top: 12px; padding-bottom: 20px; }
@@ -1651,3 +1634,50 @@ html[data-desktop="win32"] .run-bar { padding-right: calc(100vw - env(titlebar-a
 .update-settings .update-token-input { display: flex; flex: none; align-items: center; gap: 6px; }
 .update-settings .update-token-input input { width: 220px; text-align: left; }
 .update-settings .update-token .field-hint { margin-top: 4px; }
+
+/* Bottom-left actions: settings, teams and the inbox are icon-only; the inbox count is a badge. */
+.sidebar-actions { display: flex; align-items: center; gap: 2px; }
+.sidebar-action { position: relative; width: 34px; height: 34px; border-radius: 7px; color: var(--text-secondary); }
+.sidebar-action.selected { background: var(--surface-active); color: var(--text); }
+.sidebar-action.theme-toggle { margin-left: auto; color: var(--text-dim); }
+.nav-badge { position: absolute; top: 1px; right: -1px; min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px; background: var(--amber-soft); color: var(--amber); font: 600 9px/15px var(--font-mono); text-align: center; pointer-events: none; box-shadow: 0 0 0 2px var(--sidebar); }
+.navigation-sidebar.is-collapsed .sidebar-actions { flex-direction: column; gap: 4px; }
+.navigation-sidebar.is-collapsed .sidebar-action.theme-toggle { margin-left: 0; }
+
+/* Settings: the workspace navigation gives way to the settings categories; 返回对话 goes back to the conversation page. */
+.sidebar.settings-sidebar { flex: none; width: 232px; min-width: 232px; overflow-y: auto; }
+.settings-sidebar .sidebar-top { padding: 14px 12px 6px; }
+.settings-back { display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px 7px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: 12px; }
+.settings-back:hover { background: var(--surface-active); color: var(--text); }
+.settings-sidebar-title { margin: 14px 22px 12px; font-size: 18px; font-weight: 600; letter-spacing: -.3px; }
+.settings-nav { display: flex; flex-direction: column; gap: 16px; padding: 4px 12px 20px; }
+.settings-nav-group { display: flex; flex-direction: column; gap: 1px; }
+.settings-nav-heading { padding: 0 10px 6px; color: var(--text-dim); font-size: 10px; font-weight: 600; letter-spacing: .8px; }
+.settings-nav-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: 12.5px; text-align: left; }
+.settings-nav-item:hover { background: var(--surface-hover); color: var(--text); }
+.settings-nav-item.selected { background: var(--surface-active); color: var(--text); font-weight: 600; }
+.settings-nav-icon { display: inline-flex; flex: none; color: var(--text-dim); }
+.settings-nav-item.selected .settings-nav-icon { color: var(--text); }
+.settings-page { max-width: 880px; }
+/* Single-card pages: the page heading already names the card. */
+.settings-page.single > .settings-card > h2:first-child, .settings-page.single .rules-heading h2 { display: none; }
+.about-settings .about-value { font-size: 12px; color: var(--text-secondary); }
+.about-settings code.about-value { font: 11px var(--font-mono); }
+.about-settings .local-indicator { font-size: 11px; color: var(--text-secondary); }
+@media (max-width: 900px) {
+  .sidebar.settings-sidebar { width: 52px; min-width: 52px; }
+  .settings-sidebar .sidebar-label, .settings-sidebar .settings-nav-heading, .settings-sidebar-title { display: none; }
+  .settings-sidebar .sidebar-top { padding: 12px 8px 4px; justify-content: center; }
+  .settings-back { padding: 8px; }
+  .settings-nav { padding: 10px 8px 16px; gap: 12px; }
+  .settings-nav-item { justify-content: center; padding: 9px 0; }
+}
+html[data-desktop="darwin"]:not([data-fullscreen]) .settings-sidebar .sidebar-top { padding-top: 40px; }
+
+/* Session messages (DESIGN §4.16): a card that points at another run keeps its origin visible and jumps there. */
+.agent-message-card[data-agent-card="message"] .agent-card-direction { color: var(--purple); }
+.agent-card-counterpart.is-session strong::after { content: " ↗"; color: var(--text-dim); font-weight: 400; }
+.agent-card-origin { flex: none; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 6px; border: 1px solid var(--border); border-radius: 9px; color: var(--text-dim); font-size: 9.5px; }
+.detail-agent-id { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 10px; color: var(--text-dim); }
+.detail-agent-id code { min-width: 0; overflow: hidden; text-overflow: ellipsis; font: 10px var(--font-mono); color: var(--text-secondary); }
+.meta-grid dd .code-copy { margin-left: 4px; }
