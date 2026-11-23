@@ -13,7 +13,7 @@ import { RunStore } from "../store.js";
 import { createScenario, replay } from "../demo/scenario.js";
 import type { BatonClient } from "../api.js";
 
-const schema = getSchema(composerExtensions({ placeholder: () => "", submit: () => undefined }));
+const schema = getSchema(composerExtensions({ placeholder: () => "" }));
 const valid = (markdown: string) => { const node = schema.nodeFromJSON(markdownToDoc(markdown)); node.check(); return node; };
 
 describe("composer document", () => {

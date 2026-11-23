@@ -12,6 +12,33 @@ async function gate(client: DemoClient) {
   return { id: run.id, snapshot, proposal: pendingProposals(snapshot.run.team)[0]! };
 }
 describe("browser demo teams and approval gate", () => {
+  it("sends policy changes once and appends a separate reminder to newly delivered lead results", async () => {
+    let now = base;
+    const client = new DemoClient(() => now);
+    const { id, snapshot, proposal } = await gate(client);
+    const messages = async () => (await client.items(snapshot.run.rootNodeId)).items.flatMap(row => row.item.type === "user_message" ? [parseBatonMessage(row.item.text)] : []);
+    await client.patchRun(id, { policy: { leadReview: true } });
+    await client.patchRun(id, { policy: { leadReview: true } });
+    await client.approveTeam(id, proposal.id, {});
+    now += 13_000;
+    const results = (await messages()).filter(parts => parts?.[0]?.type === "results");
+    expect(results).toHaveLength(2);
+    for (const parts of results) expect(parts).toMatchObject([{ type: "results" }, { type: "notice", kind: "policy" }]);
+    await client.patchRun(id, { policy: { leadReview: false } });
+    const changes = (await messages()).map(parts => parts?.[0]).filter(part => part?.type === "notice" && part.kind === "policy");
+    expect(changes).toMatchObject([{ text: expect.stringContaining("已开启") }, { text: expect.stringContaining("已关闭") }]);
+  });
+  it("uses the current policy for future deliveries in the prerecorded scenario, without changing history", async () => {
+    let now = base;
+    const client = new DemoClient(() => now);
+    const { run } = await client.run("run-demo");
+    await client.patchRun(run.id, { policy: { leadReview: true } });
+    now += 12_000;
+    const results = (await client.items(run.rootNodeId)).items.flatMap(row => row.item.type === "user_message" && row.item.text.startsWith("<baton-results>") ? [parseBatonMessage(row.item.text)] : []);
+    expect(results.length).toBeGreaterThan(1);
+    expect(results.slice(0, -1).every(parts => parts?.length === 1)).toBe(true);
+    expect(results.at(-1)).toMatchObject([{ type: "results" }, { type: "notice", kind: "policy" }]);
+  });
   it("keeps proposed roles queued until approval, then uses the approved specs", async () => {
     let now = base; const client = new DemoClient(() => now); const { id, proposal, snapshot } = await gate(client);
     expect(snapshot.run.policy.teamApproval).toBe(true);

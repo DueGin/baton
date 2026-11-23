@@ -37,7 +37,8 @@ describe("safe agent content rendering", () => {
     const working = render(live); expect(working).toContain("composer-stop"); expect(working).toContain('aria-label="停止"'); expect(working).not.toContain('aria-label="发送"'); expect(working).not.toMatch(/<\/svg>(停止|发送|继续)<\/button>/);
     const paused = render({ ...live, run: { ...live.run, status: "paused" } }); expect(paused).toContain("composer-resume"); expect(paused).toContain('aria-label="继续"'); expect(paused).not.toMatch(/<\/svg>继续<\/button>/);
     const restarted = render({ ...live, run: { ...live.run, status: "paused", pauses: [{ at: live.run.createdAt, by: "restart" }] } }); expect(restarted).toContain("baton 重启时有 agent 正在工作"); expect(restarted).toContain("composer-resume");
-    const done = render({ ...live, run: { ...live.run, status: "completed" } }); expect(done).not.toContain("composer-stop"); expect(done).toContain('aria-label="发送"'); expect(done).not.toMatch(/<\/svg>发送<\/button>/);
+    const done = render({ ...live, run: { ...live.run, status: "completed" } }); expect(done).not.toContain("composer-stop"); expect(done).toMatch(/aria-label="发送（(?:⌘|Ctrl) Enter）"/u); expect(done).not.toMatch(/<\/svg>发送<\/button>/);
+    expect(done).not.toContain("发送到当前节点"); expect(working).not.toContain("发送后排队，可在消息上改为引导或立即发送");
     expect(render(live, false)).not.toContain("composer-stop");
   });
   it("keeps queued/retracted rows out of the transcript and places icon actions on steered messages", () => {

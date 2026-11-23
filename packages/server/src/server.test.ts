@@ -22,12 +22,23 @@ function children(server: BatonServer, id: string): DelegationRecord[] { return 
 const idle: FakeScript = (c) => { c.text("Done."); };
 
 describe("lead review policy", () => {
+  function expectResultDelivery(text: string, leadReview: boolean): void {
+    const marker = "</baton-results>";
+    const end = text.indexOf(marker);
+    expect(end).toBeGreaterThan(-1);
+    const results = text.slice(0, end + marker.length);
+    expect(results).toMatch(/^<baton-results>\n<result\b[^\n]+>\n[\s\S]+\n<\/result>\n<\/baton-results>$/);
+    expect(results).not.toMatch(/Lead review|baton-notice/);
+    const remainder = text.slice(end + marker.length);
+    if (leadReview) expect(remainder).toMatch(/^\n\n<baton-notice kind="policy">\nLead review: [^\n]*\n<\/baton-notice>$/);
+    else expect(remainder).toBe("");
+  }
   it("notifies the lead when toggled, and adds review instructions to results only while enabled", async () => {
     const server = await setup({ root: idle, worker: idle });
     const { run } = await create(server);
     const root = run.rootNodeId;
     const prompts = () => server.store.items(root).flatMap(({ item }) => item.type === "user_message" ? [item.text] : []);
-    const notices = () => prompts().filter((text) => text.includes('<baton-notice kind="policy">'));
+    const notices = () => prompts().filter((text) => text.startsWith('<baton-notice kind="policy">'));
     const results = () => prompts().filter((text) => text.startsWith("<baton-results>"));
     const patchPolicy = (policy: unknown) => fetch(`http://127.0.0.1:${server.port}/api/runs/${run.id}`, { method: "PATCH", headers: { authorization: `Bearer ${server.token}`, "content-type": "application/json" }, body: JSON.stringify({ policy }) });
     await until(() => server.store.node(root).status === "idle");
@@ -38,7 +49,7 @@ describe("lead review policy", () => {
     expect((await patchPolicy({ leadReview: true })).status).toBe(200);
     await server.kernel.delegate(root, { agent: "worker", title: "First", task: "First change" });
     await until(() => results().length === 1);
-    expect(results()[0]).toMatch(/\nLead review: .*inspect the diff.*\n<\/baton-results>$/);
+    expectResultDelivery(results()[0]!, true);
     expect(notices()).toHaveLength(1);
 
     expect((await patchPolicy({ leadReview: false })).status).toBe(200);
@@ -46,7 +57,24 @@ describe("lead review policy", () => {
     expect(notices()[1]).toContain("Lead review is disabled");
     await server.kernel.delegate(root, { agent: "worker", title: "Second", task: "Second change" });
     await until(() => results().length === 2);
-    expect(results()[1]).not.toContain("Lead review:");
+    expectResultDelivery(results()[1]!, false);
+  });
+
+  it.each([true, false])("preserves the result/notice boundary after resume (leadReview=%s)", async (leadReview) => {
+    const server = await setup({ root: { steer: false, script: async (context) => { if (context.turn === 1) await context.sleep(10_000); } }, worker: idle });
+    const { run } = await create(server, "root", { leadReview });
+    const root = run.rootNodeId;
+    const worker = await server.kernel.delegate(root, { agent: "worker", title: "Review me", task: "Work to verify" });
+    await until(() => server.store.delegation(worker.delegationId).status === "completed");
+    await server.kernel.pauseRun(run.id);
+    expect(server.store.delegation(worker.delegationId).deliveredAt).toBeUndefined();
+    await server.kernel.resumeRun(run.id);
+
+    const delivery = server.store.items(root).find(({ item }) => item.type === "user_message" && item.text.includes("<baton-results>"))?.item;
+    if (delivery?.type !== "user_message") throw new Error("Missing result in resume prompt");
+    const resultsStart = delivery.text.indexOf("<baton-results>");
+    expect(delivery.text.slice(0, resultsStart)).toContain("The human paused this run");
+    expectResultDelivery(delivery.text.slice(resultsStart), leadReview);
   });
 
   it("does not queue a policy notice in a solo run", async () => {

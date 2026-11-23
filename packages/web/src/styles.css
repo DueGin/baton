@@ -243,7 +243,6 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .composer { padding: 12px 16px 10px; margin: 0 24px 20px; max-width: 800px; align-self: center; width: calc(100% - 48px); border: 1px solid var(--border-strong); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); }
 .composer:focus-within { border-color: var(--accent); }
 .composer-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 5px; }
-.composer-footer > span { color: var(--text-dim); font-size: 9px; }
 .composer .button { padding: 6px 10px; font-size: 10px; }
 
 .inspector { width: 370px; min-width: 370px; display: flex; flex-direction: column; background: var(--surface); border-left: 1px solid var(--border); z-index: 5; }
@@ -396,7 +395,6 @@ h1, h2, h3, h4, p { margin-top: 0; }
   .inspector { width: min(370px, 100%); min-width: 0; }
   .transcript-content { padding: 20px 16px; }
   .composer { margin: 0 12px 12px; width: calc(100% - 24px); padding: 10px 12px; }
-  .composer-footer > span { font-size: 8px; }
   .page-content { padding: 26px 18px; }
   .page-heading { align-items: flex-start; }
   .page-heading h1 { font-size: 23px; }
@@ -804,7 +802,7 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .session-tab-menu button { text-align: left; padding: 6px 9px; font-size: 12px; border-radius: 3px; }
 .session-tab-menu button:hover, .session-tab-menu button:focus-visible { background: var(--surface-hover); }
 .session-tab-notice { position: absolute; top: 100%; left: 0; padding: 4px 9px; font-size: 11px; }
-.session-config { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 12px; margin-top: 4px; }
+.session-config { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 12px; min-width: 0; }
 .session-field { display: inline-flex; align-items: center; gap: 2px; min-width: 0; max-width: 100%; font-size: 10px; color: var(--text-dim); }
 .session-field > span { white-space: nowrap; }
 .session-field .select { --control-height: 24px; min-width: 0; max-width: 22ch; }
@@ -815,7 +813,6 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .transcript-content { padding-top: 18px; padding-bottom: 18px; }
 .composer { flex: none; margin: 7px 18px 10px; padding: 8px 12px 7px; max-width: 840px; width: calc(100% - 36px); }
 .composer-footer { margin-top: 4px; min-height: 24px; gap: 8px; }
-.composer-footer > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 9px; }
 .composer .button { padding: 4px 9px; line-height: 1.5; }
 @media (max-width: 1200px) {
   .run-bar { gap: 9px; padding: 0 12px; }
@@ -1546,9 +1543,10 @@ h1, h2, h3, h4, p { margin-top: 0; }
 @media (hover: none) { .composer-thumb-remove { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .composer-pill-spinner, .composer-thumb-progress { animation-duration: 2.4s; } }
 
-.composer-actions { display: flex; flex: none; align-items: center; gap: 4px; }
+.composer-actions { display: flex; flex: none; align-items: center; gap: 4px; margin-left: auto; }
 .composer .composer-attach { width: 26px; height: 26px; }
-.composer-footer > .composer-hint { color: var(--amber); font-weight: 600; }
+.composer-paused-hint, .composer-hint { margin-top: 4px; color: var(--text-dim); font-size: 11px; }
+.composer-hint { color: var(--amber); font-weight: 600; }
 .image-thumb.is-linked { cursor: pointer; }
 
 /* Conversation outline: a Codex-style rail of ticks (one per message you sent) on the right of the

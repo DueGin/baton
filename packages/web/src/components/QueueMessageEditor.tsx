@@ -1,5 +1,6 @@
 import { useId, useRef, useState } from "react";
 import { queueEditError, queueEditKey } from "../lib/queue-editor.js";
+import { shortcutLabel, useSendShortcut } from "../lib/send-shortcut.js";
 import { Icon } from "./common.js";
 import { Modal } from "./TeamForms.js";
 
@@ -11,6 +12,7 @@ export function QueueMessageEditor({ text, busy, error, save, cancel, remove }: 
   const [saving, setSaving] = useState(false); const [confirm, setConfirm] = useState(false);
   const sending = useRef(false); const id = useId();
   const disabled = busy || saving;
+  const shortcut = useSendShortcut(); const keys = shortcutLabel(shortcut);
   const submit = async () => {
     if (disabled || sending.current) return;
     const issue = queueEditError(draft); setValidation(issue); if (issue) return;
@@ -20,14 +22,14 @@ export function QueueMessageEditor({ text, busy, error, save, cancel, remove }: 
   };
   return <div className="queue-message-editor" aria-busy={disabled}>
     <textarea autoFocus aria-label="编辑排队消息" aria-describedby={id} aria-invalid={Boolean(validation)} rows={3} value={draft} disabled={disabled} onChange={event => { setDraft(event.target.value); setValidation(undefined); }} onKeyDown={event => {
-      const action = queueEditKey(event.key, event.shiftKey, event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229);
+      const action = queueEditKey(event.nativeEvent, shortcut);
       if (action === "cancel" && !disabled) { event.preventDefault(); event.stopPropagation(); cancel(); }
       if (action === "save") { event.preventDefault(); void submit(); }
     }} />
-    <div className="queue-editor-toolbar"><span id={id} className="queue-editor-hint">Enter 保存 · Shift+Enter 换行 · Esc 取消</span><div className="queue-editor-actions">
+    <div className="queue-editor-toolbar"><span id={id} className="queue-editor-hint">{keys} 保存 · {shortcut === "enter" ? "Shift + Enter" : "Enter"} 换行 · Esc 取消</span><div className="queue-editor-actions">
       <button type="button" className="icon-button queue-delete" title="删除这条" aria-label="删除这条" disabled={disabled} onClick={() => setConfirm(true)}><Icon name="trash" size={15} /></button>
       <button type="button" className="icon-button" title="取消编辑 · Esc" aria-label="取消编辑" disabled={disabled} onClick={cancel}><Icon name="close" size={15} /></button>
-      <button type="button" className="icon-button queue-save" title="保存 · Enter" aria-label="保存" disabled={disabled || !draft.trim()} onClick={() => { void submit(); }}><span className={disabled ? "message-action-spinner" : undefined}><Icon name={disabled ? "refresh" : "check"} size={15} /></span></button>
+      <button type="button" className="icon-button queue-save" title={`保存（${keys}）`} aria-label="保存" disabled={disabled || !draft.trim()} onClick={() => { void submit(); }}><span className={disabled ? "message-action-spinner" : undefined}><Icon name={disabled ? "refresh" : "check"} size={15} /></span></button>
     </div></div>
     {(validation || error) && <div className="error-text queue-edit-error" role="alert">{validation ?? error}</div>}
     {confirm && <DeleteQueuedMessage busy={disabled} error={error} close={() => { if (!disabled) setConfirm(false); }} remove={async () => { if (sending.current || disabled) return; sending.current = true; setSaving(true); try { await remove(); setConfirm(false); } finally { sending.current = false; setSaving(false); } }} />}

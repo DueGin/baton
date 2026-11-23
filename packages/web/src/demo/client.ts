@@ -19,7 +19,7 @@ import { agentMessageDemo } from "./messages.js";
 import { pullRequestDemo } from "./pull-requests.js";
 import { isOpenPr, linkedPullRequests, safePrUrl } from "../lib/pull-requests.js";
 import type { PullRequestRecord, ListPullRequestsResponse, LinkPullRequestRequest, PullRequestFeedbackRequest } from "@baton/protocol";
-import { demoNoticePrompt, demoBriefPrompt, demoResultsPrompt } from "./prompts.js";
+import { demoNoticePrompt, demoBriefPrompt, demoResultDelivery, demoResultsPrompt, demoReviewReminder } from "./prompts.js";
 import { snapshotInbox, sortInbox, permissionPattern } from "../lib/inbox.js";
 import { matchPermissionRule } from "../lib/permission-rules.js";
 import { activeMembers, cleanCandidate, cleanMember, defaultAgentSpec, pendingProposals, validateMembers, validatePreset } from "../lib/teams.js";
@@ -227,14 +227,16 @@ export class DemoClient implements BatonClient {
       data.remaining = data.remaining.filter(event => Date.parse(event.ts) > this.now());
       for (const event of ready) {
         if (terminal(data.snapshot.run.status) && event.type !== "background") continue;
-        this.emit(data, event);
+        if (event.seq > 0 && event.type === "item" && event.item.type === "user_message" && event.item.text.startsWith("<baton-results>")) {
+          this.emit(data, { ...event, item: { ...event.item, text: demoResultDelivery(event.item.text, data.snapshot.run, event.nodeId) } });
+        } else this.emit(data, event);
         if (event.type === "turn.updated" && event.patch.status && event.patch.status !== "running") {
           const nodeId = data.snapshot.turns.find(turn => turn.id === event.turnId)?.nodeId;
           if (nodeId) this.deliverQueued(data, nodeId);
         }
         if (event.seq === 0 && event.type === "delegation.updated" && event.patch.deliveredAt) {
           const edge = data.snapshot.delegations.find(entry => entry.id === event.delegationId);
-          if (edge && edge.result) this.append(data, edge.fromNodeId, { type: "user_message", text: demoResultsPrompt([edge]) });
+          if (edge && edge.result) this.appendResult(data, edge);
         }
       }
       if (!terminal(data.snapshot.run.status) && ready.some(event => event.seq === 0 && event.type !== "background") && data.snapshot.nodes.every(node => node.status === "idle" || terminal(node.status))) this.emit(data, { type: "run.updated", patch: { status: "idle", updatedAt: new Date(this.now()).toISOString() } });
@@ -430,8 +432,11 @@ export class DemoClient implements BatonClient {
     const { blockedByProposal: _blocked, ...edge } = old;
     this.emit(data, { type: "delegation.created", delegation: { ...edge, status: "canceled", endedAt: new Date(this.now()).toISOString() } });
   }
-  private notice(data: DemoRun, nodeId: string, text: string): void {
-    const message = demoNoticePrompt("team", text);
+  private appendResult(data: DemoRun, edge: DelegationRecord): void {
+    this.append(data, edge.fromNodeId, { type: "user_message", text: demoResultDelivery(demoResultsPrompt([edge]), data.snapshot.run, edge.fromNodeId) });
+  }
+  private notice(data: DemoRun, nodeId: string, text: string, kind: "team" | "policy" = "team"): void {
+    const message = demoNoticePrompt(kind, text);
     if (data.snapshot.run.status === "paused") this.heldMessages.set(nodeId, [...this.heldMessages.get(nodeId) ?? [], message]);
     else this.append(data, nodeId, { type: "user_message", text: message });
   }
@@ -470,7 +475,10 @@ export class DemoClient implements BatonClient {
   }
   async patchRun(id: string, request: PatchRunRequest): Promise<void> {
     const data = this.get(id);
+    const previousReview = data.snapshot.run.policy.leadReview === true;
     this.emit(data, { type: "run.updated", patch: { ...(request.title !== undefined ? { title: request.title, titleSource: "human" as const } : {}), policy: { ...data.snapshot.run.policy, ...request.policy }, updatedAt: new Date(this.now()).toISOString() } });
+    const review = data.snapshot.run.policy.leadReview === true;
+    if (review !== previousReview && data.snapshot.run.policy.mode !== "solo") this.notice(data, data.snapshot.run.rootNodeId, review ? `已开启主导者验收。${demoReviewReminder}` : "已关闭主导者验收。", "policy");
     if (request.policy?.autoApprove) for (const permission of data.snapshot.permissions.filter(entry => entry.status === "pending")) await this.resolve(permission.requestId, { response: { behavior: "allow" } }, "policy");
   }
   async updateNodeConfig(nodeId: string, request: UpdateNodeConfigRequest): Promise<UpdateNodeConfigResponse> {
@@ -787,7 +795,7 @@ export class DemoClient implements BatonClient {
       if (edge) {
         const delivered: DelegationRecord = { ...edge, status: "completed", endedAt: ts, deliveredAt: ts, deliveredVia: "turn", result: { status: decision.response.behavior === "allow" ? "success" : "partial", summary: "Command Palette 和键盘导航实现完成。", reported: true, finalText: "实现与验证完成。", artifacts: [{ kind: "file", value: "src/components/SearchPalette.tsx" }], result: { tests: 8, keyboardNavigation: true } } };
         this.emit(data, { type: "delegation.updated", delegationId: edge.id, patch: delivered });
-        this.append(data, delivered.fromNodeId, { type: "user_message", text: demoResultsPrompt([delivered]) });
+        this.appendResult(data, delivered);
       }
       const rootId = data.snapshot.run.rootNodeId;
       this.append(data, rootId, { type: "assistant_message", text: "所有委派结果已汇总。\n\n- 搜索 API 与中文兼容回退已完成，12 个测试通过。\n- Command Palette 与键盘导航已完成。\n- 安全审查建议均已纳入。\n\n索引子任务的环境问题已通过 LIKE 回退解决。可以继续发消息安排下一轮。" });
@@ -803,7 +811,7 @@ export class DemoClient implements BatonClient {
         if (pending) {
           const result: DelegationRecord = { ...pending, status: "completed", endedAt: ts, deliveredAt: ts, deliveredVia: "turn", result: { status: "success", summary: "集成回归验证完成。", reported: true, finalText: "验证完成" } };
           this.emit(data, { type: "delegation.updated", delegationId: pending.id, patch: result });
-          this.append(data, result.fromNodeId, { type: "user_message", text: demoResultsPrompt([result]) });
+          this.appendResult(data, result);
         }
       }
       this.emit(data, { type: "run.updated", patch: { status: "idle", updatedAt: ts } });

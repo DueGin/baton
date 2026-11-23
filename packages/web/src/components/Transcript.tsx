@@ -5,6 +5,7 @@ import { clock } from "../lib/derive.js";
 import { AgentMark, Empty, Icon } from "./common.js";
 import { SessionTabs } from "./SessionTabs.js";
 import { SessionConfig } from "./SessionConfig.js";
+import { shortcutLabel, useSendShortcut } from "../lib/send-shortcut.js";
 import type { RunStore } from "../store.js";
 import { AgentMessageCard } from "./AgentMessageCard.js";
 import { partAgentCards, toolAgentCard } from "../lib/agent-messages.js";
@@ -114,6 +115,7 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
 }) {
   const [follow, setFollow] = useState(true); const bottom = useRef<HTMLDivElement>(null);
   const composer = useRef<ComposerHandle>(null);
+  const sendLabel = `发送（${shortcutLabel(useSendShortcut())}）`;
   const [composerStatus, setComposerStatus] = useState<ComposerStatus>({ empty: true, uploading: false, failed: false });
   const scroll = useRef<HTMLDivElement>(null); const node = snapshot.nodes.find(entry => entry.id === nodeId) ?? snapshot.nodes[0];
   const state = store.getSnapshot();
@@ -179,9 +181,9 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
       onDragOver={event => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
       onDrop={event => { if (event.defaultPrevented || !event.dataTransfer.types.includes("Files")) return; event.preventDefault(); composer.current?.attach([...event.dataTransfer.files]); }}>
       <LazyComposer key={node.id} ref={composer} nodeId={node.id} client={store.client} placeholder={`向 ${node.agentId} 发送消息…${live ? "（运行中也可发送）" : ""}`} disabled={closed} imagesEnabled={imagesEnabled} onSend={send} onStatus={setComposerStatus} />
-      {agent && <SessionConfig key={`config:${node.id}`} agent={agent} node={node} updateNodeConfig={store.updateNodeConfig} />}
-      <div className="composer-footer">{composerStatus.hint ? <span className="composer-hint" role="status">{composerStatus.hint}</span> : <span title="送达方式会显示在消息旁">{snapshot.run.status === "paused" ? snapshot.run.pauses?.at(-1)?.by === "restart" ? "baton 重启时有 agent 正在工作，会话已暂停 · 点「继续」让它们接着跑" : "会话已暂停，消息会在继续后送达" : live ? "运行中 · 发送后排队，可在消息上改为引导或立即发送" : "发送到当前节点"} · ⌘ / Ctrl + Enter</span>}<div className="composer-actions"><AttachImageButton enabled={imagesEnabled} disabled={closed} attach={files => composer.current?.attach(files)} />{composerAction === "stop" ? <button type="button" className="button composer-stop composer-icon-action" disabled={busy} aria-label="停止" title="停止本会话中所有正在工作的 agent（可继续）" onClick={() => stopRun?.()}><Icon name="stop" size={13} /></button>
+      {composerStatus.hint ? <div className="composer-hint" role="status">{composerStatus.hint}</div> : snapshot.run.status === "paused" && <div className="composer-paused-hint" role="status">{snapshot.run.pauses?.at(-1)?.by === "restart" ? "baton 重启时有 agent 正在工作，会话已暂停 · 点「继续」让它们接着跑" : "会话已暂停，消息会在继续后送达"}</div>}
+      <div className="composer-footer">{agent && <SessionConfig key={node.id} agent={agent} node={node} updateNodeConfig={store.updateNodeConfig} />}<div className="composer-actions"><AttachImageButton enabled={imagesEnabled} disabled={closed} attach={files => composer.current?.attach(files)} />{composerAction === "stop" ? <button type="button" className="button composer-stop composer-icon-action" disabled={busy} aria-label="停止" title="停止本会话中所有正在工作的 agent（可继续）" onClick={() => stopRun?.()}><Icon name="stop" size={13} /></button>
       : composerAction === "resume" ? <button type="button" className="button primary composer-resume composer-icon-action" disabled={busy} aria-label="继续" title="继续本会话" onClick={() => resumeRun?.()}><Icon name="play" size={13} /></button>
-      : <button className="button primary composer-send composer-icon-action" disabled={composerStatus.empty || closed || composerStatus.uploading} aria-label="发送" title={composerStatus.uploading ? "图片上传中…" : composerStatus.failed ? "有图片上传失败" : "发送 · ⌘ / Ctrl + Enter"}><Icon name="arrow" size={15} /></button>}</div></div></form></div>
+      : <button className="button primary composer-send composer-icon-action" disabled={composerStatus.empty || closed || composerStatus.uploading} aria-label={sendLabel} title={`${sendLabel}${composerStatus.uploading ? " · 图片上传中…" : composerStatus.failed ? " · 有图片上传失败" : ""}`}><Icon name="arrow" size={15} /></button>}</div></div></form></div>
   </div></ImageContext>;
 }

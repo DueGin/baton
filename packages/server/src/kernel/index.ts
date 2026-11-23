@@ -6,7 +6,7 @@ import type { DriverEvent, DriverRegistry, DriverSession, OpenSessionSpec, Promp
 import type { Attachments } from "../attachments/index.js";
 import { attachmentLabel, attachmentPrompt, attachmentText, type AttachmentFile } from "./images.js";
 import { Store } from "../store/index.js";
-import { briefPrompt, correctionPrompt, followupPrompt, leadReviewNotice, messagePrompt, noticePrompt, resultsPrompt, systemPrompt } from "./prompts.js";
+import { briefPrompt, correctionPrompt, followupPrompt, LEAD_REVIEW_REMINDER, leadReviewNotice, messagePrompt, noticePrompt, resultsPrompt, systemPrompt } from "./prompts.js";
 import { Teams, type ResolvedMember } from "./teams.js";
 import { HumanInteraction } from "./human.js";
 import { PermissionRules, HUMAN_DENIAL } from "./permission-rules.js";
@@ -34,7 +34,11 @@ const sessionRole = (node: NodeRecord): string | undefined => node.role ?? (node
 const done = (d: DelegationRecord): boolean => ["completed", "failed", "canceled", "replaced"].includes(d.status);
 const undelivered = (delegation: DelegationRecord): boolean => delegation.status !== "replaced" && (!done(delegation) || !delegation.deliveredAt);
 const waitingForChildren = (snapshot: RunSnapshot, nodeId: string): number => snapshot.delegations.filter((delegation) => delegation.fromNodeId === nodeId && undelivered(delegation)).length;
-const reviewsResults = (node: NodeRecord, policy: RunPolicy): boolean => node.parentNodeId === null && policy.mode !== "solo" && policy.leadReview === true;
+function resultDeliveryParts(delegations: DelegationRecord[], node: NodeRecord, policy: RunPolicy): string[] {
+  if (!delegations.length) return [];
+  const results = resultsPrompt(delegations);
+  return node.parentNodeId === null && policy.mode !== "solo" && policy.leadReview === true ? [results, LEAD_REVIEW_REMINDER] : [results];
+}
 const addUsage = (a: UsageTotals, b: UsageTotals): UsageTotals => ({ inputTokens: a.inputTokens + b.inputTokens, cachedInputTokens: a.cachedInputTokens + b.cachedInputTokens, outputTokens: a.outputTokens + b.outputTokens, costUsd: a.costUsd + b.costUsd });
 /** `initial`: the run's first prompt, a human message without its own queued row. */
 interface QueuedPrompt { text: string; trigger: TurnTrigger; humanItem?: ItemRecord; initial?: boolean }
@@ -1138,7 +1142,7 @@ export class Kernel {
     const pending = snapshot.delegations.filter((d) => d.fromNodeId === parentId && done(d) && d.status !== "replaced" && !this.replacing.has(d.id) && d.result && !d.deliveredAt);
     const notices = this.store.notices(parentId);
     if (!pending.length && !notices.length) return;
-    const text = [pending.length ? resultsPrompt(pending, reviewsResults(parent, snapshot.run.policy)) : "", ...notices.map((notice) => notice.text)].filter(Boolean).join("\n\n");
+    const text = [...resultDeliveryParts(pending, parent, snapshot.run.policy), ...notices.map((notice) => notice.text)].filter(Boolean).join("\n\n");
     if (rt.turnId) {
       const turnId = rt.turnId;
       const outcome = await rt.session?.steer(this.promptFor(parentId, text));
@@ -1244,7 +1248,7 @@ export class Kernel {
         const snapshot = this.store.snapshot(id);
         const pending = snapshot.delegations.filter((d) => d.fromNodeId === node.id && done(d) && d.status !== "replaced" && d.result && !d.deliveredAt);
         const notices = this.store.notices(node.id);
-        const content = [pending.length ? resultsPrompt(pending, reviewsResults(node, snapshot.run.policy)) : "", ...notices.map((notice) => notice.text)].filter(Boolean).join("\n\n");
+        const content = [...resultDeliveryParts(pending, node, snapshot.run.policy), ...notices.map((notice) => notice.text)].filter(Boolean).join("\n\n");
         if (content) prompts.push({ text: content, trigger: "result" });
         prompts.push(...rt.queued.splice(0)); this.persistQueue(node.id);
         // A queued delegate may have been created just before a restart, before its

@@ -10,6 +10,7 @@ import { ForgeIcon } from "./ForgeIcon.js";
 import { GithubSettingsForm } from "./GithubSettings.js";
 import { PermissionRules } from "./PermissionRules.js";
 import { ReasoningControls } from "./ReasoningControls.js";
+import { sendShortcuts, shortcutLabel, useSendShortcut } from "../lib/send-shortcut.js";
 import { Select, type SelectOption } from "./Select.js";
 import { TitleModelSettings } from "./TitleModelSettings.js";
 import { UpdatesSettings } from "./UpdatesSettings.js";
@@ -50,6 +51,13 @@ const themeOptions: SelectOption[] = [{ value: "system", label: "跟随系统" }
 const collaborationOptions: SelectOption[] = [{ value: "dynamic", label: "动态组队", description: "主导者按需求组队与调整" }, { value: "preset", label: "预设团队", description: "使用已保存的 lead 与角色" }, { value: "solo", label: "单独完成", description: "根节点独立处理，不委派" }];
 const platformLabel = (platform: string): string => platform === "darwin" ? "macOS" : platform === "win32" ? "Windows" : "Linux";
 
+function SendShortcutSetting() {
+  const shortcut = useSendShortcut();
+  return <div className="settings-row"><div><strong>发送快捷键</strong><p>也用于保存排队消息。列表和代码块里的 Enter 保留编辑功能。</p></div>
+    <Select label="发送快捷键" value={shortcut} options={[{ value: "enter", label: "Enter 发送，Shift + Enter 换行" }, { value: "mod-enter", label: `${shortcutLabel("mod-enter")} 发送，Enter 换行` }]}
+      onChange={value => sendShortcuts.set(value === "enter" ? "enter" : "mod-enter")} /></div>;
+}
+
 export interface SettingsContentProps {
   section: SettingsSection;
   client: BatonClient; demo: boolean;
@@ -75,7 +83,7 @@ export function SettingsContent(props: SettingsContentProps) {
       <div className="settings-row"><div><strong>主题</strong><p>选择适合当前环境的界面。</p></div><Select label="主题" className="settings-select" value={props.theme} onChange={props.setTheme} options={themeOptions} /></div>
       <div className="settings-row"><div><strong>{bridge ? "由桌面端通知" : "浏览器通知"}</strong><p>{bridge ? "通知由桌面应用发送，可在系统通知设置中管理。" : "标签页隐藏时提醒新待处理事项和 Run 完成，同 Run 30 秒内合并。"}{props.notificationPermission === "denied" ? "浏览器已拒绝权限，请在站点设置中修改。" : props.notificationPermission === "unsupported" ? "此浏览器不支持 Notification。" : ""}</p></div><Toggle label="浏览器通知" checked={props.notifications} disabled={Boolean(bridge) || props.notificationPermission === "unsupported"} onChange={props.toggleNotifications} /></div>
     </section>, { description: "外观与通知。偏好保存在此浏览器。", extra: saved });
-    case "conversation": return page("会话显示", <section className="settings-card"><h2>会话显示</h2><ReasoningControls settings /><AgentMessagePreference /></section>, { description: "会话里的思考过程和 agent 消息卡片默认怎么显示。", single: true });
+    case "conversation": return page("会话显示", <section className="settings-card"><h2>会话显示</h2><SendShortcutSetting /><ReasoningControls settings /><AgentMessagePreference /></section>, { description: "设置消息发送快捷键、思考过程和 agent 消息卡片的显示方式。", single: true });
     case "policy": return page("Run 策略", <section className="settings-card"><h2>默认 Run 策略</h2>
       <div className="settings-row"><div><strong>组队后需要我确认</strong><p>agent 提交名单后，批准才会启动对应委派。</p></div><Toggle checked={policy.teamApproval !== false} onChange={teamApproval => setPolicy({ ...policy, teamApproval })} label="名单确认" /></div>
       <div className="settings-row"><div><strong>协作方式</strong><p>动态组队、预设团队或单独完成。</p></div><Select label="默认协作方式" className="settings-select" value={policy.mode ?? "dynamic"} onChange={mode => setPolicy({ ...policy, mode: mode === "solo" ? "solo" : mode === "preset" ? "preset" : "dynamic" })} options={collaborationOptions} /></div>
