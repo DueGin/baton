@@ -53,10 +53,10 @@ Get the desktop app from [Releases](https://github.com/DueGin/baton/releases): `
 The desktop app updates itself; you don't have to come back for a new installer.
 
 1. Settings → **更新** (Updates) → **检查更新** (Check for updates).
-2. When a new version is listed, **下载** (Download) fetches it from GitHub Releases and verifies it against `SHA256SUMS.txt`.
+2. When a new version is listed, **下载** (Download) fetches it from GitHub Releases and verifies it against `SHA256SUMS.txt`. On a flaky network it retries and resumes where it stopped; if it still gives up, **继续下载** (Resume) continues from the partial file.
 3. **立即安装并重启** (Install and restart) quits the app (asking first if runs are active), replaces it and reopens it. On macOS the `.app` is swapped in place; on Windows the NSIS installer runs silently. A failed swap restores the previous version.
 
-The repository is public, so no token is needed to check for or download updates. A token is optional: anonymous GitHub API calls are limited to 60 per hour per IP, and private forks/releases need one. Set it under Settings → Updates (a fine-grained token with **Contents: Read**, or a classic one with `repo`) or export `GITHUB_TOKEN` in your login shell; it is stored only in `<user data>/desktop-settings.json` (mode 0600) on your machine.
+The repository is public, so no token is needed to check for or download updates. Updates use the system proxy, and when the GitHub API is rate limited or unreachable the check falls back to the release's own `SHA256SUMS.txt` on github.com. A token is optional: anonymous GitHub API calls are limited to 60 per hour per IP, and private forks/releases need one. Set it under Settings → Updates (a fine-grained token with **Contents: Read**, or a classic one with `repo`) or export `GITHUB_TOKEN` in your login shell; it is stored only in `<user data>/desktop-settings.json` (mode 0600) on your machine.
 
 You can still install manually from [Releases](https://github.com/DueGin/baton/releases) as before; projects, runs and settings live in `~/.baton` and are kept.
 

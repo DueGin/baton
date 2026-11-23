@@ -438,19 +438,33 @@ interface BatonDesktopBridge {
 
 ### 4.15 应用内更新
 
-检查更新和下载安装包都走 GitHub API：`GET https://api.github.com/repos/DueGin/baton/releases/latest`，安装包用 asset 的 `url`（`Accept: application/octet-stream`）下载。仓库是公开的，匿名即可；令牌是可选的（GitHub 对匿名请求按 IP 限制每小时 60 次，私有仓库则必须要）。设置页「更新」里填的令牌写进 `<userData>/desktop-settings.json`（0600），也可以不填，改用登录 shell 里的 `GITHUB_TOKEN` / `GH_TOKEN`。令牌只在主进程使用，不会回到页面；接口返回 401/404 时状态里带 `needsToken`，界面提示填写。
+**网络**：所有请求走 Electron 的 `net.fetch`（Chromium 网络栈，会用系统代理）；Node 的 `fetch` 不认系统代理，只开了系统代理、没开 TUN 的用户会直连 GitHub 而失败。
+
+**检查**：先问 API `GET https://api.github.com/repos/DueGin/baton/releases/latest`（有更新说明和文件大小）。API 不可用时——被限流（匿名按出口 IP 每小时 60 次，共享代理出口很容易用光）、连不上、5xx——改用 `https://github.com/DueGin/baton/releases/latest/download/SHA256SUMS.txt`：这是最新 Release 自己的校验文件，不经过 API、不占额度。文件里本机对应的安装包名（`baton-<版本>-mac-arm64.zip`）给出版本号，它的哈希就是期望值，下载地址按 `releases/download/v<版本>/<文件名>` 拼出来；这种情况下没有更新说明和大小。两条路都失败时，错误里分别说明 API 和备用地址的原因。仓库是公开的，匿名即可；令牌是可选的（可以放宽 API 限流，私有仓库则必须要）。设置页「更新」里填的令牌写进 `<userData>/desktop-settings.json`（0600），也可以不填，改用登录 shell 里的 `GITHUB_TOKEN` / `GH_TOKEN`。令牌只在主进程使用，不会回到页面；接口返回 401/404 时状态里带 `needsToken`，界面提示填写。
 
 **状态机**（`UpdateStatus`，主进程持有，每次变化通过 `baton:update-status` 推给页面，页面同时可以在挂载时拉一次当前状态）：
 
-`idle → checking → available | current | error`；`available → downloading → downloaded → installing`。`downloading` 期间带 `progress`（0–1）、`received`、`total`。
+`idle → checking → available | current | error`；`available → downloading → downloaded → installing`。`downloading` 期间带 `progress`（0–1）、`received`、`total`，网络中断重试时带 `retrying`（第几次）。`error` 带 `failedStep`（`check` / `download` / `install`）：下载失败时界面显示「继续下载」，检查失败时显示「重试」。
 
 **纯函数**（`update.ts`，不依赖 Electron 和网络，便于测试）：
 - `parseVersion` / `compareVersions`：按数字段比较，带 `-` 的标签视为预发布，低于同版本的正式版；标签必须带 `v` 前缀（和发版流水线一致）。
 - `updateTarget(platform, arch)`：macOS arm64 → `*-mac-arm64.zip`，macOS x64 → `*-mac-x64.zip`，Windows x64 → `*-win-x64.exe`；其他平台返回空，界面提示到 Releases 手动下载。
 - `readRelease`：从最新版里挑出适合本机的 asset，并顺带找 `SHA256SUMS.txt`。
-- `parseChecksums` / `responseSize`：解析校验文件和下载大小（`content-length`，缺失时读 `content-range`）。
+- `parseChecksums` / `responseSize`：解析校验文件和整个文件的大小（优先 `content-range` 的总长，包括 416 的 `bytes */N`；否则 `content-length` 加上续传起点）。
+- `releaseFromChecksums` / `latestDownloadUrl`：从最新 Release 的 `SHA256SUMS.txt` 得出版本、下载地址和期望哈希（不经过 API）。
+- `networkReason`：把 undici 和 Chromium 的网络错误（`terminated`、`ECONNRESET`、`net::ERR_CONNECTION_CLOSED`、超时、证书、代理……）翻成「网络连接中断」「连接超时」这类说法。
 
-**下载**：`<userData>/updates/<version>/<asset>`，先清空该目录再写。有 `SHA256SUMS.txt` 时比对哈希，不一致就删掉文件并报错。
+**下载**：
+- 先写 `<userData>/updates/<version>/<asset>.part`；同目录的其他文件清掉，但保留同名的 `.part`。
+- 地址优先用 github.com 的公开下载链接（不占 API 额度）。私有仓库的公开链接返回 401/403/404，且有令牌时，改用 API 的 asset 地址并带上令牌。
+- 断点续传：每次请求都从 `.part` 的实际大小开始，带 `Range: bytes=<已下载>-`：
+  - 206：追加写入；
+  - 200（服务器忽略 Range）：从头重写；
+  - 416：说明已经下完（总长等于已下载）或文件对不上（删掉重下）。
+  - 每个数据块写盘之后才读下一块（不经过 Node 的预读缓冲），断线时已经收到的都保留在盘上。
+- 自动重试：网络错误、连接提前结束、408/429/5xx 都会重试，共 `DOWNLOAD_ATTEMPTS`（6）次，间隔从 2 秒起指数增长、最长 15 秒；45 秒收不到数据也算一次失败（中止后重试）。缺文件、其他 4xx、校验不一致不重试。
+- 次数用完时报「下载中断：<原因>，已自动重试 5 次。已下载 N%，点「继续下载」会从断点接着下」，`.part` 留着；再次下载从断点继续，App 重启后也一样。
+- 下完对 `.part` 算 SHA256，和期望值（`SHA256SUMS.txt`，或检查时已拿到的哈希）比对：一致才改名成正式文件；不一致就删掉并报错。拿不到校验文件（试 3 次）时不使用下载的文件，提示稍后继续。
 
 **安装**：
 - **macOS**：`ditto -x -k` 解压 zip，取出其中的 `.app`；确认当前 bundle 和它所在的目录可写（从 `/tmp` 或 `~/Downloads` 里运行时就不可写，此时提示手动安装；`BATON_UPDATE_BUNDLE` 可覆盖目标路径，只给更新的冒烟测试用）。然后写一个 `swap.sh`：等本进程退出 → `mv` 旧 bundle 为 `.old` → `ditto` 拷入新 bundle → 去掉 quarantine → 重新打开；拷贝失败就还原旧版本并弹系统通知。脚本以 detached 方式启动，主进程随后走正常的退出流程（有活跃 Run 仍会先确认）。

@@ -13,15 +13,13 @@
  *  - Windows: a detached .cmd waits for the pid to go away, runs the NSIS installer with /S, then
  *    reopens baton. Waiting matters: NSIS cannot replace a running .exe.
  */
-import { app, shell, type BrowserWindow } from "electron";
+import { app, net, shell, type BrowserWindow } from "electron";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, createWriteStream } from "node:fs";
-import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { chmod, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
-import { compareVersions, parseChecksums, readRelease, responseSize, updateTarget, UPDATE_REPO, type UpdateStatus } from "./update.js";
+import { compareVersions, DOWNLOAD_ATTEMPTS, latestDownloadUrl, networkReason, parseChecksums, readRelease, releaseFromChecksums, responseSize, updateTarget, UPDATE_REPO, type ReleaseAsset, type UpdateRelease, type UpdateStatus } from "./update.js";
 
 export interface UpdateManagerOptions {
   /** Environment of the login shell; `GITHUB_TOKEN` / `GH_TOKEN` are read from it. */
@@ -35,7 +33,17 @@ export interface UpdateManagerOptions {
   /** Quit once the installer has been handed the job. */
   quitForUpdate: () => void;
   log?: (message: string) => void;
+  /** First retry delay; later ones back off (default 2 s, up to 15 s). */
+  retryDelayMs?: number;
+  /** A download that receives nothing for this long is retried (default 45 s). */
+  idleTimeoutMs?: number;
 }
+/** A failure that retrying will not fix (missing file, checksum mismatch, a 4xx other than 408/429). */
+class FatalDownload extends Error {}
+class StatusError extends Error { constructor(readonly status: number) { super(`GitHub 返回 ${status}`); } }
+const retryable = (status: number): boolean => status === 408 || status === 429 || status >= 500;
+const sizeOf = async (file: string): Promise<number> => (await stat(file).catch(() => undefined))?.size ?? 0;
+const percent = (received: number, total?: number): string => total ? `${Math.floor(received / total * 100)}%` : `${Math.round(received / 1048576)} MB`;
 
 export class UpdateManager {
   private status: UpdateStatus;
@@ -47,7 +55,8 @@ export class UpdateManager {
   private downloading = false;
 
   constructor(private readonly window: () => BrowserWindow | null, private readonly options: UpdateManagerOptions) {
-    this.fetchImpl = options.fetch ?? fetch;
+    // Chromium's network stack (net.fetch) follows the system proxy; Node's fetch would ignore it.
+    this.fetchImpl = options.fetch ?? ((input, init) => net.fetch(input as string, init) as Promise<Response>);
     this.version = options.version ?? (app?.getVersion?.() || "0.0.0");
     this.target = updateTarget(options.platform ?? process.platform, options.arch ?? process.arch);
     this.log = options.log ?? (message => console.log(`[update] ${message}`));
@@ -90,71 +99,159 @@ export class UpdateManager {
 
   async check(): Promise<UpdateStatus> {
     if (this.downloading) return this.get();
-    this.set({ phase: "checking", error: undefined, needsToken: undefined, savedPath: undefined, progress: undefined, received: undefined, total: undefined });
-    try {
-      if (!this.target) return this.set({ phase: "error", error: "这个平台暂不支持应用内更新，请到 Releases 手动下载。" });
-      const token = await this.token();
-      const headers: Record<string, string> = { accept: "application/vnd.github+json", "user-agent": "baton-updater" };
-      if (token) headers.authorization = `Bearer ${token}`;
-      const response = await this.fetchImpl(`https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, { headers });
-      if (response.status === 401 || response.status === 404) return this.set({ phase: "error", needsToken: true, error: "GitHub 找不到这个仓库的最新版本。如果仓库是私有的，需要一个有读取权限的令牌（填在下面）；否则请稍后重试。" });
-      if (!response.ok) return this.set({ phase: "error", error: `GitHub 返回 ${response.status}${response.status === 403 ? "：匿名请求的调用次数可能已经用完，填一个令牌即可。" : ""}` });
-      const release = readRelease(await response.json() as unknown, this.target);
-      if (!release) return this.set({ phase: "error", error: "最新版本没有适合这台电脑的安装包。" });
-      const order = compareVersions(release.version, this.version);
-      if (order === null) return this.set({ phase: "error", error: `无法比较版本号：${release.version}` });
-      const checkedAt = new Date().toISOString();
-      this.log(`latest ${release.version}, current ${this.version}, ${order > 0 ? "update" : "up to date"}`);
-      return this.set(order > 0 ? { phase: "available", release, checkedAt } : { phase: "current", release, checkedAt });
-    } catch (error) {
-      return this.set({ phase: "error", error: `检查失败：${error instanceof Error ? error.message : String(error)}` });
+    this.set({ phase: "checking", error: undefined, needsToken: undefined, savedPath: undefined, progress: undefined, received: undefined, total: undefined, retrying: undefined, failedStep: undefined });
+    if (!this.target) return this.set({ phase: "error", failedStep: "check", error: "这个平台暂不支持应用内更新，请到 Releases 手动下载。" });
+    const token = await this.token();
+    const headers: Record<string, string> = { accept: "application/vnd.github+json", "user-agent": "baton-updater" };
+    if (token) headers.authorization = `Bearer ${token}`;
+    let api: Response | undefined, apiProblem: string | undefined;
+    try { api = await this.fetchImpl(`https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, { headers, signal: AbortSignal.timeout(20000) }); }
+    catch (error) { apiProblem = networkReason(error); }
+    if (api?.ok) {
+      try {
+        const release = readRelease(await api.json() as unknown, this.target);
+        return release ? this.decide(release, "api") : this.set({ phase: "error", failedStep: "check", error: "最新版本没有适合这台电脑的安装包。" });
+      } catch (error) { apiProblem = networkReason(error); }
     }
+    // The API is rate limited, unreachable or failing: the latest release's own SHA256SUMS.txt names it (no API quota).
+    const fallback = await this.checkWithoutApi().catch((error: unknown) => ({ release: undefined, problem: networkReason(error) }));
+    if (fallback.release) return this.decide(fallback.release, "github.com");
+    this.log(`check failed: api ${apiProblem ?? api?.status}, github.com ${fallback.problem}`);
+    if (api && (api.status === 401 || api.status === 404)) return this.set({ phase: "error", failedStep: "check", needsToken: true, error: "GitHub 找不到这个仓库的最新版本。如果仓库是私有的，需要一个有读取权限的令牌（填在下面）。" });
+    const apiPart = apiProblem ?? (api?.status === 403 || api?.status === 429 ? "接口被限流（匿名每小时 60 次）" : `接口返回 ${api?.status}`);
+    return this.set({ phase: "error", failedStep: "check", error: `检查更新失败：${apiPart}，备用地址也没有连上（${fallback.problem}）。请检查网络或代理后重试。` });
   }
 
-  /** Download the release asset, verifying it against SHA256SUMS.txt when the release ships one. */
+  private decide(release: UpdateRelease, source: string): UpdateStatus {
+    const order = compareVersions(release.version, this.version);
+    if (order === null) return this.set({ phase: "error", failedStep: "check", error: `无法比较版本号：${release.version}` });
+    this.log(`latest ${release.version} (via ${source}), current ${this.version}, ${order > 0 ? "update" : "up to date"}`);
+    return this.set({ phase: order > 0 ? "available" : "current", release, checkedAt: new Date().toISOString() });
+  }
+
+  private async checkWithoutApi(): Promise<{ release?: UpdateRelease; problem?: string }> {
+    const response = await this.fetchImpl(latestDownloadUrl(UPDATE_REPO, "SHA256SUMS.txt"), { headers: { "user-agent": "baton-updater" }, signal: AbortSignal.timeout(30000) });
+    if (!response.ok) return { problem: `github.com 返回 ${response.status}` };
+    const release = releaseFromChecksums(await response.text(), this.target!, UPDATE_REPO);
+    return release ? { release } : { problem: "最新版本没有适合这台电脑的安装包" };
+  }
+
+  /**
+   * Download the release asset into `<asset>.part`, resuming with Range requests across network failures
+   * (DOWNLOAD_ATTEMPTS tries, backing off; a stalled stream counts as a failure), then verify SHA256 and keep it.
+   * A failed run keeps the partial file: calling download() again continues from it.
+   */
   async download(): Promise<UpdateStatus> {
     const release = this.status.release;
-    if (this.downloading || !release || this.status.phase !== "available") return this.get();
+    const resumable = this.status.phase === "available" || (this.status.phase === "error" && this.status.failedStep === "download");
+    if (this.downloading || !release || !resumable) return this.get();
     this.downloading = true;
+    const directory = join(app.getPath("userData"), "updates", release.version);
+    const file = join(directory, release.asset.name), part = `${file}.part`;
+    let total = release.asset.size || undefined;
     try {
       const token = await this.token();
-      const headers: Record<string, string> = { accept: "application/octet-stream", "user-agent": "baton-updater" };
-      if (token) headers.authorization = `Bearer ${token}`;
-      const directory = join(app.getPath("userData"), "updates", release.version);
-      await rm(directory, { recursive: true, force: true }); await mkdir(directory, { recursive: true });
-      const file = join(directory, release.asset.name);
-      this.set({ phase: "downloading", progress: 0, received: 0, total: release.asset.size, error: undefined });
-      const response = await this.fetchImpl(release.asset.apiUrl, { headers, redirect: "follow" });
-      if (!response.ok || !response.body) throw new Error(`下载失败：HTTP ${response.status}`);
-      const total = responseSize(response.headers) ?? release.asset.size;
-      let received = 0, last = 0;
-      const body = Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]);
-      body.on("data", (chunk: Buffer) => {
-        received += chunk.length;
-        const now = Date.now();
-        if (now - last < 120) return;
-        last = now;
-        this.set({ phase: "downloading", progress: total ? Math.min(1, received / total) : undefined, received, total });
-      });
-      await pipeline(body, createWriteStream(file));
-      if (release.checksum) {
-        const sums = await this.fetchImpl(release.checksum.apiUrl, { headers });
-        const expected = sums.ok ? parseChecksums(await sums.text()).get(release.asset.name) : undefined;
-        if (expected) {
-          const actual = await new Promise<string>((resolve, reject) => {
-            const hash = createHash("sha256");
-            createReadStream(file).on("data", chunk => hash.update(chunk)).on("end", () => resolve(hash.digest("hex"))).on("error", reject);
-          });
-          if (actual !== expected) { await rm(file, { force: true }); throw new Error("下载的文件校验失败（SHA256 不一致），已删除。"); }
-          this.log(`sha256 ok ${actual.slice(0, 12)}`);
+      await mkdir(directory, { recursive: true });
+      for (const entry of await readdir(directory)) if (entry !== basename(part)) await rm(join(directory, entry), { recursive: true, force: true });
+      let received = await sizeOf(part);
+      this.set({ phase: "downloading", progress: total ? received / total : 0, received, total, error: undefined, failedStep: undefined, retrying: undefined, savedPath: undefined });
+      for (let attempt = 1; ; attempt++) {
+        try {
+          total = (await this.fetchPart(release.asset, part, received, token, total)) ?? total;
+          received = await sizeOf(part);
+          if (total !== undefined && received > total) { await rm(part, { force: true }); throw new Error("下载的文件比预期大，重新下载"); }
+          if (total !== undefined && received < total) throw new Error("terminated: the connection closed early");
+          break;
+        } catch (error) {
+          received = await sizeOf(part);
+          if (error instanceof FatalDownload || attempt >= DOWNLOAD_ATTEMPTS) throw error;
+          this.log(`download attempt ${attempt} failed at ${received}/${total ?? "?"}: ${networkReason(error)}`);
+          this.set({ phase: "downloading", retrying: attempt, received, total, progress: total ? received / total : undefined });
+          await new Promise((resolve) => setTimeout(resolve, Math.min(15000, (this.options.retryDelayMs ?? 2000) * 1.6 ** (attempt - 1))));
         }
       }
-      return this.set({ phase: "downloaded", progress: 1, received, total, savedPath: file });
+      const expected = release.sha256 ?? await this.expectedChecksum(release, token);
+      if (!expected) throw new FatalDownload("拿不到这个版本的校验文件（SHA256SUMS.txt），为安全起见没有使用下载的文件。请稍后点「继续下载」重试。");
+      const actual = await new Promise<string>((resolve, reject) => {
+        const hash = createHash("sha256");
+        createReadStream(part).on("data", (chunk) => hash.update(chunk)).on("end", () => resolve(hash.digest("hex"))).on("error", reject);
+      });
+      if (actual !== expected) { await rm(part, { force: true }); throw new FatalDownload("下载的文件校验失败（SHA256 不一致），已删除，请重新下载。"); }
+      this.log(`sha256 ok ${actual.slice(0, 12)}`);
+      await rename(part, file);
+      return this.set({ phase: "downloaded", progress: 1, received, total, savedPath: file, retrying: undefined });
     } catch (error) {
-      return this.set({ phase: "error", error: error instanceof Error ? error.message : String(error) });
+      const received = await sizeOf(part);
+      const message = error instanceof FatalDownload ? error.message
+        : error instanceof StatusError && !retryable(error.status) ? `下载失败：${error.message}。`
+        : `下载中断：${networkReason(error)}，已自动重试 ${DOWNLOAD_ATTEMPTS - 1} 次。已下载 ${percent(received, total)}，点「继续下载」会从断点接着下。`;
+      return this.set({ phase: "error", failedStep: "download", retrying: undefined, received, total, progress: total ? received / total : undefined, error: message });
     } finally {
       this.downloading = false;
     }
+  }
+
+  /** One request for the rest of the file (Range from `offset`), appended to `part`. Returns the whole size when known. */
+  private async fetchPart(asset: ReleaseAsset, part: string, offset: number, token: string | undefined, known?: number): Promise<number | undefined> {
+    if (known !== undefined && offset === known) return known;
+    const controller = new AbortController();
+    let idle: NodeJS.Timeout | undefined;
+    const arm = () => { clearTimeout(idle); idle = setTimeout(() => controller.abort(new Error("download stalled: timeout")), this.options.idleTimeoutMs ?? 45000); };
+    arm();
+    try {
+      const response = await this.assetResponse(asset, offset, token, controller.signal);
+      if (response.status === 416 && offset > 0) {
+        // Nothing left past `offset`: complete if that is the whole file, otherwise start over.
+        const total = responseSize(response.headers);
+        await response.body?.cancel().catch(() => undefined);
+        if (total === offset) return total;
+        await rm(part, { force: true }); throw new Error("terminated: the partial file does not match, restarting");
+      }
+      if (!response.ok || !response.body) throw retryable(response.status) ? new StatusError(response.status) : new FatalDownload(`下载失败：GitHub 返回 ${response.status}。`);
+      const resumed = offset > 0 && response.status === 206;   // a 200 means the server ignored Range: start over
+      const start = resumed ? offset : 0, total = responseSize(response.headers, start);
+      let received = start, last = 0;
+      // Read the web stream directly (no read-ahead buffer) and put each chunk on disk before asking for the next:
+      // when the connection drops, everything received so far is kept for the next Range request.
+      const reader = response.body.getReader();
+      const handle = await open(part, resumed ? "a" : "w");
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          await handle.write(value); received += value.length; arm();
+          const now = Date.now(); if (now - last < 120) continue; last = now;
+          this.set({ phase: "downloading", retrying: undefined, progress: total ? Math.min(1, received / total) : undefined, received, total });
+        }
+      } finally { await handle.close(); reader.releaseLock(); }
+      return total;
+    } finally { clearTimeout(idle); }
+  }
+
+  /** The asset from github.com (public, no API quota); a private repository falls back to the API with the token. */
+  private async assetResponse(asset: ReleaseAsset, offset: number, token: string | undefined, signal: AbortSignal): Promise<Response> {
+    const headers: Record<string, string> = { accept: "application/octet-stream", "user-agent": "baton-updater", ...(offset > 0 ? { range: `bytes=${offset}-` } : {}) };
+    if (asset.downloadUrl) {
+      const response = await this.fetchImpl(asset.downloadUrl, { headers, signal });
+      if (!(token && asset.apiUrl && [401, 403, 404].includes(response.status))) return response;
+      await response.body?.cancel().catch(() => undefined);
+    }
+    if (!asset.apiUrl) throw new FatalDownload("这个版本没有可下载的地址。");
+    return this.fetchImpl(asset.apiUrl, { headers: { ...headers, ...(token ? { authorization: `Bearer ${token}` } : {}) }, signal });
+  }
+
+  /** The asset's hash from the release's SHA256SUMS.txt (a few tries: it is tiny, the network may not be). */
+  private async expectedChecksum(release: UpdateRelease, token: string | undefined): Promise<string | undefined> {
+    if (!release.checksum) return undefined;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const response = await this.assetResponse(release.checksum, 0, token, AbortSignal.timeout(30000));
+        if (response.ok) return parseChecksums(await response.text()).get(release.asset.name);
+        if (!retryable(response.status)) return undefined;
+      } catch { /* retried below */ }
+      await new Promise((resolve) => setTimeout(resolve, this.options.retryDelayMs ?? 2000));
+    }
+    return undefined;
   }
 
   /**
@@ -172,8 +269,8 @@ export class UpdateManager {
       else throw new Error("这个平台不支持应用内安装。");
       return this.get();
     } catch (error) {
-      if (error instanceof InstallUnsupported) return this.set({ phase: "error", error: error.message });
-      return this.set({ phase: "error", error: `安装失败：${error instanceof Error ? error.message : String(error)}` });
+      if (error instanceof InstallUnsupported) return this.set({ phase: "error", failedStep: "install", error: error.message });
+      return this.set({ phase: "error", failedStep: "install", error: `安装失败：${error instanceof Error ? error.message : String(error)}` });
     }
   }
 
