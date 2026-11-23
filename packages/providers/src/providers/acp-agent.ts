@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { ClientSideConnection, PROTOCOL_VERSION, ndJsonStream, type Client, type ContentBlock, type McpServer, type RequestPermissionRequest, type RequestPermissionResponse, type SessionNotification, type CreateTerminalRequest, type TerminalOutputResponse, type TerminalExitStatus } from "@agentclientprotocol/sdk";
-import type { AgentClient, AgentImageRef, AgentPersistenceHandle, AgentPromptInput, AgentSessionConfig, ClientOptions, ProviderCatalog, ToolCallTimelineItem } from "../agent-sdk-types.js";
+import type { AgentClient, AgentImageRef, AgentPersistenceHandle, AgentPromptInput, AgentSessionConfig, AgentSlashCommand, ClientOptions, ProviderCatalog, ToolCallTimelineItem } from "../agent-sdk-types.js";
 import { OrderedTasks, findImageBlocks, imageMarkdown, imageNote, readPromptImage, saveProviderImages } from "../images.js";
 import { ProviderSession, errorText, record, text } from "../session.js";
 import { spawnProcess } from "../process.js";
@@ -18,6 +18,7 @@ import { type AcpAgentSpec, modeFlags, scrubAcpEnv, staticAcpCatalog } from "../
 import { externalEnv } from "../process.js";
 import { acpDialect } from "./acp-dialect.js";
 import { formElicitation, cursorQuestion } from "./acp-elicitation.js";
+import { commandDeadline, normalizeCommands } from "./slash-commands.js";
 export interface AcpClientOptions extends ClientOptions { spec?: AcpAgentSpec }
 /** ACP prompt blocks (Paseo toACPContentBlocks): image blocks only when the agent's initialize
  * advertised promptCapabilities.image, else the path note. The system prompt leads the first prompt. */
@@ -52,6 +53,7 @@ export class ACPAgentClient implements AgentClient {
     constructor(protected readonly options: AcpClientOptions) { }
     async createSession(config: AgentSessionConfig): Promise<ACPSession> { return ACPSession.open(this.options, config); }
     async resumeSession(handle: AgentPersistenceHandle, config: AgentSessionConfig): Promise<ACPSession> { return ACPSession.open(this.options, config, handle); }
+    async listCommands(_cwd: string): Promise<AgentSlashCommand[]> { return []; }
     async fetchCatalog(): Promise<ProviderCatalog> {
         await mkdir(this.options.home, { recursive: true });
         const cwd = await mkdtemp(join(this.options.home, "catalog-acp-"));
@@ -84,6 +86,9 @@ class ACPSession extends ProviderSession implements Client {
     /** initialize advertised promptCapabilities.image. */
     private imagePrompts = false;
     private inbound = new OrderedTasks();
+    private commands?: AgentSlashCommand[];
+    private wakeCommands?: () => void;
+    private waitingForCommands?: Promise<void>;
     detectedCapabilities = { steer: false, resume: false, reasoning: true, mcp: false, images: false };
     private terminals = new Map<string, TerminalSnapshot & {
         child: ChildProcessWithoutNullStreams;
@@ -199,6 +204,14 @@ class ACPSession extends ProviderSession implements Client {
         }
     }
     override getPersistence(): AgentPersistenceHandle | null { return this.canResume ? super.getPersistence() : null; }
+    async listCommands(): Promise<AgentSlashCommand[]> {
+        if (!this.commands && !this.closed) {
+            this.waitingForCommands ??= commandDeadline(() => new Promise<void>(resolve => { this.wakeCommands = resolve; }), undefined, 2000);
+            await this.waitingForCommands;
+            this.wakeCommands = undefined;
+        }
+        return this.commands?.map(command => ({ ...command })) ?? [];
+    }
     private readCatalog(response: Record<string, unknown>): void {
         const modes = record(response.modes);
         const models = record(response.models);
@@ -251,6 +264,15 @@ class ACPSession extends ProviderSession implements Client {
             return;
         const update = record(notification.update);
         switch (update.sessionUpdate) {
+            case "available_commands_update": {
+                if (Array.isArray(update.availableCommands)) {
+                    this.commands = normalizeCommands(update.availableCommands.map(record).map(command => ({
+                        name: text(command.name), description: text(command.description), argumentHint: text(record(command.input).hint), kind: "command",
+                    })));
+                    this.wakeCommands?.();
+                }
+                break;
+            }
             case "agent_message_chunk":
             case "agent_thought_chunk": {
                 const content = record(update.content);
@@ -477,6 +499,7 @@ class ACPSession extends ProviderSession implements Client {
             return;
         }
         this.closed = true;
+        this.wakeCommands?.();
         this.finish("canceled");
         await terminateWithTreeKill(this.child, { gracefulTimeoutMs: 500, forceTimeoutMs: 500 });
     }

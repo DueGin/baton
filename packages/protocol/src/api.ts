@@ -331,6 +331,46 @@ export interface ListDirsResponse {
   dirs: Array<{ name: string; path: string; isGitRepo: boolean; isProject: boolean }>;
 }
 
+// ───────────────────────────── composer: "/" commands and "@" files ─────────────────────────────
+
+/**
+ * A slash command / skill / prompt the agent accepts (DESIGN §8.3 "输入框补全"). The composer inserts
+ * `/${name} ` and sends it as plain text; the provider (or its baton adapter) turns it into the
+ * agent's native invocation.
+ */
+export interface AgentCommand {
+  /** Without the leading "/", exactly as the user types it (e.g. "review", "skill:pdf", "prompts:fix"). */
+  name: string;
+  description?: string;
+  /** e.g. "<file> [focus]". */
+  argumentHint?: string;
+  /** Display grouping only. */
+  kind?: "command" | "skill" | "prompt" | "builtin";
+}
+
+/**
+ * GET /api/commands?nodeId=<id>            — a session's commands (live session when open)
+ * GET /api/commands?agentId=<id>&cwd=<abs> — before a node exists (new run form)
+ * Never fails for an agent that lists nothing: `commands: []`, `source: "none"`.
+ */
+export interface ListCommandsResponse {
+  commands: AgentCommand[];
+  /** "session": from the live provider session; "scan": discovered without a session (files on disk). */
+  source: "session" | "scan" | "none";
+}
+
+/**
+ * GET /api/files/search?cwd=<abs>&q=<text>&limit=<n> — "@" file completion. `cwd` must be an
+ * existing directory. Paths are relative to cwd with "/" separators; directories end in "/".
+ * Respects .gitignore inside git repos; skips .git and node_modules otherwise. Default limit 50, max 200.
+ */
+export interface SearchFilesResponse {
+  cwd: string;
+  files: Array<{ path: string; kind: "file" | "dir" }>;
+  /** More matches exist than were returned. */
+  truncated: boolean;
+}
+
 // ───────────────────────────── pull requests ─────────────────────────────
 
 /** GET /api/prs?projectId=&state=open|all — across runs (default: open + draft). */

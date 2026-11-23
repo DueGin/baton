@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { docIsEmpty, docToMarkdown, escapeText, IMAGE_NODE, markdownToDoc, pastedTextDoc, pasteKind, RAW_NODE } from "./composer-markdown.js";
+import { docIsEmpty, docToMarkdown, escapeText, IMAGE_NODE, markdownToDoc, pastedTextDoc, pasteKind, RAW_NODE, textareaSuggestion } from "./composer-markdown.js";
 
 const roundTrip = (markdown: string) => docToMarkdown(markdownToDoc(markdown));
 const paragraph = (...content: object[]) => ({ type: "doc", content: [{ type: "paragraph", content }] });
@@ -25,6 +25,21 @@ describe("composer markdown", () => {
     const literal = "fix my_module_name.py if a < b && c > d, glob src/**/*.ts, C:\\Users\\me, 1+1=2";
     expect(docToMarkdown(paragraph(text(literal)))).toBe(literal);
     expect(docToMarkdown(paragraph(text("snake_case_name 和 2 * 3 * 4")))).toBe("snake_case_name 和 2 * 3 * 4");
+  });
+  it("keeps slash commands and file mentions as plain text", () => {
+    for (const example of ["/review src/a_b.ts", "@packages/web/src/App.tsx", '@"a b.txt"']) {
+      expect(roundTrip(example)).toBe(example);
+      expect(docToMarkdown(paragraph(text(example)))).toBe(example);
+    }
+    expect(docToMarkdown(paragraph(text("/prompts:fix ")))).toBe("/prompts:fix");
+    expect(docToMarkdown(paragraph(text("/review src/a_b.ts ")))).toBe("/review src/a_b.ts");
+    expect(docToMarkdown(paragraph(text('@"a b_file.txt" ')))).toBe('@"a b_file.txt"');
+  });
+  it("skips file suggestions inside Markdown code in the new-run task field", () => {
+    for (const prefix of ["```text\n@src", "~~~\n@src", "    @src"]) expect(textareaSuggestion(prefix, prefix.length)).toBeNull();
+    const text = "`example @src`\n@README";
+    expect(textareaSuggestion(text, text.indexOf("`", 1))).toBeNull();
+    expect(textareaSuggestion(text, text.length)?.query).toBe("README");
   });
   it("escapes only when the plain text would otherwise change meaning", () => {
     expect(docToMarkdown(paragraph(text("*不是斜体*")))).toBe("\\*不是斜体\\*");

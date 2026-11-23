@@ -17,7 +17,7 @@ export interface ComposerStatus { empty: boolean; uploading: boolean; failed: bo
 
 /** The editor's empty state as plain markup: shown while the editor loads (and when rendering on the server). */
 export function ComposerPlaceholder({ placeholder, disabled }: { placeholder: string; disabled: boolean }) {
-  return <div className="composer-editor-scroll"><div className="composer-editor" role="textbox" aria-multiline="true" aria-label="消息" aria-placeholder={placeholder} aria-disabled={disabled || undefined}><p className="is-editor-empty" data-placeholder={placeholder} /></div></div>;
+  return <div className="composer-editor-scroll"><div className="composer-editor" role="textbox" aria-multiline="true" aria-label="消息" aria-placeholder={placeholder} aria-disabled={disabled || undefined} aria-expanded={false}><p className="is-editor-empty" data-placeholder={placeholder} /></div></div>;
 }
 
 // TipTap and ProseMirror load with the first conversation, not with the console.

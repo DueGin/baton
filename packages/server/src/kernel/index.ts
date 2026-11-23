@@ -15,7 +15,8 @@ import type { TitleNaming } from "../titles/index.js";
 import type { ProcessSource } from "../background/attribution.js";
 import { Projects } from "../projects/index.js";
 import { nativePrompts, nativeUpdatedInput } from "./questions.js";
-import type { QuestionRecord, UpdateNodeConfigRequest, UpdateNodeConfigResponse } from "@baton/protocol";
+import type { AgentCommand, ListCommandsResponse, QuestionRecord, UpdateNodeConfigRequest, UpdateNodeConfigResponse } from "@baton/protocol";
+import { AsyncCache } from "../cache.js";
 import type { Checkpoints } from "../checkpoints/index.js";
 import { Rollbacks } from "./rollback.js";
 
@@ -29,6 +30,18 @@ export function isBatonToolPermission(request: PermissionRequest): boolean {
 }
 export const DEFAULT_POLICY: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "dynamic", teamApproval: true, maxTeamSize: 5, stallMinutes: 10, prFeedback: "notify", leadReview: false };
 const now = (): string => new Date().toISOString();
+async function listCommands(load: () => Promise<AgentCommand[]>, source: "session" | "scan"): Promise<ListCommandsResponse> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const raw = await Promise.race([load(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Command listing timed out")), 5_000); })]);
+    const commands = new Map<string, AgentCommand>();
+    for (const command of raw) {
+      const name = command.name.trim().replace(/^\/+/, "").trim();
+      if (name && !commands.has(name)) commands.set(name, { ...command, name });
+    }
+    return { commands: [...commands.values()], source: commands.size ? source : "none" };
+  } finally { clearTimeout(timer); }
+}
 const active = (status: string): boolean => ["starting", "running", "waiting_permission", "queued"].includes(status);
 const sessionRole = (node: NodeRecord): string | undefined => node.role ?? (node.parentNodeId === null ? "lead" : undefined);
 const done = (d: DelegationRecord): boolean => ["completed", "failed", "canceled", "replaced"].includes(d.status);
@@ -73,6 +86,7 @@ interface Runtime {
 export const MESSAGE_CHAIN_LIMIT = 10;
 export interface KernelOptions { baseUrl: string; maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; askTimeoutMinutes?: number; titles?: TitleNaming; platform?: NodeJS.Platform; attachments?: Attachments; /** Rollback checkpoints (DESIGN §4.13); absent = no checkpoints. */ checkpoints?: Checkpoints }
 export class Kernel {
+  private commandScans = new AsyncCache<ListCommandsResponse>(30_000, 128);
   private runtimes = new Map<string, Runtime>();
   private identities = new Map<string, string>();
   private deliveryTimers = new Map<string, NodeJS.Timeout>();
@@ -196,6 +210,26 @@ export class Kernel {
     const entries = await this.registry.detect({ force });
     const nodes = this.store.list().flatMap((r) => this.store.snapshot(r.id).nodes);
     return entries.map((a) => ({ ...a, load: nodes.filter((n) => n.agentId === a.id && active(n.status)).length }));
+  }
+  async commands(nodeId: string): Promise<ListCommandsResponse> {
+    const node = this.store.node(nodeId), runtime = this.runtimes.get(nodeId);
+    const session = runtime && !runtime.closed && !runtime.closing ? runtime.session : undefined;
+    if (session?.listCommands) {
+      try {
+        const result = await listCommands(session.listCommands.bind(session), "session");
+        if (result.commands.length) return result;
+      }
+      catch { /* fall back to disk */ }
+    }
+    return this.commandsFor(node.agentId, node.cwd);
+  }
+  async commandsFor(agentId: string, cwd: string): Promise<ListCommandsResponse> {
+    const driver = this.registry.get(agentId), scan = driver?.listCommands?.bind(driver);
+    if (scan) {
+      try { return await this.commandScans.get(JSON.stringify([agentId, cwd]), () => listCommands(() => scan(cwd), "scan")); }
+      catch { /* no commands available */ }
+    }
+    return { commands: [], source: "none" };
   }
   recover(): void {
     for (const notice of this.store.notices()) this.scheduleDelivery(notice.nodeId);

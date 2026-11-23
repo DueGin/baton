@@ -1,15 +1,18 @@
-import { useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type Ref } from "react";
+import { useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type Ref } from "react";
 import { EditorContent, useEditor, type Editor, type JSONContent } from "@tiptap/react";
 import { Slice, type Node as PMNode, type Schema } from "@tiptap/pm/model";
 import type { BatonClient } from "../api.js";
 import { docIsEmpty, docToMarkdown, IMAGE_NODE, markdownToDoc, pastedTextDoc } from "../lib/composer-markdown.js";
 import { acceptImages, attachmentName, composerUploads } from "../lib/composer-uploads.js";
-import { isSendKey, sendShortcuts } from "../lib/send-shortcut.js";
+import { sendShortcuts } from "../lib/send-shortcut.js";
+import { SuggestionSession } from "../lib/composer-suggest.js";
+import { composerKeyDown, editorSuggestion, editorSuggestionReplacement } from "../lib/composer-suggest-editor.js";
 import { imageSource, useImageContext, useImageUrl } from "../lib/images.js";
 import { composerExtensions, imageIdentity, ImageOrderContext, imageStatus, type ComposerImageStatus } from "./composer-extensions.js";
 import { ImageLightbox } from "./Images.js";
 import { Icon } from "./common.js";
 import { ComposerPlaceholder, type ComposerHandle, type ComposerStatus } from "./composer-shell.js";
+import { SuggestionMenu, suggestionAria } from "./SuggestionMenu.js";
 export type { ComposerHandle, ComposerStatus } from "./composer-shell.js";
 
 
@@ -61,8 +64,8 @@ function cleanPastedHTML(html: string): string {
   return doc.body.innerHTML;
 }
 
-export function Composer({ ref, nodeId, client, placeholder, disabled, imagesEnabled, onSend, onStatus }: {
-  ref?: Ref<ComposerHandle>; nodeId: string; client: BatonClient; placeholder: string; disabled: boolean; imagesEnabled: boolean;
+export function Composer({ ref, nodeId, cwd, client, placeholder, disabled, imagesEnabled, onSend, onStatus }: {
+  ref?: Ref<ComposerHandle>; nodeId: string; cwd: string; client: BatonClient; placeholder: string; disabled: boolean; imagesEnabled: boolean;
   onSend: (markdown: string) => void; onStatus: (status: ComposerStatus) => void;
 }) {
   const props = useRef({ client, placeholder, disabled, imagesEnabled, onSend });
@@ -84,6 +87,15 @@ export function Composer({ ref, nodeId, client, placeholder, disabled, imagesEna
 
   // Paste/drop handlers are created once; they reach the current editor and props through refs.
   const actions = useRef({ submit: () => undefined as void, attach: (_files: File[], _at?: number) => undefined as void });
+  const [suggestions] = useState(() => new SuggestionSession());
+  const suggestion = useSyncExternalStore(suggestions.subscribe, suggestions.snapshot, suggestions.snapshot);
+  const listId = useId();
+  const source = useRef({ client, cwd, commandQuery: { nodeId } });
+  source.current = { client, cwd, commandQuery: { nodeId } };
+  const composing = useRef(false);
+  const syncSuggestions = (view: Editor["view"]) => {
+    suggestions.update(!props.current.disabled && view.hasFocus() && !view.composing && !composing.current ? editorSuggestion(view.state) : null, source.current);
+  };
   const shiftHeld = useRef(false);
   const options = useMemo(() => ({
     immediatelyRender: typeof window !== "undefined",
@@ -94,19 +106,17 @@ export function Composer({ ref, nodeId, client, placeholder, disabled, imagesEna
     editable: !disabled,
     editorProps: {
       attributes: () => ({ class: "composer-editor", role: "textbox", "aria-multiline": "true", "aria-label": "消息", "aria-placeholder": props.current.placeholder, ...(props.current.disabled ? { "aria-disabled": "true" } : {}) }),
-      handleDOMEvents: { keydown: (_view: unknown, event: KeyboardEvent) => { shiftHeld.current = event.shiftKey; return false; } },
-      handleKeyDown: (view: Editor["view"], event: KeyboardEvent) => {
-        const shortcut = sendShortcuts.getSnapshot();
-        if (view.composing || !isSendKey(event, shortcut)) return false;
-        if (shortcut === "enter") {
-          const { $from } = view.state.selection;
-          for (let depth = $from.depth; depth > 0; depth--) {
-            const type = $from.node(depth).type;
-            if (type.spec.code || type.name === "listItem" || type.name === "taskItem") return false;
-          }
-        }
-        actions.current.submit(); return true;
+      handleDOMEvents: {
+        keydown: (_view: unknown, event: KeyboardEvent) => { shiftHeld.current = event.shiftKey; return false; },
+        compositionstart: () => { composing.current = true; suggestions.update(null, source.current); return false; },
+        compositionend: (view: Editor["view"]) => {
+          composing.current = false;
+          queueMicrotask(() => { if (!view.isDestroyed) syncSuggestions(view); });
+          return false;
+        },
       },
+      handleKeyDown: (view: Editor["view"], event: KeyboardEvent) =>
+        composerKeyDown(view, event, suggestions, composing.current, sendShortcuts.getSnapshot(), actions.current.submit),
       handlePaste: (view: Editor["view"], event: ClipboardEvent) => {
         const data = event.clipboardData; if (!data) return false;
         const files = imageFiles(data.files); const text = data.getData("text/plain");
@@ -132,6 +142,8 @@ export function Composer({ ref, nodeId, client, placeholder, disabled, imagesEna
         return true;
       },
     },
+    onTransaction: ({ editor }: { editor: Editor }) => syncSuggestions(editor.view),
+    onBlur: () => { composing.current = false; suggestions.update(null, source.current); },
     onUpdate: ({ editor }: { editor: Editor }) => {
       const json = editor.getJSON();
       if (docIsEmpty(json) && !draftImages(json).length) drafts.delete(nodeId); else drafts.set(nodeId, json);
@@ -141,6 +153,17 @@ export function Composer({ ref, nodeId, client, placeholder, disabled, imagesEna
   }), []);
   const editor = useEditor(options, []);
 
+  useEffect(() => suggestions.close, [suggestions]);
+  useLayoutEffect(() => {
+    if (editor && !editor.isDestroyed) syncSuggestions(editor.view);
+  }, [editor, client, cwd, disabled]);
+  useLayoutEffect(() => {
+    if (!editor || editor.isDestroyed) return;
+    for (const [name, value] of Object.entries(suggestionAria(listId, suggestion))) {
+      if (value === undefined) editor.view.dom.removeAttribute(name);
+      else editor.view.dom.setAttribute(name, String(value));
+    }
+  }, [editor, listId, suggestion]);
   useEffect(() => { if (editor && editor.isEditable === disabled) editor.setEditable(!disabled, false); }, [editor, disabled]);
   // The placeholder plugin reads the current text on the next view update.
   useEffect(() => { if (editor && !editor.isDestroyed) editor.view.dispatch(editor.state.tr.setMeta("composerPlaceholder", placeholder)); }, [editor, placeholder]);
@@ -214,6 +237,20 @@ export function Composer({ ref, nodeId, client, placeholder, disabled, imagesEna
       {editor ? <EditorContent editor={editor} className="composer-editor-scroll" />
         : <ComposerPlaceholder placeholder={placeholder} disabled={disabled} />}
     </ImageOrderContext>
+    {editor && !disabled && suggestion && <SuggestionMenu id={listId} state={suggestion} session={suggestions}
+      caret={() => {
+        if (editor.isDestroyed) return null;
+        const view = editor.view;
+        const caret = view.coordsAtPos(view.state.selection.to);
+        const scroll = view.dom.parentElement?.getBoundingClientRect();
+        return scroll && (caret.bottom < scroll.top || caret.top > scroll.bottom) ? null : caret;
+      }}
+      accept={index => suggestions.choose(index, (match, text) => {
+        const view = editor.view;
+        if (view.composing || composing.current) return;
+        const transaction = editorSuggestionReplacement(view.state, match, text);
+        if (transaction) { view.focus(); view.dispatch(transaction.scrollIntoView()); }
+      })} />}
   </div>;
 }
 

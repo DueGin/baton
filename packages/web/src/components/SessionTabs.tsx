@@ -53,7 +53,7 @@ export function SessionTabs({ snapshot, selected, select, inspect, showTopology 
             if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); open(event.currentTarget, node.id); return; }
             const next = event.key === "ArrowLeft" ? (index - 1 + nodes.length) % nodes.length : event.key === "ArrowRight" ? (index + 1) % nodes.length : event.key === "Home" ? 0 : event.key === "End" ? nodes.length - 1 : -1;
             if (next >= 0) { event.preventDefault(); tabs.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus(); select(nodes[next]!.id); }
-          }}><AgentMark agent={node.agentId} small /><span className="session-tab-name">{label}</span><span aria-hidden="true" className={`status status-${status}`}><i className="status-dot" /></span></button>
+          }}><AgentMark agent={node.agentId} small /><span className="session-tab-name">{label}</span><span aria-hidden="true" className={`status status-${status}`} data-status={status}><i className="status-dot" /></span></button>
         <button type="button" className="session-tab-more" tabIndex={active ? 0 : -1} aria-label={`${label}的会话操作`} title="会话操作" aria-haspopup="menu" aria-expanded={anchor?.id === node.id}
           onClick={event => open(event.currentTarget, node.id)}>⋯</button>
       </div>;

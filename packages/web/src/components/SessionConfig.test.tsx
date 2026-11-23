@@ -30,6 +30,21 @@ describe("session controls", () => {
     expect([...html.matchAll(/id="session-tab-([^"]+)"/g)].map(match => match[1])).toEqual([root.id, earlier.id, later.id]);
     expect(html).toContain('class="session-tab is-replaced"'); expect(html).toContain('aria-selected="true" tabindex="0"');
   });
+  it("marks running, completed, and idle session dots separately and labels their tabs", async () => {
+    const snapshot = await new DemoClient(() => now).run("run-demo");
+    const root = snapshot.nodes.find(node => node.id === snapshot.run.rootNodeId)!;
+    const states = { running: "运行中", completed: "已完成", idle: "空闲" } as const;
+    const nodes = (["running", "completed", "idle"] as const).map(status => ({ ...root, id: status, title: status, role: status, status }));
+    const html = renderToStaticMarkup(<SessionTabs snapshot={{ ...snapshot, nodes, delegations: [], questions: [], escalations: [] }} selected="running" select={() => undefined} inspect={() => undefined} showTopology={() => undefined} />);
+    const tabs = [...html.matchAll(/<button[^>]*role="tab"[^>]*>[\s\S]*?<\/button>/g)].map(match => match[0]);
+    expect(tabs).toHaveLength(nodes.length);
+    for (const { status } of nodes) {
+      const tab = tabs.find(button => button.includes(`id="session-tab-${status}"`));
+      expect(tab).toContain(`aria-label="${status} · ${states[status]}"`);
+      expect(tab).toContain(`title="${root.agentId} · ${status} · ${states[status]}"`);
+      expect(tab).toContain(`class="status status-${status}" data-status="${status}"`);
+    }
+  });
   it("renders idle child waiting without a timer or thinking dots", async () => {
     const snapshot = await new DemoClient(() => now).run("run-questions");
     const html = renderToStaticMarkup(<TurnIndicator snapshot={snapshot} phase={{ kind: "idle_children", label: "空闲 · 等待 1 个子任务，结果送达后自动继续", related: [snapshot.nodes[1]!.id] }} inspect={() => undefined} />);

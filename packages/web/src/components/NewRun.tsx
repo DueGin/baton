@@ -7,8 +7,10 @@ import { AgentFields, CandidatesEditor, MembersEditor, Modal } from "./TeamForms
 import { Select } from "./Select.js";
 import { candidateConfig, cleanCandidate, cleanMember, collaborationLabels, defaultAgentSpec, validateCandidates, validateMembers } from "../lib/teams.js";
 import { projectRunPayload, readProjectAgent, saveProjectAgent, subdirectoryPath } from "../lib/projects.js";
+import type { BatonClient } from "../api.js";
+import { SuggestTextarea } from "./SuggestTextarea.js";
 
-export function NewRun({ agents, presets, defaults, close, create, busy, demo, error, projects, initialProjectId, selectProject, addProject }: { agents: AgentEntry[]; presets: TeamPreset[]; defaults: RunPolicy; close: () => void; create: (request: CreateRunRequest) => Promise<boolean>; busy: boolean; demo: boolean; error: string | null; projects: ProjectSummary[]; initialProjectId: string | null; selectProject: (id: string) => void; addProject: () => void }) {
+export function NewRun({ agents, presets, defaults, close, create, busy, client, error, projects, initialProjectId, selectProject, addProject }: { agents: AgentEntry[]; presets: TeamPreset[]; defaults: RunPolicy; close: () => void; create: (request: CreateRunRequest) => Promise<boolean>; busy: boolean; client: BatonClient; error: string | null; projects: ProjectSummary[]; initialProjectId: string | null; selectProject: (id: string) => void; addProject: () => void }) {
   const availableProjects = projects.filter(project => !project.archived);
   const [projectId, setProjectId] = useState(availableProjects.find(project => project.id === initialProjectId)?.id ?? availableProjects[0]?.id ?? "");
   const [lead, setLead] = useState(() => readProjectAgent(localStorage, projectId) ?? defaultAgentSpec(agents));
@@ -26,7 +28,9 @@ export function NewRun({ agents, presets, defaults, close, create, busy, demo, e
   const available = agents.find(agent => agent.id === chosenLead?.agentId);
   const issues = mode === "dynamic" ? [...validateMembers(members), ...unavailableMembers(agents, members)] : mode === "preset" ? unavailableMembers(agents, preset?.members ?? []) : [];
   if (mode !== "solo") issues.push(...validateCandidates(candidates));
-  const subdirError = project ? subdirectoryPath(project.path, subdir).error : undefined;
+  const workdir = project ? subdirectoryPath(project.path, subdir) : {};
+  const subdirError = workdir.error;
+  const cwd = project?.exists && !subdirError ? workdir.cwd ?? project.path : "";
   if (subdirError) issues.push(subdirError);
   if (!project?.exists) issues.push(project ? "项目目录不存在" : "请选择项目");
   if ((mode === "preset" ? preset?.members.length ?? 0 : members.length) > (advanced.maxTeamSize ?? defaults.maxTeamSize ?? 5)) issues.push("成员数超过最大团队成员数，请调整高级策略或名单");
@@ -37,10 +41,11 @@ export function NewRun({ agents, presets, defaults, close, create, busy, demo, e
     {mode === "preset" ? <><label className="form-field">团队预设<Select label="团队预设" value={presetId} onChange={setPreset} placeholder="选择预设团队" options={presets.map(entry => ({ value: entry.id, label: `${entry.name} · ${entry.members.length} roles${entry.candidates?.length ? ` · ${entry.candidates.length} 候选` : ""}`, icon: <AgentMark agent={entry.lead.agentId} small />, ...(entry.description ? { description: entry.description } : {}) }))} /></label>{preset ? <div className="new-run-lead-summary"><AgentMark agent={preset.lead.agentId} /><div><strong>Lead · {preset.lead.agentId}</strong><code>{preset.lead.model ?? "默认模型"}</code><span>{preset.lead.modeId ?? "default"} · {preset.lead.thinking ?? "default"}</span></div><p>{preset.description}</p><div className="catalog-tags">{preset.members.map(member => <span className="tag" key={member.role}>{member.role} · {member.agentId}</span>)}</div>{preset.candidates?.length ? <div className="new-run-candidates"><span className="eyebrow">候选成员 · 主导者按任务自主招入</span><ul>{preset.candidates.map((candidate, index) => <li key={index}><AgentMark agent={candidate.agentId} small /><code>{candidateConfig(candidate)}</code><span>{candidate.description ?? "未填写描述"}</span></li>)}</ul></div> : null}</div> : <p className="muted">先在左侧「团队」页创建预设，再回到这里使用。</p>}</> : <><h3 className="form-section-title">{mode === "solo" ? "执行 Agent" : "主导者 Lead"}</h3><AgentFields agents={agents} value={lead} onChange={setLead} />{mode === "dynamic" && <details className="seed-members"><summary>预先指定成员 <span>{members.length ? `${members.length} 个角色` : "可选"}</span></summary><p className="muted">主导者可继续追加或替换成员。职责请写清范围。</p><MembersEditor agents={agents} members={members} onChange={setMembers} /></details>}</>}
     {mode !== "solo" && <details className="seed-members new-run-candidates" open={candidates.length > 0}><summary>候选成员 <span>{candidates.length ? `${candidates.length} 个候选` : "可选"}</span></summary><p className="muted">{mode === "preset" ? "在预设的候选之外再加几个。" : "不用填角色，"}主导者会按任务匹配模型和描述，自己决定招谁、担任什么角色，招入不需要你再确认名单。</p><CandidatesEditor agents={agents} candidates={candidates} onChange={setCandidates} /></details>}
     {chosenLead && (!available || available.status !== "ready" || !available.enabled) && <p className="error-text">所选 lead agent 当前不可用，请重新检测或修改配置。</p>}
-    <label className="form-field">任务<textarea autoFocus required rows={4} value={prompt} onChange={event => setPrompt(event.target.value)} placeholder="描述目标、约束与验收标准…" /></label>
+    <label className="form-field">任务<SuggestTextarea autoFocus required rows={4} value={prompt} setValue={setPrompt} aria-label="任务" placeholder="描述目标、约束与验收标准…"
+      source={{ client, cwd, commandQuery: chosenLead?.agentId && cwd ? { agentId: chosenLead.agentId, cwd } : null }} /></label>
     {mode === "dynamic" && <div className="policy-row"><Toggle checked={teamApproval} onChange={setTeamApproval} label="组队后需要我确认" /><p>主导者提交名单后暂停，批准或修改名单后成员才开始工作。</p></div>}<div className="policy-row"><Toggle checked={autoApprove} onChange={setAutoApprove} label="自动批准权限请求" /><p>授权动作会记录为 policy。默认由你逐次确认。</p></div>
     <details className="advanced-project-dir"><summary>高级 · 项目内子目录（可选）</summary><label className="form-field">相对子目录<input aria-label="项目内子目录" value={subdir} onChange={event => setSubdir(event.target.value)} placeholder="packages/web" /><span className="field-hint">留空使用 {project?.path ?? "项目根目录"}；不能越出项目。</span></label></details><AdvancedPolicy policy={{ ...defaults, ...advanced, mode }} change={patch => setAdvanced(current => ({ ...current, ...patch }))} />
-    {issues.length > 0 && <div className="form-errors">{issues.join("；")}</div>}{demo && <div className="demo-form-note">DEMO · 本次 Run 在浏览器中模拟运行。</div>}{error && <div className="error-panel" role="alert">{error}</div>}
+    {issues.length > 0 && <div className="form-errors">{issues.join("；")}</div>}{client.demo && <div className="demo-form-note">DEMO · 本次 Run 在浏览器中模拟运行。</div>}{error && <div className="error-panel" role="alert">{error}</div>}
     <div className="dialog-footer"><button className="button" type="button" onClick={close}>取消</button><button className="button primary" disabled={busy || !chosenLead?.agentId || available?.status !== "ready" || !available.enabled || !prompt.trim() || !project || issues.length > 0}>{busy ? "创建中…" : "创建 Run"}<Icon name="arrow" size={15} /></button></div>
   </form></Modal>;
 }

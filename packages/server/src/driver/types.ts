@@ -9,6 +9,7 @@
  * deliver events for one session in order.
  */
 import type {
+  AgentCommand,
   AgentEntry,
   JsonValue,
   PermissionRequest,
@@ -104,6 +105,13 @@ export interface DriverSession {
    */
   rewindPoint?(): JsonValue | null;
   rewindConversation?(point: JsonValue): Promise<void>;
+  /**
+   * Slash commands / skills / prompts this session accepts as `/name args` text (DESIGN §8.3
+   * "输入框补全"). Optional; must resolve (possibly []) within a few seconds and never reject for
+   * "unsupported". A prompt starting with `/name` that the agent has no native handling for is
+   * expanded by the driver before it reaches the agent.
+   */
+  listCommands?(): Promise<AgentCommand[]>;
 }
 
 export interface AgentDriver {
@@ -111,6 +119,8 @@ export interface AgentDriver {
   readonly capabilities: AgentEntry["capabilities"];
   open(spec: OpenSessionSpec): Promise<DriverSession>;
   resume(persistence: JsonValue, spec: OpenSessionSpec): Promise<DriverSession>;
+  /** Commands discoverable without a session (files on disk), for a node whose session is not open. */
+  listCommands?(cwd: string): Promise<AgentCommand[]>;
 }
 
 export interface DriverRegistry {

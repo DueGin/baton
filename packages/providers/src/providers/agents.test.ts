@@ -1,8 +1,8 @@
 // Ported from Paseo (https://github.com/getpaseo/paseo) packages/server/src/server/agent/providers/pi/agent.test.ts @63ea3e5 — Copyright (c) 2025-present Mohamed Boudra, Apache-2.0. Modified for baton.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ACPAgentClient } from "./acp-agent.js";
 import { CodexAppServerAgentClient } from "./codex-agent.js";
@@ -13,17 +13,130 @@ let home: string;
 let previousHome: string | undefined;
 let sessions: AgentSession[];
 beforeEach(async () => { home = await mkdtemp(join(tmpdir(), "baton-provider-test-")); previousHome = process.env.BATON_HOME; process.env.BATON_HOME = home; sessions = []; });
-afterEach(async () => { await Promise.allSettled(sessions.map(session => session.close())); await rm(home, { recursive: true, force: true }); if (previousHome === undefined)
+afterEach(async () => { vi.useRealTimers(); await Promise.allSettled(sessions.map(session => session.close())); await rm(home, { recursive: true, force: true }); if (previousHome === undefined)
     delete process.env.BATON_HOME;
 else
     process.env.BATON_HOME = previousHome; });
-function client(kind: "codex" | "pi" | "acp"): AgentClient {
-    const options: ClientOptions = { command: [process.execPath, fixture, kind], home, env: { BATON_HOME: home, FAKE_CAPTURE: join(home, "frames.jsonl") }, timeoutMs: 3000 };
+function client(kind: "codex" | "pi" | "acp", commands?: unknown, extra: Partial<ClientOptions> = {}): AgentClient {
+    const options: ClientOptions = { command: [process.execPath, fixture, kind], home, timeoutMs: 3000, ...extra, env: { BATON_HOME: home, HOME: home, CODEX_HOME: join(home, ".codex"), FAKE_CAPTURE: join(home, "frames.jsonl"), ...(commands === undefined ? {} : { FAKE_COMMANDS: typeof commands === "string" ? commands : JSON.stringify(commands) }), ...extra.env } };
     return kind === "codex" ? new CodexAppServerAgentClient(options) : kind === "pi" ? new PiRpcAgentClient(options) : new ACPAgentClient(options);
 }
 function eventsFor(session: AgentSession): AgentStreamEvent[] { const events: AgentStreamEvent[] = []; session.subscribe(event => events.push(event)); return events; }
 async function until(events: AgentStreamEvent[], type: AgentStreamEvent["type"]): Promise<void> { await expect.poll(() => events.some(event => event.type === type), { timeout: 4000, interval: 10 }).toBe(true); }
 async function frames(): Promise<Array<Record<string, unknown>>> { return (await readFile(join(home, "frames.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>); }
+async function commandFile(file: string, markdown: string): Promise<string> {
+    const path = join(home, file);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, markdown);
+    return path;
+}
+describe("slash command discovery", () => {
+    it("maps Pi RPC extensions, templates and native skill names", async () => {
+        const provider = client("pi", [
+            { name: "/mcp", source: "extension", sourceInfo: { path: "builtin:mcp" } },
+            { name: "review", source: "prompt", description: "Review" },
+            { name: "skill:test", source: "skill", description: "Run tests" },
+            { name: "review", source: "extension" },
+        ]);
+        expect(await provider.listCommands?.(home)).toEqual([]);
+        const session = await provider.createSession({ cwd: home });
+        sessions.push(session);
+        expect(await session.listCommands?.()).toEqual([
+            { name: "mcp", kind: "builtin" }, { name: "review", kind: "prompt", description: "Review" },
+            { name: "skill:test", kind: "skill", description: "Run tests" },
+        ]);
+        const events = eventsFor(session);
+        await session.startTurn("/skill:test args");
+        await until(events, "turn_completed");
+        expect(await frames()).toContainEqual(expect.objectContaining({ type: "prompt", message: "/skill:test args" }));
+        const { turnId } = await session.startTurn("/mcp");
+        await expect.poll(() => events.find(event => event.type === "turn_completed" && event.turnId === turnId)).toBeDefined();
+    });
+    it("returns no commands when a Pi version does not support get_commands", async () => {
+        const session = await client("pi", "unsupported").createSession({ cwd: home });
+        sessions.push(session);
+        expect(await session.listCommands?.()).toEqual([]);
+    });
+    it("waits for ACP's first command update and replaces it on subsequent updates", async () => {
+        const provider = client("acp", [
+            { name: "/plan", description: "Create a plan", input: { hint: "<goal>" } },
+            { name: "explain", description: "Explain" }, { name: "plan", description: "Duplicate" },
+        ]);
+        expect(await provider.listCommands?.(home)).toEqual([]);
+        const session = await provider.createSession({ cwd: home });
+        sessions.push(session);
+        expect(await session.listCommands?.()).toEqual([
+            { name: "plan", description: "Create a plan", argumentHint: "<goal>", kind: "command" },
+            { name: "explain", description: "Explain", kind: "command" },
+        ]);
+        const events = eventsFor(session);
+        await session.startTurn("/plan next");
+        await until(events, "turn_completed");
+        expect(await session.listCommands?.()).toEqual([]);
+        expect(await frames()).toContainEqual(expect.objectContaining({ method: "session/prompt", params: { sessionId: "fake-session", prompt: [{ type: "text", text: "/plan next" }] } }));
+    });
+    it("does not wait beyond two seconds for an ACP agent that never advertises commands", async () => {
+        const session = await client("acp").createSession({ cwd: home });
+        sessions.push(session);
+        vi.useFakeTimers();
+        const pending = session.listCommands?.();
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(await pending).toEqual([]);
+        expect(await session.listCommands?.()).toEqual([]);
+    });
+    it("scans Codex home and project folders without a session", async () => {
+        const provider = client("codex", undefined, { env: { CODEX_HOME: join(home, "configured") } });
+        await commandFile("configured/prompts/review.md", "---\ndescription: Review code\nargument-hint: <path>\n---\nDocument");
+        await commandFile(".codex/prompts/ignored.md", "Wrong home");
+        await commandFile("configured/skills/format/SKILL.md", "---\nname: format\ndescription: User formatter\n---\nDocument");
+        await commandFile("project/.codex/skills/project-format/SKILL.md", "---\nname: format\ndescription: Project formatter\n---\nDocument");
+        await commandFile(".agents/skills/inspect/SKILL.md", "---\nname: inspect\ndescription: Inspect\n---\nDocument");
+        expect(await provider.listCommands?.(join(home, "project"))).toEqual([
+            { name: "format", kind: "skill", description: "Project formatter" },
+            { name: "inspect", kind: "skill", description: "Inspect" },
+            { name: "prompts:review", kind: "prompt", description: "Review code", argumentHint: "<path>" },
+        ]);
+    });
+    it("maps Codex skills/list and expands prompts and skills for start and steer", async () => {
+        const skillPath = join(home, ".codex", "skills", "format", "SKILL.md");
+        const provider = client("codex", [
+            { name: "/format", description: "Format", path: skillPath, enabled: true },
+            { name: "off", description: "Disabled", path: skillPath, enabled: false },
+            { name: "format", description: "Duplicate", path: skillPath, enabled: true },
+        ]);
+        await commandFile(".codex/prompts/review.md", "---\ndescription: Review\n---\nReview $1 then $2\nAll: $ARGUMENTS; Missing: $9");
+        const file = await commandFile("attached.png", "attachment fixture");
+        const session = await provider.createSession({ cwd: home });
+        sessions.push(session);
+        expect(await session.listCommands?.()).toEqual([{ name: "format", kind: "skill", description: "Format" }, { name: "prompts:review", kind: "prompt", description: "Review" }]);
+        const events = eventsFor(session);
+        await session.startTurn([{ type: "image", path: file, mimeType: "image/png" }, { type: "text", text: "/format hold" }]);
+        expect(await session.steerActiveTurn?.('/prompts:review "src/main file.ts" tests')).toBe(true);
+        await until(events, "turn_completed");
+        await session.startTurn("/unknown keep untouched");
+        const rpc = await frames();
+        expect(rpc).toContainEqual(expect.objectContaining({ method: "skills/list", params: { cwds: [home] } }));
+        expect(rpc.filter(frame => frame.method === "turn/start")).toMatchObject([
+            { params: { input: [{ type: "localImage", path: file }, { type: "skill", name: "format", path: skillPath }, { type: "text", text: "hold" }] } },
+            { params: { input: [{ type: "text", text: "/unknown keep untouched" }] } },
+        ]);
+        expect(rpc.find(frame => frame.method === "turn/steer")).toMatchObject({ params: { input: [{ type: "text", text: "Review src/main file.ts then tests\nAll: src/main file.ts tests; Missing: " }] } });
+    });
+    it("falls back to disk and text instructions when Codex has no skills/list method", async () => {
+        const path = await commandFile("project/.agents/skills/local/SKILL.md", "---\nname: local\ndescription: Local\n---\nDocument");
+        const session = await client("codex", "unsupported").createSession({ cwd: join(home, "project") });
+        sessions.push(session);
+        expect(await session.listCommands?.()).toEqual([{ name: "local", kind: "skill", description: "Local" }]);
+        await session.startTurn("/local some args");
+        expect((await frames()).find(frame => frame.method === "turn/start")).toMatchObject({ params: { input: [{ type: "text", text: `Use the local skill. Read its instructions from ${path}.\n\nsome args` }] } });
+    });
+    it("still returns disk prompts when Codex skills/list times out", async () => {
+        await commandFile(".codex/prompts/quick.md", "Quick body");
+        const session = await client("codex", "stall", { timeoutMs: 250 }).createSession({ cwd: home });
+        sessions.push(session);
+        expect(await session.listCommands?.()).toEqual([{ name: "prompts:quick", kind: "prompt" }]);
+    });
+});
 for (const kind of ["codex", "pi", "acp"] as const)
     describe(kind, () => {
         it("fetches catalogs and maps complete turns, text, reasoning, tools and usage", async () => {

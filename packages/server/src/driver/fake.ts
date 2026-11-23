@@ -6,7 +6,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { AgentEntry, AttachmentRef, BatonToolName, JsonValue, PermissionRequest, PermissionResponse, TimelineItem, Usage } from "@baton/protocol";
+import type { AgentCommand, AgentEntry, AttachmentRef, BatonToolName, JsonValue, PermissionRequest, PermissionResponse, TimelineItem, Usage } from "@baton/protocol";
 import type { AgentDriver, DriverEvent, DriverRegistry, DriverSession, OpenSessionSpec, PromptInput, PromptPart, SteerOutcome } from "./types.js";
 type ImagePart = Extract<PromptPart, { type: "image" }>;
 /** Text a fake agent "sees": image parts are echoed as `[image name]`. */
@@ -31,7 +31,13 @@ export interface FakeContext {
 }
 export type FakeSaveImage = (data: Uint8Array | string, mimeType: string, name?: string) => Promise<AttachmentRef>;
 export type FakeScript = (context: FakeContext) => Promise<void> | void;
-export interface FakeDriverOptions { script?: FakeScript; scripts?: FakeScript[]; steer?: boolean; resume?: boolean; label?: string; /** Accept image parts (default true). */ images?: boolean; /** Native conversation rewind (default true); false exercises the replay fallback. */ rewind?: boolean }
+export interface FakeDriverOptions {
+  script?: FakeScript; scripts?: FakeScript[]; steer?: boolean; resume?: boolean; label?: string;
+  /** Accept image parts (default true). */ images?: boolean;
+  /** Native conversation rewind (default true); false exercises the replay fallback. */ rewind?: boolean;
+  sessionCommands?: (spec: OpenSessionSpec) => Promise<AgentCommand[]>;
+  scanCommands?: (cwd: string) => Promise<AgentCommand[]>;
+}
 const capabilities = { steer: true, resume: true, reasoning: true, mcp: true, images: true };
 export class FakeDriver implements AgentDriver {
   readonly capabilities: AgentEntry["capabilities"];
@@ -39,7 +45,11 @@ export class FakeDriver implements AgentDriver {
   /** Native rewinds performed by this driver's sessions (points as given), for tests. */
   readonly rewinds: JsonValue[] = [];
   saveImage?: FakeSaveImage;
-  constructor(readonly agentId: string, readonly options: FakeDriverOptions = {}) { this.capabilities = { ...capabilities, steer: options.steer ?? true, resume: options.resume ?? true, images: options.images ?? true }; }
+  listCommands?: AgentDriver["listCommands"];
+  constructor(readonly agentId: string, readonly options: FakeDriverOptions = {}) {
+    this.capabilities = { ...capabilities, steer: options.steer ?? true, resume: options.resume ?? true, images: options.images ?? true };
+    this.listCommands = options.scanCommands;
+  }
   async open(spec: OpenSessionSpec): Promise<FakeSession> {
     const session = new FakeSession(this, spec); this.sessions.push(session); return session;
   }
@@ -66,7 +76,10 @@ export class FakeSession implements DriverSession {
   private spawned = new Set<number>();
   rewindPoint?: () => JsonValue | null;
   rewindConversation?: (point: JsonValue) => Promise<void>;
+  listCommands?: DriverSession["listCommands"];
   constructor(readonly driver: FakeDriver, readonly spec: OpenSessionSpec) {
+    const live = driver.options.sessionCommands;
+    if (live) this.listCommands = () => live(spec);
     if (driver.options.rewind === false) return;
     // "Just before the last prompt" = the number of turns before it; a rewind forks to a new session id.
     this.rewindPoint = () => ({ turns: this.turns - 1, sessionId: this.sessionId });
