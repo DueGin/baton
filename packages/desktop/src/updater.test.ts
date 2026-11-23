@@ -12,6 +12,15 @@ vi.mock("electron", () => ({
   shell: { showItemInFolder: () => undefined },
 }));
 
+// Unpacking runs the real ditto; launching the swap script is recorded instead (it would wait for this test's pid).
+const launched: { command: string; args: string[] }[] = [];
+vi.mock("node:child_process", async (load) => {
+  const real = await load<typeof import("node:child_process")>();
+  return { ...real, spawn: (command: string, args: string[] = [], options = {}) => {
+    if (command === "/bin/bash" || command === "cmd.exe") { launched.push({ command, args }); return { unref() {} }; }
+    return real.spawn(command, args, options);
+  } };
+});
 const { UpdateManager } = await import("./updater.js");
 const { DOWNLOAD_ATTEMPTS } = await import("./update.js");
 type Options = ConstructorParameters<typeof UpdateManager>[1];
@@ -277,5 +286,66 @@ describe("UpdateManager on an unreliable network", () => {
     expect((await instance.download()).phase).toBe("downloaded");
     expect(calls.find((call) => call.url === API_ASSET)).toMatchObject({ authorization: "Bearer private-token" });
     expect(calls.find((call) => call.url === DOWNLOAD)?.authorization).toBeUndefined();
+  });
+});
+
+describe("installing a downloaded update", () => {
+  /** A downloaded update whose zip holds a real .app, and a writable "installed" bundle to replace. */
+  async function downloaded(confirm: boolean | undefined) {
+    const { execFileSync } = await import("node:child_process");
+    const { mkdir } = await import("node:fs/promises");
+    const build = await mkdtemp(join(tmpdir(), "baton-install-"));
+    await mkdir(join(build, "baton.app", "Contents", "MacOS"), { recursive: true });
+    await writeFile(join(build, "baton.app", "Contents", "marker.txt"), "new");
+    const zip = join(build, "baton-0.2.0-mac-arm64.zip");
+    execFileSync("ditto", ["-c", "-k", "--keepParent", join(build, "baton.app"), zip]);
+    const zipped = await readFile(zip), zipSha = createHash("sha256").update(zipped).digest("hex");
+    const installed = join(build, "installed", "baton.app");
+    await mkdir(join(installed, "Contents"), { recursive: true });
+    process.env.BATON_UPDATE_BUNDLE = installed;
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === API_LATEST) return respond(JSON.stringify({ ...release, assets: [{ name: "baton-0.2.0-mac-arm64.zip", size: zipped.length, url: API_ASSET, browser_download_url: DOWNLOAD }, { name: "SHA256SUMS.txt", size: 100, url: "x", browser_download_url: SUMS }] }));
+      if (url === SUMS) return respond(`${zipSha}  baton-0.2.0-mac-arm64.zip\n`);
+      if (url === DOWNLOAD) return respond(zipped, { headers: { "content-length": String(zipped.length) } });
+      return respond("nope", { status: 404 });
+    }) as typeof fetch;
+    const asked = vi.fn(async () => confirm ?? true);
+    const made = manager(fetchImpl, "darwin", {}, confirm === undefined ? {} : { confirmInstall: asked });
+    await made.instance.check();
+    expect((await made.instance.download()).phase).toBe("downloaded");
+    launched.length = 0;
+    return { ...made, asked, installed, script: join(userData, "updates", "0.2.0", "swap.sh") };
+  }
+  afterEach(() => { delete process.env.BATON_UPDATE_BUNDLE; });
+
+  it.runIf(process.platform === "darwin")("asks first; cancelling keeps the download ready and starts nothing", async () => {
+    const { instance, quit, asked, installed } = await downloaded(false);
+    const status = await instance.install();
+    expect(asked).toHaveBeenCalledOnce();
+    expect(status).toMatchObject({ phase: "downloaded", savedPath: expect.stringContaining("baton-0.2.0-mac-arm64.zip") as unknown as string });
+    expect(launched).toHaveLength(0);
+    expect(quit).not.toHaveBeenCalled();
+    await expect(stat(installed)).resolves.toBeTruthy();
+    // It can be installed later from the same download.
+    expect((await instance.install()).phase).toBe("downloaded");
+  });
+
+  it.runIf(process.platform === "darwin")("after confirming, starts the swap and exits; the script never replaces a running app", async () => {
+    const { instance, quit, asked, installed, script } = await downloaded(true);
+    const status = await instance.install();
+    expect(asked).toHaveBeenCalledOnce();
+    expect(status.phase).toBe("installing");
+    expect(launched).toEqual([{ command: "/bin/bash", args: [script, installed, expect.stringMatching(/unpacked\/baton\.app$/u) as unknown as string] }]);
+    expect(quit).toHaveBeenCalledOnce();
+    const body = await readFile(script, "utf8");
+    expect(body).toContain(`kill -0 ${process.pid}`);
+    expect(body.indexOf("更新未安装")).toBeLessThan(body.indexOf('mv "$1" "$1.old"'));
+  });
+
+  it.runIf(process.platform === "darwin")("installs without asking when no confirmation is configured", async () => {
+    const { instance, quit } = await downloaded(undefined);
+    expect((await instance.install()).phase).toBe("installing");
+    expect(launched).toHaveLength(1); expect(quit).toHaveBeenCalledOnce();
   });
 });

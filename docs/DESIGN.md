@@ -466,9 +466,13 @@ interface BatonDesktopBridge {
 - 次数用完时报「下载中断：<原因>，已自动重试 5 次。已下载 N%，点「继续下载」会从断点接着下」，`.part` 留着；再次下载从断点继续，App 重启后也一样。
 - 下完对 `.part` 算 SHA256，和期望值（`SHA256SUMS.txt`，或检查时已拿到的哈希）比对：一致才改名成正式文件；不一致就删掉并报错。拿不到校验文件（试 3 次）时不使用下载的文件，提示稍后继续。
 
-**安装**：
-- **macOS**：`ditto -x -k` 解压 zip，取出其中的 `.app`；确认当前 bundle 和它所在的目录可写（从 `/tmp` 或 `~/Downloads` 里运行时就不可写，此时提示手动安装；`BATON_UPDATE_BUNDLE` 可覆盖目标路径，只给更新的冒烟测试用）。然后写一个 `swap.sh`：等本进程退出 → `mv` 旧 bundle 为 `.old` → `ditto` 拷入新 bundle → 去掉 quarantine → 重新打开；拷贝失败就还原旧版本并弹系统通知。脚本以 detached 方式启动，主进程随后走正常的退出流程（有活跃 Run 仍会先确认）。
-- **Windows**：写一个 `install.cmd`，轮询 `tasklist` 等到本进程退出，再运行 NSIS 安装器（`/S /D=<当前目录>`，静默、装回原位置），然后启动 `baton.exe`，最后删掉自己。NSIS 不能覆盖正在运行的 exe，所以必须先等进程退出；同理，不做原地替换，而是交给安装器。
+**安装**：顺序是「准备 → 确认 → 交接 → 立刻退出」。
+- 准备：解压 / 写好脚本，但不启动。
+- 确认：在交接之前问（`confirmInstall`）：有活跃或暂停中的 Run 时（或确认不了时）弹「还有 N 个活跃会话，安装更新会退出 baton，继续吗？」。选「暂不安装」就回到 `downloaded`，下载好的更新保留，什么都不交接。
+- 交接：确认后才启动脚本。
+- 退出：脚本启动后主进程 `quitNow`：停 daemon（最多 10 秒）然后 `app.exit`，不再走退出确认。之前的实现是交接后走普通退出流程，退出确认对话框会卡住旧进程，脚本等不到它退出、到点后仍然替换了磁盘上的 app，重新打开时又被旧进程的单实例锁吞掉——磁盘上是新版本，跑着的却是旧进程，而且 daemon 已经停了。
+- **macOS**：`ditto -x -k` 解压 zip，取出其中的 `.app`；确认当前 bundle 和它所在的目录可写（从 `/tmp` 或 `~/Downloads` 里运行时就不可写，此时提示手动安装；`BATON_UPDATE_BUNDLE` 可覆盖目标路径，只给更新的冒烟测试用）。然后写一个 `swap.sh`：等本进程退出（最多 60 秒；超时仍未退出就弹通知「更新未安装」并放弃，绝不在旧进程还在跑时替换） → `mv` 旧 bundle 为 `.old` → `ditto` 拷入新 bundle → 去掉 quarantine → 重新打开；拷贝失败就还原旧版本并弹系统通知。脚本以 detached 方式启动。
+- **Windows**：写一个 `install.cmd`，轮询 `tasklist` 等到本进程退出（最多 120 秒，超时就放弃、不安装），再运行 NSIS 安装器（`/S /D=<当前目录>`，静默、装回原位置），然后启动 `baton.exe`，最后删掉自己。NSIS 不能覆盖正在运行的 exe，所以必须先等进程退出；同理，不做原地替换，而是交给安装器。
 - 未签名构建无法使用 Squirrel / `autoUpdater` 的原生替换，这就是这两段脚本存在的原因。
 
 **IPC**（都在 `authorize` 之后，见 4.12 的桥）：
@@ -478,7 +482,7 @@ interface BatonDesktopBridge {
 | `baton:update-status` | 当前状态（页面挂载时调用一次） |
 | `baton:update-check` | 检查最新版 |
 | `baton:update-download` | 下载并校验 |
-| `baton:update-install` | 换装并退出；失败时状态为 `error`，不改动正在运行的应用 |
+| `baton:update-install` | 先确认，再交接并立刻退出；取消时回到 `downloaded`；失败时状态为 `error`，不改动正在运行的应用 |
 | `baton:update-token` | 保存或清除令牌 |
 | `baton:update-reveal` | 在 Finder / 资源管理器中显示已下载的安装包 |
 

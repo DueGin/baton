@@ -30,8 +30,13 @@ export interface UpdateManagerOptions {
   version?: string;
   platform?: NodeJS.Platform;
   arch?: string;
-  /** Quit once the installer has been handed the job. */
+  /**
+   * Exit right away once the installer has been handed the job: no second confirmation, no lingering — the swap
+   * script waits for this process to be gone (DESIGN §4.15).
+   */
   quitForUpdate: () => void;
+  /** Asked before anything is handed over (e.g. "N 个活跃会话，安装更新会退出 baton"); false keeps the download ready. */
+  confirmInstall?: () => Promise<boolean>;
   log?: (message: string) => void;
   /** First retry delay; later ones back off (default 2 s, up to 15 s). */
   retryDelayMs?: number;
@@ -255,8 +260,8 @@ export class UpdateManager {
   }
 
   /**
-   * Hand the app over to the installer and quit. The caller quits through its normal quit path (which
-   * asks about active runs); this only prepares the swap.
+   * Prepare the installer (unpack, write the swap script), ask `confirmInstall`, and only then start the script and
+   * quit. Cancelling leaves the downloaded update ready; nothing runs against the still-open app.
    */
   async install(): Promise<UpdateStatus> {
     const file = this.status.savedPath;
@@ -264,9 +269,15 @@ export class UpdateManager {
     if (!file || !release || this.status.phase !== "downloaded") return this.get();
     try {
       this.set({ phase: "installing" });
-      if (process.platform === "darwin") await this.installMac(file, release.version);
-      else if (process.platform === "win32") await this.installWindows(file);
-      else throw new Error("这个平台不支持应用内安装。");
+      const launch = process.platform === "darwin" ? await this.prepareMac(file, release.version)
+        : process.platform === "win32" ? await this.prepareWindows(file)
+        : (() => { throw new InstallUnsupported("这个平台不支持应用内安装。"); })();
+      if (!(await (this.options.confirmInstall?.() ?? Promise.resolve(true)))) {
+        this.log("install cancelled at the confirmation");
+        return this.set({ phase: "downloaded" });
+      }
+      launch();
+      this.onQuit();
       return this.get();
     } catch (error) {
       if (error instanceof InstallUnsupported) return this.set({ phase: "error", failedStep: "install", error: error.message });
@@ -277,7 +288,8 @@ export class UpdateManager {
   /** Show the downloaded file (used when the app lives somewhere a silent swap cannot touch). */
   reveal(): void { if (this.status.savedPath) shell.showItemInFolder(this.status.savedPath); }
 
-  private async installMac(zipPath: string, version: string): Promise<void> {
+  /** Unpack and write swap.sh; returns the launcher (not yet started). */
+  private async prepareMac(zipPath: string, version: string): Promise<() => void> {
     // BATON_UPDATE_BUNDLE only exists for the updater smoke test, which installs into a throwaway copy.
     const current = (process.env.BATON_UPDATE_BUNDLE ?? app.getPath("exe").replace(/\/Contents\/MacOS\/[^/]+$/u, ""));
     if (!current.endsWith(".app")) throw new InstallUnsupported("找不到当前的应用位置，请到 Releases 手动下载安装。");
@@ -288,10 +300,14 @@ export class UpdateManager {
     const source = await findApp(work);
     if (!source) throw new Error("压缩包里没有 .app。");
     const script = join(dirname(work), "swap.sh");
-    // The script outlives this process, so wait for our pid to disappear before touching the bundle.
+    // The script outlives this process: wait for our pid to disappear, and never replace a bundle that is still running.
     await writeFile(script, `#!/bin/bash
 set -u
 for _ in $(seq 1 120); do kill -0 ${process.pid} 2>/dev/null || break; sleep 0.5; done
+if kill -0 ${process.pid} 2>/dev/null; then
+  /usr/bin/osascript -e 'display notification "baton 没有退出，更新未安装。重新打开「设置 → 更新」再试一次。" with title "baton"'
+  rm -f "$0"; exit 1
+fi
 sleep 0.6
 rm -rf "$1.old" && mv "$1" "$1.old"
 if ditto "$2" "$1"; then
@@ -304,28 +320,38 @@ else
 fi
 rm -f "$0"
 `, { mode: 0o755 });
-    this.log(`swap ${current} ← ${source}`);
-    spawn("/bin/bash", [script, current, source], { detached: true, stdio: "ignore" }).unref();
-    setTimeout(() => this.onQuit(), 400);
+    return () => {
+      this.log(`swap ${current} ← ${source}`);
+      spawn("/bin/bash", [script, current, source], { detached: true, stdio: "ignore" }).unref();
+    };
   }
 
-  private async installWindows(installer: string): Promise<void> {
+  /** Write install.cmd; returns the launcher (not yet started). */
+  private async prepareWindows(installer: string): Promise<() => void> {
     // NSIS: /S silent; /D=<dir> must come last, unquoted. The installer is per-user, so the current directory is right.
     const directory = dirname(app.getPath("exe"));
     const script = join(dirname(installer), "install.cmd");
     await writeFile(script, [
       "@echo off",
       "setlocal",
+      "set /a tries=0",
       ":wait",
       `tasklist /fi "PID eq ${process.pid}" 2>nul | find "${process.pid}" >nul`,
-      "if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto wait)",
+      "if errorlevel 1 goto install",
+      "set /a tries+=1",
+      // NSIS cannot replace a running exe: give up rather than install under a live process.
+      'if %tries% geq 120 (del "%~f0" & exit /b 1)',
+      "timeout /t 1 /nobreak >nul",
+      "goto wait",
+      ":install",
       `"${installer}" /S /D=${directory}`,
       `start "" "${join(directory, "baton.exe")}"`,
       'del "%~f0"',
     ].join("\r\n") + "\r\n");
-    this.log(`installer ${basename(installer)} /S /D=${directory}`);
-    spawn("cmd.exe", ["/c", script], { detached: true, stdio: "ignore", windowsHide: true }).unref();
-    setTimeout(() => this.onQuit(), 400);
+    return () => {
+      this.log(`installer ${basename(installer)} /S /D=${directory}`);
+      spawn("cmd.exe", ["/c", script], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+    };
   }
 }
 
