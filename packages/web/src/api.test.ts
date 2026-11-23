@@ -4,6 +4,17 @@ import type { RunEventEnvelope } from "@baton/protocol";
 
 afterEach(() => vi.unstubAllGlobals());
 describe("API transport", () => {
+  it("encodes completion queries for a node, a new run, and file search", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => Response.json({}));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("token");
+    await client.commands({ nodeId: "node/1" });
+    await client.commands({ agentId: "claude", cwd: "/a b" });
+    await client.searchFiles("/a b", "src/a b", 12);
+    expect(fetchMock.mock.calls.map(call => call[0])).toEqual([
+      "/api/commands?nodeId=node%2F1", "/api/commands?agentId=claude&cwd=%2Fa+b", "/api/files/search?cwd=%2Fa+b&q=src%2Fa+b&limit=12",
+    ]);
+  });
   it("patches only the requested session settings, preserving explicit resets and encoded IDs", async () => {
     const response = { node: { id: "node/1", modeId: "plan" }, applied: "next_turn" };
     const fetchMock = vi.fn().mockResolvedValue(Response.json(response)); vi.stubGlobal("fetch", fetchMock);

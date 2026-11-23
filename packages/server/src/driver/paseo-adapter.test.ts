@@ -1,9 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm, writeFile, readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ACP_AGENT_SPECS } from "@baton/providers";
+import { ACP_AGENT_SPECS, ProviderRegistry, type AgentClient, type AgentSession } from "@baton/providers";
 import { createPaseoDriverRegistry, mapProviderEvent } from "./paseo-adapter.js";
 import type { DriverEvent, DriverRegistry, DriverSession } from "./types.js";
 let home: string;
@@ -21,6 +21,31 @@ afterEach(async () => { await registry.shutdown(); await rm(home, { recursive: t
 function collect(session: DriverSession): DriverEvent[] { const events: DriverEvent[] = []; session.subscribe(event => events.push(event)); return events; }
 async function until(events: DriverEvent[], type: DriverEvent["type"]): Promise<void> { await expect.poll(() => events.some(event => event.type === type), { interval: 10 }).toBe(true); }
 describe("Paseo driver registry", () => {
+    it.each([true, false])("forwards command listings only when the provider implements them (supported=%s)", async supported => {
+        const scan = vi.fn(async (cwd: string) => [{ name: "scan", description: cwd }]);
+        const live = vi.fn(async () => [{ name: "live", argumentHint: "<file>" }]);
+        const session: AgentSession = {
+            sessionId: "live", getPersistence: () => null, startTurn: async () => ({ turnId: "turn" }),
+            interrupt: async () => {}, respondToPermission: async () => {}, pendingPermissions: () => [],
+            subscribe: () => () => {}, runtimeInfo: async () => ({}), close: async () => {},
+            ...(supported ? { listCommands: live } : {}),
+        };
+        const client: AgentClient = {
+            provider: "codex", capabilities: { steer: true, resume: true, reasoning: true, mcp: true, images: true },
+            fetchCatalog: async () => ({ models: [], modes: [] }), createSession: vi.fn(async () => session), resumeSession: async () => session,
+            ...(supported ? { listCommands: scan } : {}),
+        };
+        vi.spyOn(ProviderRegistry.prototype, "get").mockReturnValue(client);
+        vi.spyOn(ProviderRegistry.prototype, "detect").mockResolvedValue([{ id: "fixture", label: "Fixture", status: "ready", enabled: true, kind: "native", checkedAt: "now", capabilities: client.capabilities, models: [], modes: [] }]);
+        try {
+            await registry.detect();
+            const driver = registry.get("fixture")!;
+            expect(await driver.listCommands?.(home)).toEqual(supported ? [{ name: "scan", description: home }] : undefined);
+            expect(client.createSession).not.toHaveBeenCalled();
+            const wrapped = await driver.open({ cwd: home, mcpServers: {} });
+            expect(await wrapped.listCommands?.()).toEqual(supported ? [{ name: "live", argumentHint: "<file>" }] : undefined);
+        } finally { vi.restoreAllMocks(); }
+    });
     it("detects drivers and maps a complete turn through the real fake-process adapters", async () => {
         expect(registry.get("fake-codex")).toBeUndefined();
         const entries = await registry.detect();

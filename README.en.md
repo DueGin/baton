@@ -14,12 +14,6 @@ Local agent client with **native delegation** and **observability**. baton detec
 - **Observability.** Live delegation topology, a session timeline (idle gaps compressed), full transcripts with GFM + Mermaid, per-turn timing, background processes started by agents, and pull requests they open (with CI / review status).
 - **Projects and desktop.** Every session belongs to a project (working directory). Electron desktop app for macOS and Windows with a native folder picker; the same console also runs in a browser. Light and dark themes.
 
-## Product video
-
-[![baton product video (52s)](docs/media/baton-intro-cover.jpg)](docs/media/baton-intro.mp4)
-
-Click the cover to watch (52 s, Chinese narration with English headings). The video runs on the demo fixture that ships with baton — no real project data.
-
 Design: [docs/DESIGN.md](docs/DESIGN.md).
 
 ![Delegation topology](docs/images/topology.png)

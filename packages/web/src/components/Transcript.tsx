@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react";
 import type { AgentEntry, ItemRecord, NodeRecord, QuestionRecord, RunSnapshot, ToolCallDetail } from "@baton/protocol";
 import { activeTurn, conversationPhase, conversationRows, messageActionKey, queuedRows, nodeIsLive, inFlightMessage, type OutgoingMessage, type MessageActionState, type MessageAction } from "../lib/conversation.js";
 import { clock } from "../lib/derive.js";
@@ -107,6 +107,31 @@ function QuestionMarker({ question, jump }: { question: QuestionRecord; jump: (i
   return <button type="button" className="question-marker" onClick={() => jump(question.id)} title="跳到输入框上方的问题卡片"><i aria-hidden="true" /><strong>等你回答</strong><span>{markdownPlainText(prompts[0]?.question ?? question.question)}{prompts.length > 1 ? ` 等 ${prompts.length} 个问题` : ""}</span><small>在输入框上方作答 ↓</small></button>;
 }
 const EMPTY_REFS: ReadonlyMap<string, RunSnapshot> = new Map();
+
+function nearTranscriptBottom(scroll: Pick<HTMLDivElement, "scrollHeight" | "scrollTop" | "clientHeight">): boolean {
+  return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 24;
+}
+
+export function TranscriptScroll({ scroll, bottom, follow, setFollow, children }: {
+  scroll: RefObject<HTMLDivElement | null>; bottom: RefObject<HTMLDivElement | null>; follow: boolean;
+  setFollow: (follow: boolean) => void; children?: ReactNode;
+}) {
+  const jumpToBottom = () => {
+    const viewport = scroll.current;
+    viewport?.focus({ preventScroll: true });
+    if (viewport && nearTranscriptBottom(viewport)) setFollow(true);
+    const reduceMotion = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    bottom.current?.scrollIntoView({ block: "end", behavior: reduceMotion ? "instant" : "smooth" });
+  };
+  return <>
+    <div className="transcript-scroll" tabIndex={-1} ref={scroll} onScroll={event => setFollow(nearTranscriptBottom(event.currentTarget))}>
+      <div className="transcript-content">{children}</div>
+      <div ref={bottom} />
+    </div>
+    {!follow && <button type="button" className="icon-button transcript-to-bottom" aria-label="回到最新消息" title="回到最新消息" onClick={jumpToBottom}><Icon name="down" size={18} /></button>}
+  </>;
+}
+
 /** Snapshots of the other runs, so a session message shows its sender even after switching runs (DESIGN §4.16). */
 export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNodeId, now, inspect, showTopology, projectName, answer, decline, busy, stopRun, resumeRun, agents = [], refs = EMPTY_REFS }: {
   refs?: ReadonlyMap<string, RunSnapshot>;
@@ -144,45 +169,47 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
   const queue = queuedRows(rows, state.outgoing, node?.id ?? nodeId, queueState?.order);
   const pending = inFlightMessage(state.outgoing, rows, node?.id ?? nodeId, now);
   const phase = node ? conversationPhase(snapshot, node, rows, now, state.lastEventAt[node.id], pending) : null;
-  const live = snapshot.run.status !== "paused" && node ? nodeIsLive(snapshot, node) : false;
+  const live = node ? nodeIsLive(snapshot, node) : false;
   const turn = node ? activeTurn(snapshot, node.id) : undefined;
   const latestText = rows.filter(row => row.item.type === "reasoning" || row.item.type === "assistant_message").at(-1);
   const inTurn = (row: ItemRecord) => turn ? row.turnId === turn.id || (!row.turnId && Date.parse(row.ts) >= Date.parse(turn.startedAt)) : false;
   useEffect(() => { if (follow) bottom.current?.scrollIntoView({ block: "end" }); }, [rows, state.outgoing, snapshot.questions, snapshot.turns, phase?.kind, follow]);
   useEffect(() => {
-    const content = bottom.current?.parentElement;
-    if (!content || !follow) return;
-    const observer = new ResizeObserver(() => bottom.current?.scrollIntoView({ block: "end" }));
-    observer.observe(content); return () => observer.disconnect();
+    const viewport = scroll.current; const content = viewport?.firstElementChild;
+    if (!content || !viewport) return;
+    const observer = new ResizeObserver(() => {
+      if (follow) bottom.current?.scrollIntoView({ block: "end" });
+      else if (nearTranscriptBottom(viewport)) setFollow(true);
+    });
+    observer.observe(content); observer.observe(viewport); return () => observer.disconnect();
   }, [follow, node?.id]);
-  // Empty composer + agents still working anywhere in this run → the send button becomes 停止 (pause the
-  // whole run: every running turn is interrupted and nothing restarts on its own); a paused run offers 继续.
+  // An empty composer offers 停止 only if the selected node has an active turn. It still pauses the
+  // whole run and interrupts all active turns; a paused run offers 继续 from any tab.
   const terminal = ["completed", "failed", "canceled"].includes(snapshot.run.status);
-  const runWorking = !terminal && snapshot.run.status !== "paused" && snapshot.nodes.some(entry => nodeIsLive(snapshot, entry));
   // The draft is a Markdown document; any text or image in it turns the button back into 发送.
-  const composerAction: "send" | "stop" | "resume" = !composerStatus.empty ? "send" : runWorking && stopRun ? "stop" : snapshot.run.status === "paused" && resumeRun ? "resume" : "send";
+  const composerAction: "send" | "stop" | "resume" = !composerStatus.empty ? "send" : !terminal && live && stopRun ? "stop" : snapshot.run.status === "paused" && resumeRun ? "resume" : "send";
   const send = (markdown: string): void => { if (!node) return; setFollow(true); void store.sendMessage(node.id, markdown); };
   const agent = agents.find(entry => entry.id === node?.agentId);
   const imagesEnabled = agent?.capabilities.images === true;
   const closed = node ? ["canceled", "replaced"].includes(node.status) : false;
   if (!node) return <Empty>等待根节点创建…</Empty>;
   return <ImageContext value={imageContext}><div className="transcript-view"><div className="view-toolbar conversation-toolbar"><SessionTabs snapshot={snapshot} selected={node.id} select={setNodeId} inspect={inspect} showTopology={showTopology} /><div className="conversation-toolbar-actions"><span className="muted">{messages.length} items</span><button className="text-button" onClick={() => inspect(node.id)} title="查看当前节点详情">节点详情 ↗</button></div></div>
-    <div className="transcript-body" id="session-content" role="tabpanel" aria-labelledby={`session-tab-${node.id}`}><div className="transcript-scroll" ref={scroll} onScroll={() => { const el = scroll.current; if (el) setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 100); }}><div className="transcript-content">{itemStatus[node.id] === "loading" && <div className="loading-line">正在加载会话…</div>}{itemStatus[node.id] === "error" && <button className="button" onClick={() => { void store.loadItems(node.id, true); }}>重试加载会话</button>}{entries.map((entry, index) => {
+    <div className="transcript-body" id="session-content" role="tabpanel" aria-labelledby={`session-tab-${node.id}`}><TranscriptScroll scroll={scroll} bottom={bottom} follow={follow} setFollow={setFollow}>{itemStatus[node.id] === "loading" && <div className="loading-line">正在加载会话…</div>}{itemStatus[node.id] === "error" && <button className="button" onClick={() => { void store.loadItems(node.id, true); }}>重试加载会话</button>}{entries.map((entry, index) => {
       const start = rolled.start[index]!, key = start >= 0 ? groupKey(start) : "", hidden = start >= 0 && !revealed.has(key);
       const toggle = start === index ? <RolledBackToggle count={rolled.size.get(index)!} open={!hidden} toggle={() => setRevealed(current => { const next = new Set(current); if (next.has(key)) next.delete(key); else next.add(key); return next; })} /> : null;
       if (hidden) return toggle && <Fragment key={`rolled:${key}`}>{toggle}</Fragment>;
       const content = <>{entry.type === "question" ? entry.question.status === "pending" ? <QuestionMarker question={entry.question} jump={jumpQuestion} /> : <QuestionCard inline compact question={entry.question} answer={answer} busy={busy} /> : (() => { const { row, outgoing } = entry.entry; return <TranscriptRow client={store.client} refs={refs} row={row} node={node} snapshot={snapshot} inspect={inspect} outgoing={outgoing} actionState={state.messageActions[messageActionKey(node.id, row.seq)]} act={action => { void store.actOnMessage(node.id, row.seq, action); }} retry={outgoing ? () => { void store.sendMessage(node.id, outgoing.text, outgoing.clientId); } : undefined} streaming={live && inTurn(row) && (row.item.type === "reasoning" || (row.seq === latestText?.seq && phase?.kind === "reply"))} rollback={rollbackTarget(row, row.seq === firstHuman) ? rollback : undefined} />; })()}{footers.get(index)?.map(turn => <TurnFooter key={turn.id} turn={turn} />)}</>;
       return <Fragment key={entry.type === "question" ? entry.question.id : entry.entry.outgoing?.clientId ?? entry.entry.row.seq}>{toggle}{start >= 0 ? <div className="rolled-back-row">{content}</div> : content}</Fragment>;
-    })}{!entries.length && itemStatus[node.id] === "ready" && <Empty>这个节点还没有消息。</Empty>}{phase && <TurnIndicator key={node.id} phase={phase} snapshot={snapshot} now={now} inspect={inspect} jumpQuestion={jumpQuestion} />}<div ref={bottom} /></div></div><ConversationOutline items={outline} scroll={scroll} /></div>
+    })}{!entries.length && itemStatus[node.id] === "ready" && <Empty>这个节点还没有消息。</Empty>}{phase && <TurnIndicator key={node.id} phase={phase} snapshot={snapshot} now={now} inspect={inspect} jumpQuestion={jumpQuestion} />}</TranscriptScroll><ConversationOutline items={outline} scroll={scroll} /></div>
     <div className="composer-stack">{dockQuestions.length > 0 && <div className="question-dock" aria-label="待回答的问题">{dockQuestions.map(question => <QuestionCard key={question.id} inline compact question={question} answer={answer} decline={decline} busy={busy} />)}</div>}
     <div className="composer-tools"><BackgroundPopover projectName={projectName} key={snapshot.run.id} snapshot={snapshot} now={now} client={store.client} inspect={inspect} /><PullRequestPopover key={`pr:${snapshot.run.id}`} snapshot={snapshot} client={store.client} inspect={inspect} /></div>
     <QueueDock key={node.id} entries={queue} actions={state.messageActions} pending={queueState?.pending} error={queueState?.error} reorder={order => { void store.reorderQueue(node.id, order); }} act={(seq, action) => store.actOnMessage(node.id, seq, action)} edit={(seq, text) => store.editMessage(node.id, seq, text)} />
     <form className="composer" onSubmit={event => { event.preventDefault(); composer.current?.submit(); }}
       onDragOver={event => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
       onDrop={event => { if (event.defaultPrevented || !event.dataTransfer.types.includes("Files")) return; event.preventDefault(); composer.current?.attach([...event.dataTransfer.files]); }}>
-      <LazyComposer key={node.id} ref={composer} nodeId={node.id} client={store.client} placeholder={`向 ${node.agentId} 发送消息…${live ? "（运行中也可发送）" : ""}`} disabled={closed} imagesEnabled={imagesEnabled} onSend={send} onStatus={setComposerStatus} />
+      <LazyComposer key={node.id} ref={composer} nodeId={node.id} cwd={node.cwd} client={store.client} placeholder={`向 ${node.agentId} 发送消息…${live ? "（运行中也可发送）" : ""}`} disabled={closed} imagesEnabled={imagesEnabled} onSend={send} onStatus={setComposerStatus} />
       {composerStatus.hint ? <div className="composer-hint" role="status">{composerStatus.hint}</div> : snapshot.run.status === "paused" && <div className="composer-paused-hint" role="status">{snapshot.run.pauses?.at(-1)?.by === "restart" ? "baton 重启时有 agent 正在工作，会话已暂停 · 点「继续」让它们接着跑" : "会话已暂停，消息会在继续后送达"}</div>}
-      <div className="composer-footer">{agent && <SessionConfig key={node.id} agent={agent} node={node} updateNodeConfig={store.updateNodeConfig} />}<div className="composer-actions"><AttachImageButton enabled={imagesEnabled} disabled={closed} attach={files => composer.current?.attach(files)} />{composerAction === "stop" ? <button type="button" className="button composer-stop composer-icon-action" disabled={busy} aria-label="停止" title="停止本会话中所有正在工作的 agent（可继续）" onClick={() => stopRun?.()}><Icon name="stop" size={13} /></button>
+      <div className="composer-footer">{agent && <SessionConfig key={node.id} agent={agent} node={node} updateNodeConfig={store.updateNodeConfig} />}<div className="composer-actions"><AttachImageButton enabled={imagesEnabled} disabled={closed} attach={files => composer.current?.attach(files)} />{composerAction === "stop" ? <button type="button" className="button composer-stop composer-icon-action" disabled={busy} aria-label="停止（暂停整个 Run）" title="暂停本 Run：中断所有正在工作的 agent（可继续）" onClick={() => stopRun?.()}><Icon name="stop" size={13} /></button>
       : composerAction === "resume" ? <button type="button" className="button primary composer-resume composer-icon-action" disabled={busy} aria-label="继续" title="继续本会话" onClick={() => resumeRun?.()}><Icon name="play" size={13} /></button>
       : <button className="button primary composer-send composer-icon-action" disabled={composerStatus.empty || closed || composerStatus.uploading} aria-label={sendLabel} title={`${sendLabel}${composerStatus.uploading ? " · 图片上传中…" : composerStatus.failed ? " · 有图片上传失败" : ""}`}><Icon name="arrow" size={15} /></button>}</div></div></form></div>
   </div></ImageContext>;

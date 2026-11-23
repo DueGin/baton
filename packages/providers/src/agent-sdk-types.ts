@@ -334,7 +334,16 @@ export interface AgentSession {
         model?: string | null;
         modeId?: string | null;
     }>;
+    /** baton: commands accepted as `/name args` prompt text (same shape as @baton/protocol AgentCommand). */
+    listCommands?(): Promise<AgentSlashCommand[]>;
     close(): Promise<void>;
+}
+/** baton: one slash command / skill / prompt. `name` has no leading "/". */
+export interface AgentSlashCommand {
+    name: string;
+    description?: string;
+    argumentHint?: string;
+    kind?: "command" | "skill" | "prompt" | "builtin";
 }
 /** baton: opaque, JSON-serializable rewind marker (stored by the host between restarts). */
 export type AgentRewindPoint = Record<string, string | number | boolean | null>;
@@ -344,6 +353,8 @@ export interface AgentClient {
     fetchCatalog(): Promise<ProviderCatalog>;
     createSession(config: AgentSessionConfig): Promise<AgentSession>;
     resumeSession(handle: AgentPersistenceHandle, config: AgentSessionConfig): Promise<AgentSession>;
+    /** baton: commands discoverable without a session (files on disk) for this cwd. */
+    listCommands?(cwd: string): Promise<AgentSlashCommand[]>;
 }
 export interface ClientOptions {
     command: string[];

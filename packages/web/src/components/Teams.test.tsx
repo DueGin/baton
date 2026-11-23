@@ -69,13 +69,13 @@ describe("preset candidates in the console", () => {
   it("previews a preset's candidates when creating a run", async () => {
     vi.stubGlobal("localStorage", { getItem: () => null, setItem: noop });
     const client = new DemoClient(() => Date.parse("2026-11-10T07:00:00Z"));
-    const html = renderToStaticMarkup(<NewRun agents={demoAgents} presets={await client.teams()} defaults={{ maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "preset" }} close={noop} create={async () => true} busy={false} demo error={null} projects={await client.projects()} initialProjectId="project-atlas" selectProject={noop} addProject={noop} />);
+    const html = renderToStaticMarkup(<NewRun agents={demoAgents} presets={await client.teams()} defaults={{ maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "preset" }} close={noop} create={async () => true} busy={false} client={client} error={null} projects={await client.projects()} initialProjectId="project-atlas" selectProject={noop} addProject={noop} />);
     expect(html).toContain("产品交付小队 · 2 roles · 3 候选"); expect(html).toContain("候选成员 · 主导者按任务自主招入");
     expect(html).toContain("claude · claude-sonnet-4-6 · high"); expect(html).toContain("前端、CSS 动画与交互细节");
     expect(html).toContain("在预设的候选之外再加几个");
-    const dynamic = renderToStaticMarkup(<NewRun agents={demoAgents} presets={await client.teams()} defaults={{ maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "dynamic" }} close={noop} create={async () => true} busy={false} demo error={null} projects={await client.projects()} initialProjectId="project-atlas" selectProject={noop} addProject={noop} />);
+    const dynamic = renderToStaticMarkup(<NewRun agents={demoAgents} presets={await client.teams()} defaults={{ maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "dynamic" }} close={noop} create={async () => true} busy={false} client={client} error={null} projects={await client.projects()} initialProjectId="project-atlas" selectProject={noop} addProject={noop} />);
     expect(dynamic).toContain("new-run-candidates"); expect(dynamic).toContain("不用填角色，"); expect(dynamic).toContain("预先指定成员");
-    const solo = renderToStaticMarkup(<NewRun agents={demoAgents} presets={await client.teams()} defaults={{ maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "solo" }} close={noop} create={async () => true} busy={false} demo error={null} projects={await client.projects()} initialProjectId="project-atlas" selectProject={noop} addProject={noop} />);
+    const solo = renderToStaticMarkup(<NewRun agents={demoAgents} presets={await client.teams()} defaults={{ maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "solo" }} close={noop} create={async () => true} busy={false} client={client} error={null} projects={await client.projects()} initialProjectId="project-atlas" selectProject={noop} addProject={noop} />);
     expect(solo).not.toContain("new-run-candidates");
   });
   it("demo: New Run candidates become the dynamic run's candidate pool", async () => {

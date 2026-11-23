@@ -1,10 +1,10 @@
 // Ported from Paseo (https://github.com/getpaseo/paseo) packages/server/src/server/agent/providers/claude/agent.test.ts @63ea3e5 — Copyright (c) 2025-present Mohamed Boudra, Apache-2.0. Modified for baton.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { text as readStreamText } from "node:stream/consumers";
 import { setTimeout as delay } from "node:timers/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Options, Query, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { ClaudeAgentClient, claudeCustomHeaders, type ClaudeQueryFactory } from "./claude-agent.js";
 import type { AgentSession, AgentStreamEvent, SaveImage } from "../agent-sdk-types.js";
@@ -28,16 +28,63 @@ class Messages implements AsyncIterable<SDKMessage> {
 let home: string;
 let session: AgentSession | undefined;
 beforeEach(async () => { home = await mkdtemp(join(tmpdir(), "baton-claude-test-")); });
-afterEach(async () => { await session?.close(); session = undefined; await rm(home, { recursive: true, force: true }); });
+afterEach(async () => { vi.useRealTimers(); vi.unstubAllEnvs(); await session?.close(); session = undefined; await rm(home, { recursive: true, force: true }); });
 function setup(saveImage?: SaveImage, options: { env?: Record<string, string>; cliVersion?: string } = {}) {
     const messages = new Messages();
     let captured: Parameters<ClaudeQueryFactory>[0] | undefined;
     const generator = messages[Symbol.asyncIterator]();
-    const query = Object.assign(generator, { supportedModels: vi.fn(async () => [{ value: "fake", displayName: "Fake", description: "", supportedEffortLevels: ["high"] }]), cancelAsyncMessage: vi.fn(async (_uuid: string) => true), interrupt: vi.fn(async () => { messages.push(result(0, true)); }), close: vi.fn(() => messages.end()) }) as unknown as Query;
+    const supportedCommands = vi.fn<Query["supportedCommands"]>(async () => []);
+    const query = Object.assign(generator, { supportedCommands, supportedModels: vi.fn(async () => [{ value: "fake", displayName: "Fake", description: "", supportedEffortLevels: ["high"] }]), cancelAsyncMessage: vi.fn(async (_uuid: string) => true), interrupt: vi.fn(async () => { messages.push(result(0, true)); }), close: vi.fn(() => messages.end()) }) as unknown as Query;
     const factory: ClaudeQueryFactory = input => { captured = input; return query; };
     const client = new ClaudeAgentClient({ home, command: ["fake-claude"], queryFactory: factory, saveImage, ...options });
-    return { client, messages, query, options: () => captured!.options!, input: () => captured!.prompt };
+    return { client, messages, query, supportedCommands, options: () => captured!.options!, input: () => captured!.prompt };
 }
+describe("Claude slash commands", () => {
+    it("asks the SDK on each call so updated lists replace previous results", async () => {
+        const fake = setup();
+        fake.supportedCommands.mockResolvedValueOnce([
+            { name: "/review", description: "Review", argumentHint: "<file>" },
+            { name: "review", description: "Duplicate", argumentHint: "" },
+        ]).mockResolvedValueOnce([{ name: "next", description: "Next", argumentHint: "" }]);
+        const live = session = await fake.client.createSession({ cwd: home });
+        expect(await live.listCommands()).toEqual([{ name: "review", description: "Review", argumentHint: "<file>", kind: "command" }]);
+        expect(await live.listCommands()).toEqual([{ name: "next", description: "Next", kind: "command" }]);
+    });
+    it("bounds a stalled SDK request and treats unsupported discovery as empty", async () => {
+        vi.useFakeTimers();
+        const fake = setup();
+        fake.supportedCommands.mockImplementationOnce(() => new Promise(() => {})).mockRejectedValueOnce(new Error("unsupported"));
+        const live = session = await fake.client.createSession({ cwd: home });
+        const stalled = live.listCommands();
+        await vi.advanceTimersByTimeAsync(5000);
+        expect(await stalled).toEqual([]);
+        expect(await live.listCommands()).toEqual([]);
+    });
+    it("discovers configured user and project commands and skills without launching the SDK", async () => {
+        const config = join(home, "configured");
+        const cwd = join(home, "project");
+        vi.stubEnv("HOME", home);
+        vi.stubEnv("CLAUDE_CONFIG_DIR", config);
+        for (const [file, body] of [
+            [join(home, ".claude", "commands", "hidden.md"), "ignored"],
+            [join(config, "commands", "ops", "check.md"), "---\ndescription: User check\n---\nBody"],
+            [join(cwd, ".claude", "commands", "ops", "check.md"), "---\r\ndescription: \"Project: check\"\r\nargument-hint: '<path>'\r\n---\r\nBody"],
+            [join(config, "skills", "install", "SKILL.md"), "---\nname: setup\ndescription: >-\n  Set up\n  the project\n---\nBody"],
+            [join(cwd, ".claude", "skills", "verify", "SKILL.md"), "---\ndescription: Verify\n---\nBody"],
+        ]) {
+            if (!file || body === undefined) throw new Error("Bad test fixture");
+            await mkdir(dirname(file), { recursive: true });
+            await writeFile(file, body);
+        }
+        const fake = setup();
+        expect(await fake.client.listCommands(cwd)).toEqual([
+            { name: "ops:check", description: "Project: check", argumentHint: "<path>", kind: "command" },
+            { name: "setup", description: "Set up the project", kind: "skill" },
+            { name: "verify", description: "Verify", kind: "skill" },
+        ]);
+        expect(fake.supportedCommands).not.toHaveBeenCalled();
+    });
+});
 function result(cost = 0.01, failed = false): unknown { return { type: "result", subtype: failed ? "error_during_execution" : "success", is_error: failed, session_id: "claude-session", total_cost_usd: cost, usage: { input_tokens: 10, cache_read_input_tokens: 2, output_tokens: 4 }, modelUsage: { fake: { inputTokens: cost * 1000, cacheReadInputTokens: cost * 200, outputTokens: cost * 400, contextWindow: 10000 } }, errors: failed ? ["aborted"] : undefined }; }
 async function wait(events: AgentStreamEvent[], type: AgentStreamEvent["type"]): Promise<void> { await expect.poll(() => events.some(event => event.type === type), { interval: 5 }).toBe(true); }
 describe("Claude request headers", () => {

@@ -5,12 +5,13 @@ import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { terminateWithTreeKill } from "../tree-kill.js";
-import type { AgentClient, AgentImageRef, AgentPersistenceHandle, AgentPromptInput, AgentRewindPoint, AgentSessionConfig, AgentUsage, ClientOptions, ProviderCatalog } from "../agent-sdk-types.js";
+import type { AgentClient, AgentImageRef, AgentPersistenceHandle, AgentPromptInput, AgentRewindPoint, AgentSessionConfig, AgentSlashCommand, AgentUsage, ClientOptions, ProviderCatalog } from "../agent-sdk-types.js";
 import { findImageBlocks, imageNote, promptText, readPromptImage, saveProviderImages } from "../images.js";
 import { ProviderSession, record, text, errorText } from "../session.js";
 import { externalEnv, spawnProcess } from "../process.js";
 import { mapClaudeCompletedToolCall, mapClaudeFailedToolCall, mapClaudeRunningToolCall } from "./claude/tool-call-mapper.js";
 import { claudeConfigDir, claudeTranscriptPath, lastAssistantEntry, parseClaudeRewindPoint, realClaudeRewindSdk, revertClaudeConversation, type ClaudeRewindSdk } from "./claude/rewind.js";
+import { commandDeadline, normalizeCommands, scanCommandDirectory } from "./slash-commands.js";
 export type ClaudeQueryFactory = typeof query;
 type ClaudeClientOptions = ClientOptions & { cliVersion?: string; queryFactory?: ClaudeQueryFactory; rewindSdk?: ClaudeRewindSdk };
 export function claudeCustomHeaders(headers: string | undefined, versionOutput: string | undefined): string | undefined {
@@ -93,6 +94,15 @@ export class ClaudeAgentClient implements AgentClient {
     constructor(private options: ClaudeClientOptions) { }
     async createSession(config: AgentSessionConfig): Promise<ClaudeSession> { return new ClaudeSession(this.options, config); }
     async resumeSession(handle: AgentPersistenceHandle, config: AgentSessionConfig): Promise<ClaudeSession> { return new ClaudeSession(this.options, config, handle); }
+    async listCommands(cwd: string): Promise<AgentSlashCommand[]> {
+        const config = claudeConfigDir(externalEnv(this.options.env));
+        const project = join(cwd, ".claude");
+        const lists = await Promise.all([project, config].flatMap(dir => [
+            commandDeadline(() => scanCommandDirectory(join(dir, "commands"), "command"), []),
+            commandDeadline(() => scanCommandDirectory(join(dir, "skills"), "skill"), []),
+        ]));
+        return normalizeCommands(lists.flat().map(entry => entry.command)).sort((left, right) => (left.kind ?? "").localeCompare(right.kind ?? "") || left.name.localeCompare(right.name));
+    }
     async fetchCatalog(): Promise<ProviderCatalog> {
         await mkdir(this.options.home, { recursive: true });
         const cwd = await mkdtemp(join(this.options.home, "catalog-claude-"));
@@ -167,6 +177,9 @@ class ClaudeSession extends ProviderSession {
         };
         this.query = (options.queryFactory ?? query)({ prompt: this.queue, options: sdkOptions });
         void this.pump();
+    }
+    async listCommands(): Promise<AgentSlashCommand[]> {
+        return commandDeadline(async () => normalizeCommands((await this.query.supportedCommands()).map(command => ({ ...command, kind: "command" }))), []);
     }
     async models(timeoutMs: number): Promise<Awaited<ReturnType<Query["supportedModels"]>>> {
         let timer: NodeJS.Timeout | undefined;

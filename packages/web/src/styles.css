@@ -795,6 +795,13 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .session-tab button:focus-visible { outline-offset: -2px; }
 .session-tab [role="tab"] { display: flex; align-items: center; gap: 6px; height: 100%; padding: 0 5px; font-size: 11px; }
 .session-tab .agent-mark { width: 20px; height: 20px; }
+.session-tab .status-starting { color: var(--green); }
+.session-tab .status-completed .status-dot, .session-tab .status-idle .status-dot { background: transparent; border: 1px solid currentColor; }
+.session-tab .status-paused { background: transparent; }
+.session-tab .status-paused .status-dot { border-radius: 1px; }
+@media (prefers-reduced-motion: reduce) {
+  .session-tab .status-running .status-dot, .session-tab .status-starting .status-dot { animation: none; }
+}
 .session-tab-name { max-width: 15ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-tab-more { align-self: stretch; width: 24px; padding: 0; }
 .session-tab-menu, .session-tab-notice { z-index: 20; background: var(--surface); color: var(--text); border: 1px solid var(--border-strong); border-radius: 6px; box-shadow: var(--shadow); }
@@ -1549,9 +1556,13 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .composer-hint { color: var(--amber); font-weight: 600; }
 .image-thumb.is-linked { cursor: pointer; }
 
+.transcript-body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.transcript-to-bottom.icon-button { position: absolute; z-index: 2; bottom: 12px; left: 50%; transform: translateX(-50%); width: 36px; height: 36px; border: 1px solid var(--border-strong); border-radius: 50%; background: var(--surface-raised); color: var(--text); box-shadow: var(--shadow); }
+.transcript-to-bottom.icon-button:hover { background: var(--surface-hover); }
+.transcript-to-bottom.icon-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 /* Conversation outline: a Codex-style rail of ticks (one per message you sent) on the right of the
    transcript; hover/focus previews the messages, click jumps. */
-.transcript-body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .conversation-outline { position: absolute; top: 50%; right: 6px; transform: translateY(-50%); z-index: 6; display: flex; align-items: center; }
 .outline-rail { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; max-height: min(62vh, 520px); overflow: hidden; padding: 6px 2px; border-radius: 8px; }
 .conversation-outline.is-open .outline-rail { background: color-mix(in srgb, var(--surface) 80%, transparent); }
@@ -1638,6 +1649,10 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .select-option-hint { flex: none; color: var(--text-dim); font-size: 9px; }
 .select-option.is-warning .select-option-hint { color: var(--amber); }
 .select-option-check { flex: none; display: inline-flex; width: 13px; color: var(--text); }
+.suggestion-popover { width: min(350px, calc(100vw - 20px)); max-height: 260px; }
+.suggestion-popover .select-option-label { font-family: var(--font-mono); }
+.suggestion-popover .select-option-hint { background: var(--surface-active); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
+.suggestion-status { padding: 8px; color: var(--text-dim); }
 .select-empty { padding: 7px 9px; color: var(--text-dim); font-size: 10px; }
 
 /* 自定义… in the model picker: a text box in the trigger's place. */

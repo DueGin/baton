@@ -29,7 +29,7 @@ describe("project screens", () => {
   it("requires a project picker and retains payload defaults in New Run", async () => {
     const storage = { getItem: () => null, setItem: () => undefined }; vi.stubGlobal("localStorage", storage);
     const client = new DemoClient(() => now); const projects = await client.projects(true);
-    const html = renderToStaticMarkup(<NewRun agents={await client.agents()} presets={await client.teams()} projects={projects} initialProjectId="project-atlas" defaults={{ mode: "solo", maxDepth: 3, maxActiveChildren: 6, autoApprove: false }} close={() => undefined} create={async () => true} busy={false} demo error={null} selectProject={() => undefined} addProject={() => undefined} />);
+    const html = renderToStaticMarkup(<NewRun agents={await client.agents()} presets={await client.teams()} projects={projects} initialProjectId="project-atlas" defaults={{ mode: "solo", maxDepth: 3, maxActiveChildren: 6, autoApprove: false }} close={() => undefined} create={async () => true} busy={false} client={client} error={null} selectProject={() => undefined} addProject={() => undefined} />);
     for (const text of ["搜索项目", "选择项目", "项目（工作目录）", "Atlas", "/workspace/atlas", "添加项目…", "项目内子目录"]) expect(html).toContain(text);
     expect(html).not.toContain("旧版原型"); expect(html).not.toContain('pattern="/.*"');
   });

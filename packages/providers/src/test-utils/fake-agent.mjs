@@ -84,8 +84,12 @@ createInterface({ input: process.stdin }).on('line', line => {
    case 'get_entries': { const from = message.since ? piEntries.findIndex(entry => entry.id === message.since) + 1 : 0; return reply(message, { entries: piEntries.slice(from), leafId: piEntries.at(-1)?.id ?? null }); }
    case 'fork': { const index = piEntries.findIndex(entry => entry.id === message.entryId); piEntries.splice(index); piSession = `fork-${message.entryId}`; return reply(message, { text: 'forked', cancelled: false }); }
    case 'get_available_models': return reply(message, { models: [{ provider: 'fake', id: 'fake-model', name: 'Fake', reasoning: true }] });
-   case 'get_commands': return reply(message, { commands: process.env.FAKE_MCP === 'none' ? [] : [{ name: 'mcp', source: 'extension', sourceInfo: { path: process.env.FAKE_MCP === 'adapter' ? '/extensions/pi-mcp-adapter/index.ts' : 'builtin:mcp' } }] });
-   case 'prompt': turn++; piEntries.push({ type: 'message', id: `u${turn}`, parentId: piEntries.at(-1)?.id ?? null, message: { role: 'user', content: message.message } }, { type: 'message', id: `a${turn}`, parentId: `u${turn}`, message: { role: 'assistant', content: 'DONE' } }); reply(message); if (message.message.includes('images')) return images(); if (message.message.includes('hold')) return; if (message.message.includes('permission')) return askPermission(); if (message.message.includes('exit')) return process.exit(3); return complete();
+   case 'get_commands': {
+    if (process.env.FAKE_COMMANDS === 'unsupported') return send({ type: 'response', id: message.id, command: message.type, success: false, error: 'unsupported' });
+    if (process.env.FAKE_COMMANDS) return reply(message, { commands: JSON.parse(process.env.FAKE_COMMANDS) });
+    return reply(message, { commands: process.env.FAKE_MCP === 'none' ? [] : [{ name: 'mcp', source: 'extension', sourceInfo: { path: process.env.FAKE_MCP === 'adapter' ? '/extensions/pi-mcp-adapter/index.ts' : 'builtin:mcp' } }] });
+   }
+   case 'prompt': if (process.env.FAKE_COMMANDS && message.message === '/mcp') return reply(message, { disposition: 'handled' }); turn++; piEntries.push({ type: 'message', id: `u${turn}`, parentId: piEntries.at(-1)?.id ?? null, message: { role: 'user', content: message.message } }, { type: 'message', id: `a${turn}`, parentId: `u${turn}`, message: { role: 'assistant', content: 'DONE' } }); reply(message); if (message.message.includes('images')) return images(); if (message.message.includes('hold')) return; if (message.message.includes('permission')) return askPermission(); if (message.message.includes('exit')) return process.exit(3); return complete();
    case 'steer': reply(message); return complete();
    case 'abort': reply(message); return send({ type: 'agent_end', messages: [] });
    default: return reply(message);
@@ -96,8 +100,20 @@ createInterface({ input: process.stdin }).on('line', line => {
  if (message.method === 'fake/env') return reply(message, { models: [{ value: process.env.COPILOT_ALLOW_ALL ?? 'scrubbed', name: 'env' }] });
  if (message.method === 'initialized') return;
  if (message.method === 'model/list') return reply(message, { data: [model], nextCursor: null });
+ if (message.method === 'skills/list') {
+  if (!process.env.FAKE_COMMANDS || process.env.FAKE_COMMANDS === 'unsupported') return send({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } });
+  if (process.env.FAKE_COMMANDS === 'stall') return;
+  return reply(message, { data: [{ cwd: message.params.cwds[0], skills: JSON.parse(process.env.FAKE_COMMANDS), errors: [] }] });
+ }
  if (message.method === 'thread/start' || message.method === 'thread/resume') return reply(message, { thread: { id: sessionId }, model: model.id });
- if (message.method === 'session/new' || message.method === 'session/load') return reply(message, { sessionId, modes: { currentModeId: 'default', availableModes: [{ id: 'default', name: 'Default' }, { id: 'plan', name: 'Plan' }] }, models: { currentModelId: 'fake-model', availableModels: [{ modelId: 'fake-model', name: 'Fake model' }] } });
+ if (message.method === 'session/new' || message.method === 'session/load') {
+  reply(message, { sessionId, modes: { currentModeId: 'default', availableModes: [{ id: 'default', name: 'Default' }, { id: 'plan', name: 'Plan' }] }, models: { currentModelId: 'fake-model', availableModels: [{ modelId: 'fake-model', name: 'Fake model' }] } });
+  if (process.env.FAKE_COMMANDS) {
+   const update = (id, availableCommands) => notify('session/update', { sessionId: id, update: { sessionUpdate: 'available_commands_update', availableCommands } });
+   setTimeout(() => { update(sessionId, JSON.parse(process.env.FAKE_COMMANDS)); update('other-session', []); }, 30);
+  }
+  return;
+ }
  if (message.method === 'session/set_mode' || message.method === 'session/set_model') return reply(message);
  if (message.method === 'turn/start') {
   turn++; threads.get(sessionId)?.push(`turn-${turn}`); reply(message, { turn: { id: `turn-${turn}` } });
@@ -119,6 +135,7 @@ createInterface({ input: process.stdin }).on('line', line => {
  if (message.method === 'session/prompt') {
   pendingPrompt = message; turn++;
   const prompt = promptText(message.params.prompt);
+  if (process.env.FAKE_COMMANDS) notify('session/update', { sessionId, update: { sessionUpdate: 'available_commands_update', availableCommands: [] } });
   if (prompt.includes('images')) return images();
   if (prompt.includes('hold')) { notify('item/started', { threadId: sessionId, turnId: `turn-${turn}`, item: { id: 'live-shell', type: 'commandExecution', command: 'wait', cwd: process.cwd(), status: 'inProgress', commandActions: [], processId: 'process-42' } }); return; }
   if (prompt.includes('elicitation')) {

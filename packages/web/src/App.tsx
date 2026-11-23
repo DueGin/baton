@@ -231,7 +231,7 @@ export default function App({ client }: { client: BatonClient }) {
     {snapshot && reassignId && <ReassignDialog key={reassignId} agents={agents} snapshot={snapshot} delegationId={reassignId} busy={busy} error={error} close={() => setReassignId(null)} submit={request => { void action(async () => { await client.reassign(reassignId, request); setReassignId(null); }); }} />}
     {snapshot && cancelingRun && <CancelRunDialog snapshot={snapshot} busy={busy} error={error} close={() => { if (!busy) setCancelingRun(false); }} submit={request => { void action(async () => { await client.cancelRun(snapshot.run.id, request); setCancelingRun(false); }); }} />}
     {addProject && <AddProject client={client} close={() => setAddProject(false)} added={async project => { await refreshProjects(); setNewRun(false); selectProject(project.id); setAddProject(false); if (resumeNewRun.current) { setNewRun(true); resumeNewRun.current = false; } }} />}
-    {newRun && <NewRun projects={projects} initialProjectId={currentProjectId} selectProject={rememberProject} addProject={() => { resumeNewRun.current = true; setAddProject(true); }} agents={agents} presets={presets} defaults={defaults} close={() => setNewRun(false)} create={create} busy={busy} demo={client.demo} error={error} />}
+    {newRun && <NewRun projects={projects} initialProjectId={currentProjectId} selectProject={rememberProject} addProject={() => { resumeNewRun.current = true; setAddProject(true); }} agents={agents} presets={presets} defaults={defaults} close={() => setNewRun(false)} create={create} busy={busy} client={client} error={error} />}
   </div></ImageContext></SessionNavProvider>;
 }
 

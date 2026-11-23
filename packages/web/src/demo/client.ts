@@ -29,6 +29,23 @@ import { demoAttachments, demoLocalImages, drawDemoImage } from "./images.js";
 import { attachmentProblem } from "../lib/images.js";
 import type { CheckpointChangesResponse, ListCheckpointsResponse, RollbackRequest, RollbackResponse } from "@baton/protocol";
 import { demoChanges, demoCheckpointNode, demoCheckpoints, demoRows } from "./rollback.js";
+import type { AgentCommand, ListCommandsResponse, SearchFilesResponse } from "@baton/protocol";
+import type { CommandQuery } from "../api.js";
+
+const demoCommands: Record<string, AgentCommand[]> = {
+  claude: [
+    { name: "review", description: "审查当前改动或指定文件", argumentHint: "[文件] [关注点]", kind: "builtin" },
+    { name: "init", description: "为项目生成 CLAUDE.md", kind: "builtin" },
+    { name: "compact", description: "压缩当前会话上下文", argumentHint: "[保留内容]", kind: "builtin" },
+    { name: "skill:pdf", description: "读取和整理 PDF 文档", argumentHint: "<文件>", kind: "skill" },
+    { name: "skill:frontend-review", description: "检查界面和交互细节", kind: "skill" },
+  ],
+  codex: [
+    { name: "review", description: "审查工作区改动", kind: "command" },
+    { name: "prompts:fix", description: "按给定要求修复问题", argumentHint: "<问题>", kind: "prompt" },
+  ],
+};
+const demoFiles = ["README.md", "package.json", "src/", "src/index.ts", "src/app.ts", "src/components/", "src/components/Button.tsx", "docs/", "docs/界面说明.md", "docs/设计 草稿.md", "docs/验收 记录/", "docs/验收 记录/清单.md", "tests/", "tests/app.test.ts"];
 
 interface DemoRun { snapshot: RunSnapshot; remaining: RunEventEnvelope[]; log: RunEventEnvelope[] }
 export class DemoClient implements BatonClient {
@@ -96,6 +113,19 @@ export class DemoClient implements BatonClient {
     prDemo.prs.forEach(pr => this.emit(prData, { type: "pr", pr }));
   }
   agents = async () => structuredClone(demoAgents);
+  commands = async (query: CommandQuery): Promise<ListCommandsResponse> => {
+    const node = "nodeId" in query ? this.forNode(query.nodeId).snapshot.nodes.find(entry => entry.id === query.nodeId) : undefined;
+    const agent = "agentId" in query ? query.agentId : node?.agentId;
+    const commands = agent ? demoCommands[agent] ?? [] : [];
+    return { commands: structuredClone(commands), source: commands.length ? "scan" : "none" };
+  };
+  searchFiles = async (cwd: string, query: string, limit = 50): Promise<SearchFilesResponse> => {
+    const needle = query.toLowerCase();
+    const matches = demoFiles.filter(path => needle.endsWith("/")
+      ? path.toLowerCase().startsWith(needle) && !path.slice(needle.length).replace(/\/$/, "").includes("/") && path.length > needle.length
+      : path.toLowerCase().includes(needle));
+    return { cwd, files: matches.slice(0, limit).map(path => ({ path, kind: path.endsWith("/") ? "dir" : "file" })), truncated: matches.length > limit };
+  };
   /** Uploads stay in memory; a short delay shows the pill's uploading state, and a name containing "fail" shows the failed one. */
   uploadAttachment = async (file: Blob, name: string): Promise<AttachmentRecord> => {
     const problem = attachmentProblem(file); if (problem) throw new HttpError(415, problem);

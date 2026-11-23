@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { isValidElement, type UIEvent } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { agentCardPreferences } from "../lib/agent-card-preferences.js";
-import { Markdown, ToolDetail, Transcript, TranscriptRow, toolSummary } from "./Transcript.js";
+import { Markdown, ToolDetail, Transcript, TranscriptRow, TranscriptScroll, toolSummary } from "./Transcript.js";
 import { DemoClient } from "../demo/client.js";
 import { RunStore } from "../store.js";
 import { createScenario, replay } from "../demo/scenario.js";
@@ -9,6 +10,39 @@ import { demoBriefPrompt, demoResultsPrompt } from "../demo/prompts.js";
 import { reasoningBlockId, reasoningPreferences } from "../lib/reasoning.js";
 import type { TimelineItem } from "@baton/protocol";
 import { nodeIsLive, type MessageActionState } from "../lib/conversation.js";
+
+describe("transcript scrolling", () => {
+  it("shows the return button only away from the bottom and hides it when the jump resumes following", () => {
+    const dimensions = { scrollHeight: 800, clientHeight: 400, scrollTop: 400 };
+    const scrollIntoView = vi.fn();
+    let follow = true;
+    const render = () => TranscriptScroll({ follow, setFollow: value => { follow = value; },
+      scroll: { current: null }, bottom: { current: { scrollIntoView } as unknown as HTMLDivElement } });
+    const scrollTo = (scrollTop: number) => {
+      dimensions.scrollTop = scrollTop;
+      const scroller: unknown = render().props.children[0];
+      if (!isValidElement<{ onScroll: (event: UIEvent<HTMLDivElement>) => void }>(scroller)) throw new Error("Missing transcript scroller");
+      scroller.props.onScroll({ currentTarget: dimensions } as UIEvent<HTMLDivElement>);
+    };
+
+    scrollTo(400);
+    expect(renderToStaticMarkup(render())).not.toContain("回到最新消息");
+    scrollTo(370);
+    const scrolled = render();
+    expect(renderToStaticMarkup(scrolled)).toContain('aria-label="回到最新消息"');
+    const button: unknown = scrolled.props.children[1];
+    if (!isValidElement<{ onClick: () => void }>(button)) throw new Error("Missing return button");
+    button.props.onClick();
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "end", behavior: "smooth" });
+    scrollTo(400);
+    expect(follow).toBe(true);
+    expect(renderToStaticMarkup(render())).not.toContain("回到最新消息");
+
+    dimensions.scrollHeight = dimensions.clientHeight;
+    scrollTo(0);
+    expect(renderToStaticMarkup(render())).not.toContain("回到最新消息");
+  });
+});
 
 describe("safe agent content rendering", () => {
   it("renders the anchored question between the agent introduction and same-turn continuation", async () => {
@@ -29,17 +63,30 @@ describe("safe agent content rendering", () => {
     expect(stack.indexOf('class="question-dock"')).toBeLessThan(stack.indexOf('class="composer"')); expect(stack).toContain("question-card question-pending is-compact"); expect(stack).toContain("提交回答"); expect(stack).toContain('aria-label="收起问题"');
     expect(html.match(new RegExp(`id="question-${encodeURIComponent(question.id)}"`, "g"))).toHaveLength(1);
   });
-  it("turns the empty composer's send button into 停止 while agents work and 继续 once paused", () => {
+  it("offers 停止 only on a working node's tab and 继续 once the run is paused", () => {
     const now = Date.parse("2026-11-10T07:00:00Z"); const store = new RunStore(new DemoClient(() => now));
-    const live = replay(createScenario(0), 30000); const node = live.nodes[0]!;
-    expect(live.nodes.some(entry => nodeIsLive(live, entry))).toBe(true);
-    const render = (snapshot: typeof live, actions = true) => renderToStaticMarkup(<Transcript showTopology={() => undefined} snapshot={snapshot} store={store} items={{ [node.id]: [] }} itemStatus={{ [node.id]: "ready" }} nodeId={node.id} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} {...(actions ? { stopRun: () => undefined, resumeRun: () => undefined } : {})} />);
-    const working = render(live); expect(working).toContain("composer-stop"); expect(working).toContain('aria-label="停止"'); expect(working).not.toContain('aria-label="发送"'); expect(working).not.toMatch(/<\/svg>(停止|发送|继续)<\/button>/);
+    const live = replay(createScenario(0), 30_000);
+    const lead = live.nodes.find(node => node.id === live.run.rootNodeId)!;
+    const childId = live.delegations.find(edge => edge.fromNodeId === lead.id)!.toNodeId;
+    const child = live.nodes.find(node => node.id === childId)!;
+    expect(nodeIsLive(live, lead)).toBe(false);
+    expect(nodeIsLive(live, child)).toBe(true);
+    const render = (snapshot: typeof live, nodeId = child.id, actions = true) => renderToStaticMarkup(<Transcript showTopology={() => undefined} snapshot={snapshot} store={store} items={{ [nodeId]: [] }} itemStatus={{ [nodeId]: "ready" }} nodeId={nodeId} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} {...(actions ? { stopRun: () => undefined, resumeRun: () => undefined } : {})} />);
+    const waiting = render(live, lead.id);
+    expect(waiting).toContain("空闲 · 等待 3 个子任务");
+    expect(waiting).toMatch(/aria-label="发送（(?:⌘|Ctrl) Enter）"/u);
+    expect(waiting).not.toContain("composer-stop");
+    const working = render(live);
+    expect(working).toContain("composer-stop");
+    expect(working).toContain('aria-label="停止（暂停整个 Run）"');
+    expect(working).toContain('title="暂停本 Run：中断所有正在工作的 agent（可继续）"');
+    expect(working).not.toContain("composer-send");
+    expect(working).not.toMatch(/<\/svg>(停止|发送|继续)<\/button>/);
     const paused = render({ ...live, run: { ...live.run, status: "paused" } }); expect(paused).toContain("composer-resume"); expect(paused).toContain('aria-label="继续"'); expect(paused).not.toMatch(/<\/svg>继续<\/button>/);
     const restarted = render({ ...live, run: { ...live.run, status: "paused", pauses: [{ at: live.run.createdAt, by: "restart" }] } }); expect(restarted).toContain("baton 重启时有 agent 正在工作"); expect(restarted).toContain("composer-resume");
     const done = render({ ...live, run: { ...live.run, status: "completed" } }); expect(done).not.toContain("composer-stop"); expect(done).toMatch(/aria-label="发送（(?:⌘|Ctrl) Enter）"/u); expect(done).not.toMatch(/<\/svg>发送<\/button>/);
     expect(done).not.toContain("发送到当前节点"); expect(working).not.toContain("发送后排队，可在消息上改为引导或立即发送");
-    expect(render(live, false)).not.toContain("composer-stop");
+    expect(render(live, child.id, false)).not.toContain("composer-stop");
   });
   it("keeps queued/retracted rows out of the transcript and places icon actions on steered messages", () => {
     const snapshot = replay(createScenario(0), 86000); const node = snapshot.nodes[0]!;

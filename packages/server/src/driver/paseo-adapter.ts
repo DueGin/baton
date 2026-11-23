@@ -59,6 +59,7 @@ function makeDriver(entry: AgentEntry, client: AgentClient, sessions: Set<PaseoD
     }
     return {
         agentId: entry.id, capabilities: entry.capabilities,
+        ...(client.listCommands ? { listCommands: client.listCommands.bind(client) } : {}),
         async open(spec) { if (isStopped())
             throw new Error("Driver registry shut down"); return wrap(client.createSession(spec)); },
         async resume(persistence, spec) { if (isStopped())
@@ -71,6 +72,7 @@ function parsePersistence(value: JsonValue, expectedProvider: string): AgentPers
     return { provider: expectedProvider as AgentPersistenceHandle["provider"], sessionId: value.sessionId, ...(typeof value.sessionFile === "string" ? { sessionFile: value.sessionFile } : {}) };
 }
 export class PaseoDriverSession implements DriverSession {
+    listCommands?: DriverSession["listCommands"];
     supportsLongToolCalls(): boolean { return this.session.supportsLongToolCalls?.() ?? false; }
     /** Present only when the provider session can rewind natively (DESIGN §4.13); else the kernel replays. */
     rewindPoint?: () => JsonValue | null;
@@ -80,6 +82,7 @@ export class PaseoDriverSession implements DriverSession {
     private closed = false;
     private unsubscribe: () => void;
     constructor(private session: AgentSession, private onClose: () => void = () => { }) {
+        this.listCommands = session.listCommands?.bind(session);
         const point = session.rewindPoint?.bind(session), rewind = session.rewindConversation?.bind(session);
         if (point && rewind) {
             this.rewindPoint = () => point();

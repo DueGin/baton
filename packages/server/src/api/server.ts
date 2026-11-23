@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, writeFile, chmod, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { extname, join, resolve, sep } from "node:path";
+import { extname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ATTACHMENT_MAX_BYTES, ATTACHMENT_MIME_TYPES, type PullRequestFeedbackRequest, CreateProjectRequest, PatchProjectRequest, CreatePermissionRuleRequest, ResolveEscalationRequest, ApproveTeamProposalRequest, AddMemberRequest, ReplaceMemberRequest, ReassignRequest, SaveTeamPresetRequest, TeamPresetInput, CreateRunRequest, PatchRunRequest, PermissionDecision, RunEventEnvelope, SendMessageResponse, UpdateSettingsRequest, TestTitleModelRequest, RollbackRequest } from "@baton/protocol";
 import type { UpdateNodeConfigRequest } from "@baton/protocol";
@@ -21,6 +21,7 @@ import { PullRequests, type PullRequestOptions } from "../pull-requests/index.js
 import { AttachmentError, Attachments, isAttachmentMimeType, readLocalImage } from "../attachments/index.js";
 import { CheckpointError, Checkpoints } from "../checkpoints/index.js";
 import { ShadowGit, type ShadowGitOptions } from "../checkpoints/shadow-git.js";
+import { searchFiles } from "../files/search.js";
 export interface StartServerOptions {
   home?: string; port?: number; registry?: DriverRegistry; fake?: boolean; webDist?: string;
   maxActiveNodes?: number; deliveryDebounceMs?: number; idleTimeoutMs?: number; stallTimeoutMs?: number; askTimeoutMinutes?: number; notifier?: Notifier; notificationCoalesceMs?: number;
@@ -173,6 +174,16 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
         const local = await readLocalImage(target);
         if (!local) throw new HttpError(404, "Image not found");
         image(response, local.bytes, local.mimeType, "private, no-cache"); return;
+      }
+      if (method === "GET" && path === "/api/files/search") {
+        const limit = url.searchParams.get("limit");
+        json(response, 200, await searchFiles(url.searchParams.get("cwd") ?? "", url.searchParams.get("q") ?? "", limit === null ? undefined : Number(limit))); return;
+      }
+      if (method === "GET" && path === "/api/commands") {
+        const nodeId = url.searchParams.get("nodeId"), agentId = url.searchParams.get("agentId"), cwd = url.searchParams.get("cwd");
+        if (nodeId) { json(response, 200, await kernel.commands(nodeId)); return; }
+        if (!agentId || !cwd || !isAbsolute(cwd)) throw new HttpError(400, "Supply nodeId, or agentId and an absolute cwd");
+        json(response, 200, await kernel.commandsFor(agentId, cwd)); return;
       }
       if (path === "/api/projects") {
         if (method === "GET") { json(response, 200, await kernel.projects.list(url.searchParams.get("archived") === "1")); return; }

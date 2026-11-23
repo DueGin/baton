@@ -8,14 +8,18 @@ import type {
   PullRequestRecord, ListPullRequestsResponse, LinkPullRequestRequest, PullRequestFeedbackRequest,
   SendMessageResponse, SendMode, DeliverMessageRequest, EditMessageRequest, ReorderQueueRequest, ReorderQueueResponse, InboxItem, AnswerQuestionRequest, ResolveEscalationRequest, PermissionRule, CreatePermissionRuleRequest,
   AttachmentRecord, ListCheckpointsResponse, CheckpointChangesResponse, RollbackRequest, RollbackResponse,
+  ListCommandsResponse, SearchFilesResponse,
 } from "@baton/protocol";
 
 /** The server may attach availability warnings to successful preset mutations. */
 export type TeamPresetResult = TeamPreset & { warnings?: string[] };
+export type CommandQuery = { nodeId: string } | { agentId: string; cwd: string };
 
 export interface BatonClient {
   readonly demo: boolean;
   agents(refresh?: boolean): Promise<AgentEntry[]>;
+  commands(query: CommandQuery): Promise<ListCommandsResponse>;
+  searchFiles(cwd: string, q: string, limit?: number): Promise<SearchFilesResponse>;
   runs(projectId?: string): Promise<RunSummary[]>;
   projects(includeArchived?: boolean): Promise<ProjectSummary[]>;
   project(id: string): Promise<ProjectSummary>;
@@ -124,6 +128,8 @@ export class ApiClient implements BatonClient {
   localImageBlob = (path: string) => this.blob(`/files/image?path=${encodeURIComponent(path)}`);
 
   agents = (refresh = false) => this.request<AgentEntry[]>(`/agents${refresh ? "/refresh" : ""}`, refresh ? "POST" : "GET");
+  commands = (query: CommandQuery) => this.request<ListCommandsResponse>(`/commands?${new URLSearchParams("nodeId" in query ? { nodeId: query.nodeId } : { agentId: query.agentId, cwd: query.cwd })}`);
+  searchFiles = (cwd: string, q: string, limit?: number) => this.request<SearchFilesResponse>(`/files/search?${new URLSearchParams({ cwd, q, ...(limit === undefined ? {} : { limit: String(limit) }) })}`);
   runs = (projectId?: string) => this.request<RunSummary[]>(`/runs${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`);
   projects = (includeArchived = false) => this.request<ProjectSummary[]>(`/projects${includeArchived ? "?archived=1" : ""}`);
   project = (id: string) => this.request<ProjectSummary>(`/projects/${encodeURIComponent(id)}`);

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { getSchema } from "@tiptap/core";
+import { EditorState, TextSelection, type Transaction } from "@tiptap/pm/state";
 import type { AgentEntry, AttachmentRecord } from "@baton/protocol";
 import { composerExtensions, EMPHASIS_INPUT, imageIdentity, imageStatus } from "./composer-extensions.js";
 import { Composer } from "./Composer.js";
@@ -12,9 +13,85 @@ import { demoAgents } from "../demo/agents.js";
 import { RunStore } from "../store.js";
 import { createScenario, replay } from "../demo/scenario.js";
 import type { BatonClient } from "../api.js";
+import { SuggestionSession } from "../lib/composer-suggest.js";
+import { composerKeyDown, editorSuggestion } from "../lib/composer-suggest-editor.js";
 
 const schema = getSchema(composerExtensions({ placeholder: () => "" }));
 const valid = (markdown: string) => { const node = schema.nodeFromJSON(markdownToDoc(markdown)); node.check(); return node; };
+
+describe("composer completion", () => {
+  afterEach(() => vi.useRealTimers());
+  const now = () => Date.parse("2026-11-10T07:00:00Z");
+  const mountState = (client: BatonClient, nodeId: string) => {
+    const session = new SuggestionSession();
+    const source = { client, cwd: "/workspace/atlas", commandQuery: { nodeId } };
+    const submit = vi.fn();
+    const view = { state: EditorState.create({ schema }), composing: false, dispatch(transaction: Transaction) {
+      view.state = view.state.apply(transaction);
+      session.update(view.composing ? null : editorSuggestion(view.state), source);
+    } };
+    const type = (text: string) => { for (const character of text) view.dispatch(view.state.tr.insertText(character)); };
+    const key = (key: string) => composerKeyDown(view, { key, keyCode: 0, isComposing: view.composing, ctrlKey: false, metaKey: false,
+      altKey: false, shiftKey: false, preventDefault: vi.fn(), stopPropagation: vi.fn() }, session, false, "enter", submit);
+    return { session, view, submit, type, key };
+  };
+
+  it("filters /re, selects the active option and accepts on Enter without submitting", async () => {
+    const client = new DemoClient(now);
+    const commands = vi.spyOn(client, "commands").mockResolvedValue({ source: "session", commands: [{ name: "review" }, { name: "init" }] });
+    const { session, view, submit, type, key } = mountState(client, "command-completion-test");
+    type("/re");
+    await vi.waitFor(() => expect(session.snapshot()?.options.map(option => option.label)).toEqual(["/review"]));
+    expect(commands).toHaveBeenCalledExactlyOnceWith({ nodeId: "command-completion-test" });
+    expect(key("Enter")).toBe(true);
+    expect(view.state.doc.textContent).toBe("/review ");
+    expect(submit).not.toHaveBeenCalled();
+    expect(session.snapshot()).toBeNull();
+  });
+
+  it("debounces @, drills into a directory, and quotes a filename with spaces", async () => {
+    vi.useFakeTimers();
+    const client = new DemoClient(now);
+    const cwd = "/workspace/atlas";
+    const search = vi.spyOn(client, "searchFiles").mockImplementation(async (_cwd, query) => ({ cwd, truncated: false,
+      files: query === "docs/" ? [{ path: "docs/a b.txt", kind: "file" }] : [{ path: "docs/", kind: "dir" }] }));
+    const { session, view, submit, type, key } = mountState(client, "file-completion-test");
+    type("读 @doc");
+    expect(search).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(120);
+    expect(search).toHaveBeenCalledExactlyOnceWith(cwd, "doc");
+    expect(key("Tab")).toBe(true);
+    expect(view.state.doc.textContent).toBe("读 @docs/");
+    await vi.advanceTimersByTimeAsync(120);
+    expect(search).toHaveBeenLastCalledWith(cwd, "docs/");
+    expect(session.snapshot()?.options[0]?.label).toBe("docs/a b.txt");
+    expect(key("Enter")).toBe(true);
+    expect(view.state.doc.textContent).toBe('读 @"docs/a b.txt" ');
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("rejects code and allows a file trigger after a hard break", () => {
+    for (const [markdown, expected] of [["```ts\n@src\n```", null], ["`@src`", null], ["x\n/re", null], ["x\n@src", "src"]] as const) {
+      const doc = valid(markdown);
+      const selection = TextSelection.atEnd(doc);
+      expect(editorSuggestion(EditorState.create({ doc, selection }))?.query ?? null).toBe(expected);
+    }
+  });
+
+  it("leaves composing Enter alone and suppresses Enter while the list is empty or loading", () => {
+    const client = new DemoClient(now);
+    const { view, submit, type, key, session } = mountState(client, "composition-test");
+    type("@missing");
+    view.composing = true;
+    expect(key("Enter")).toBe(false);
+    view.composing = false;
+    expect(key("Enter")).toBe(true);
+    expect(key("Escape")).toBe(true);
+    expect(session.snapshot()).toBeNull();
+    expect(view.state.doc.textContent).toBe("@missing");
+    expect(submit).not.toHaveBeenCalled();
+  });
+});
 
 describe("composer document", () => {
   it("parses every supported Markdown construct into a document TipTap's schema accepts", () => {
@@ -78,7 +155,7 @@ describe("composer images", () => {
 describe("composer rendering", () => {
   const now = Date.parse("2026-11-10T07:00:00Z");
   it("keeps the 消息 label and placeholder on the editable element before the editor mounts", () => {
-    const html = renderToStaticMarkup(<Composer nodeId="n1" client={new DemoClient(() => now)} placeholder="向 claude 发送消息…" disabled imagesEnabled onSend={() => undefined} onStatus={() => undefined} />);
+    const html = renderToStaticMarkup(<Composer nodeId="n1" cwd="/workspace/atlas" client={new DemoClient(() => now)} placeholder="向 claude 发送消息…" disabled imagesEnabled onSend={() => undefined} onStatus={() => undefined} />);
     expect(html).toContain('aria-label="消息"'); expect(html).toContain('role="textbox"'); expect(html).toContain('aria-multiline="true"');
     expect(html).toContain('data-placeholder="向 claude 发送消息…"'); expect(html).toContain('aria-disabled="true"'); expect(html).toContain("is-disabled");
   });
@@ -90,6 +167,6 @@ describe("composer rendering", () => {
     expect(attach(render("pi"))).toContain('disabled=""'); expect(attach(render("pi"))).toContain('title="当前 agent 不支持图片"');
     expect(attach(render("claude", []))).toContain('disabled=""'); // unknown agent: no images
     const html = render("claude"); const form = html.slice(html.indexOf('class="composer"'));
-    expect(form).toContain('aria-label="消息"'); expect(form).toContain('accept="image/png,image/jpeg,image/gif,image/webp"'); expect(form).toContain("composer-stop");
+    expect(form).toContain('aria-label="消息"'); expect(form).toContain('accept="image/png,image/jpeg,image/gif,image/webp"');
   });
 });

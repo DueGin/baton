@@ -7,6 +7,7 @@ import remarkBreaks from "remark-breaks";
 import remarkCjkFriendly from "remark-cjk-friendly";
 import remarkCjkFriendlyGfmStrikethrough from "remark-cjk-friendly-gfm-strikethrough";
 import { remarkBrTags } from "./markdown.js";
+import { detectSuggestion } from "./composer-suggest.js";
 
 /**
  * Markdown ⇄ composer document. The composer sends Markdown, so this is the editor's wire format.
@@ -29,6 +30,20 @@ type Node = JSONContent;
 const processor = unified().use(remarkParse).use(remarkGfm).use(remarkCjkFriendly).use(remarkCjkFriendlyGfmStrikethrough).use(remarkBreaks).use(remarkBrTags);
 function parseMarkdown(markdown: string): Root {
   return processor.runSync(processor.parse(markdown)) as Root;
+}
+
+export function textareaSuggestion(value: string, caret: number) {
+  const match = detectSuggestion(value.slice(0, caret), true);
+  if (!match || match.kind === "command") return match;
+  type PositionedNode = { type: string; position?: Root["position"]; children?: PositionedNode[] };
+  const { from, to } = match;
+  function overlapsCode(node: PositionedNode): boolean {
+    const start = node.position?.start.offset, end = node.position?.end.offset;
+    if (start !== undefined && end !== undefined && (start >= to || end <= from)) return false;
+    if (node.type === "code" || node.type === "inlineCode") return true;
+    return node.children?.some(overlapsCode) ?? false;
+  }
+  return parseMarkdown(value).children.some(overlapsCode) ? null : match;
 }
 
 // ───────────────────────────── Markdown → document ─────────────────────────────
@@ -195,7 +210,12 @@ function trimBreaks(nodes: Node[]): Node[] {
 function roundTrips(markdown: string, content: Node[]): boolean {
   const blocks = markdownToDoc(markdown).content ?? [];
   if (blocks.some(block => block.type === RAW_NODE)) return true;
-  return blocks.length === 1 && ["paragraph", "heading"].includes(blocks[0]!.type ?? "") && sameInline(blocks[0]!.content ?? [], content);
+  if (blocks.length !== 1 || !["paragraph", "heading"].includes(blocks[0]!.type ?? "")) return false;
+  const parsed = blocks[0]!.content ?? [];
+  if (sameInline(parsed, content)) return true;
+  const last = content.at(-1);
+  if (!/[\t ]$/.test(markdown) || last?.type !== "text" || last.marks?.length || !last.text) return false;
+  return sameInline(parsed, [...content.slice(0, -1), { ...last, text: last.text.replace(/[\t ]+$/, "") }]);
 }
 
 /** Inline nodes compared by meaning: adjacent text merged, mark order ignored, an autolink equal to plain text. */

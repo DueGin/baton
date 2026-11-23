@@ -2,24 +2,28 @@
 import pino from "pino";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { AgentClient, AgentPersistenceHandle, AgentPromptInput, AgentRewindPoint, AgentSessionConfig, AgentUsage, ClientOptions, ProviderCatalog, ToolCallTimelineItem } from "../agent-sdk-types.js";
+import type { AgentClient, AgentPersistenceHandle, AgentPromptInput, AgentRewindPoint, AgentSessionConfig, AgentSlashCommand, AgentUsage, ClientOptions, ProviderCatalog, ToolCallTimelineItem } from "../agent-sdk-types.js";
 import { OrderedTasks, imageFileExists, imageMarkdown, imageNote, promptText, saveProviderImages, type ProviderImage } from "../images.js";
 import { ProviderSession, record, text } from "../session.js";
-import { spawnProcess } from "../process.js";
+import { externalEnv, spawnProcess } from "../process.js";
 import { CodexAppServerClient, CodexAppServerRpcError } from "./codex/app-server-transport.js";
 import { CodexAppServerStartupCoordinator } from "./codex/app-server-startup.js";
 import { listCodexTurns, parseCodexRewindPoint, revertCodexConversation } from "./codex/rewind.js";
 import { mapCodexToolCallFromThreadItem, splitCodexMcpToolResultImages } from "./codex/tool-call-mapper.js";
+import { CodexSlashCommands } from "./codex/slash-commands.js";
+import { COMMAND_TIMEOUT_MS } from "./slash-commands.js";
 const startup = new CodexAppServerStartupCoordinator();
 /** Text items plus `localImage` items at their position (Paseo codexAppServerTurnInputFromPrompt). */
-export async function codexTurnInput(prompt: AgentPromptInput): Promise<Array<Record<string, unknown>>> {
+export async function codexTurnInput(prompt: AgentPromptInput, expand?: CodexSlashCommands["expand"]): Promise<Array<Record<string, unknown>>> {
     if (typeof prompt === "string")
-        return [{ type: "text", text: prompt }];
+        return expand ? expand(prompt) : [{ type: "text", text: prompt }];
     const input: Array<Record<string, unknown>> = [];
     for (const part of prompt) {
         if (part.type === "text") {
-            if (part.text)
-                input.push({ type: "text", text: part.text });
+            if (part.text) {
+                input.push(...(expand ? await expand(part.text) : [{ type: "text", text: part.text }]));
+                expand = undefined;
+            }
         }
         else if (await imageFileExists(part.path))
             input.push({ type: "localImage", path: part.path });
@@ -53,6 +57,7 @@ export class CodexAppServerAgentClient implements AgentClient {
     constructor(private options: ClientOptions) { }
     async createSession(config: AgentSessionConfig): Promise<CodexSession> { return CodexSession.open(this.options, config); }
     async resumeSession(handle: AgentPersistenceHandle, config: AgentSessionConfig): Promise<CodexSession> { return CodexSession.open(this.options, config, handle); }
+    async listCommands(cwd: string): Promise<AgentSlashCommand[]> { return new CodexSlashCommands(cwd, externalEnv(this.options.env)).list(); }
     async fetchCatalog(): Promise<ProviderCatalog> {
         await mkdir(this.options.home, { recursive: true });
         const cwd = await mkdtemp(join(this.options.home, "catalog-codex-"));
@@ -97,6 +102,7 @@ class CodexSession extends ProviderSession {
     supportsLongToolCalls(): boolean { return !!this.config.mcpServers?.baton; }
     processIds(): number[] { return this.client?.processIds() ?? []; }
     private client!: CodexAppServerClient;
+    private commands!: CodexSlashCommands;
     private nativeTurn: string | null = null;
     private usage?: AgentUsage;
     private seenText = new Set<string>();
@@ -118,6 +124,7 @@ class CodexSession extends ProviderSession {
             throw new Error(`Unsupported Codex mode ${config.modeId}`);
         try {
             session.client = await connect(options, config);
+            session.commands = new CodexSlashCommands(config.cwd, externalEnv(options.env, config.env), session.client, Math.min(options.timeoutMs ?? COMMAND_TIMEOUT_MS, COMMAND_TIMEOUT_MS));
             session.client.setNotificationHandler((method, params) => session.inbound.run(() => session.notification(method, record(params))));
             session.client.setUnexpectedTerminationHandler(error => session.processExited(error.message));
             for (const method of ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "item/mcpToolCall/requestApproval", "item/tool/requestUserInput", "tool/requestUserInput", "mcpServer/elicitation/request"])
@@ -146,6 +153,7 @@ class CodexSession extends ProviderSession {
         }
     }
     private rememberTurn(id: string): void { if (id && this.threadTurns && this.threadTurns.at(-1) !== id) this.threadTurns.push(id); }
+    async listCommands(): Promise<AgentSlashCommand[]> { return this.commands.list(); }
     rewindPoint(): AgentRewindPoint | null { return this.turnPoint; }
     async rewindConversation(value: AgentRewindPoint): Promise<void> {
         if (this.activeTurn) throw new Error("Cannot rewind the Codex conversation while a turn is active");
@@ -157,7 +165,7 @@ class CodexSession extends ProviderSession {
     protected async launchTurn(prompt: AgentPromptInput): Promise<void> {
         if (this.threadTurns === null && this.sessionId) this.threadTurns = await listCodexTurns(this.client, this.sessionId).catch(() => null);
         this.turnPoint = this.sessionId && this.threadTurns ? { threadId: this.sessionId, turnId: this.threadTurns.at(-1) ?? null, index: this.threadTurns.length - 1 } : null;
-        const input = await codexTurnInput(prompt);
+        const input = await codexTurnInput(prompt, value => this.commands.expand(value));
         this.canceling = false;
         this.nativeTurn = null;
         this.usage = undefined;
@@ -171,13 +179,14 @@ class CodexSession extends ProviderSession {
         if (this.nativeTurn) this.rememberTurn(this.nativeTurn);
     }
     async steerActiveTurn(prompt: AgentPromptInput): Promise<boolean> {
-        if (!this.activeTurn || !this.nativeTurn)
+        const turnId = this.activeTurn, expectedTurnId = this.nativeTurn;
+        if (!turnId || !expectedTurnId)
             return false;
         try {
-            const input = await codexTurnInput(prompt);
-            if (!this.activeTurn || !this.nativeTurn)
+            const input = await codexTurnInput(prompt, value => this.commands.expand(value));
+            if (this.activeTurn !== turnId || this.nativeTurn !== expectedTurnId)
                 return false;
-            await this.client.request("turn/steer", { threadId: this.sessionId, expectedTurnId: this.nativeTurn, input }, 10000);
+            await this.client.request("turn/steer", { threadId: this.sessionId, expectedTurnId, input }, 10000);
             this.timeline({ type: "user_message", text: promptText(prompt) });
             return true;
         }

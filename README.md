@@ -6,12 +6,6 @@
 
 一个**天然支持委派**、**全程可观测**的本地 agent 客户端。baton 不自己实现 agent 循环，而是识别并驱动你本机已经安装的 agent CLI（Claude Code、Codex、pi，以及 Gemini CLI、Qwen Code、Kimi、OpenCode、Goose 等任意 ACP agent），在它们之上补齐多 agent 协作：任意 agent 都能把任务派给其他 agent，结果自动回流，整个过程在拓扑图、时间线和会话里一目了然。
 
-## 产品视频
-
-[![baton 产品视频（52 秒）](docs/media/baton-intro-cover.jpg)](docs/media/baton-intro.mp4)
-
-上方封面可点击播放：52 秒，中文说明配英文标题。片子里演示的是 baton 仓库自带的演示数据（「为工作台添加全局搜索」），没有真实项目内容。
-
 ![委派拓扑图](docs/images/topology.png)
 
 ## 功能特性

@@ -3,12 +3,13 @@ import pino from "pino";
 import { mkdir, mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { AgentClient, AgentImageRef, AgentPersistenceHandle, AgentPromptInput, AgentRewindPoint, AgentSessionConfig, AgentUsage, ClientOptions, ProviderCatalog } from "../agent-sdk-types.js";
+import type { AgentClient, AgentImageRef, AgentPersistenceHandle, AgentPromptInput, AgentRewindPoint, AgentSessionConfig, AgentSlashCommand, AgentUsage, ClientOptions, ProviderCatalog } from "../agent-sdk-types.js";
 import { OrderedTasks, imageNote, promptImages, promptText, readPromptImage, saveProviderImages } from "../images.js";
 import { ProviderSession, record, text, errorText } from "../session.js";
 import { JsonlRpcProcess } from "./jsonl-rpc-process.js";
 import { mapToolDetail, parseToolArgs, parseToolResult, splitPiToolResultImages, type PiTrackedToolCall } from "./pi/tool-call-mapper.js";
 import { parsePiRewindPoint, piLeaf, revertPiConversation } from "./pi/rewind.js";
+import { COMMAND_TIMEOUT_MS, normalizeCommands } from "./slash-commands.js";
 const THINKING = ["off", "minimal", "low", "medium", "high", "xhigh", "max"].map(id => ({ id, label: id }));
 /** Pi RPC prompt payload: images ride along base64 when the model takes image input (Paseo
  * convertPromptInput); the text keeps a "[图片 name]" marker where each one was. Otherwise each
@@ -37,6 +38,7 @@ export class PiRpcAgentClient implements AgentClient {
     constructor(private options: ClientOptions) { }
     async createSession(config: AgentSessionConfig): Promise<PiSession> { return PiSession.open(this.options, config); }
     async resumeSession(handle: AgentPersistenceHandle, config: AgentSessionConfig): Promise<PiSession> { return PiSession.open(this.options, config, handle); }
+    async listCommands(_cwd: string): Promise<AgentSlashCommand[]> { return []; }
     async fetchCatalog(): Promise<ProviderCatalog> {
         await mkdir(this.options.home, { recursive: true });
         const cwd = await mkdtemp(join(this.options.home, "catalog-pi-"));
@@ -165,6 +167,14 @@ class PiSession extends ProviderSession {
         }
     }
     override getPersistence(): AgentPersistenceHandle | null { const handle = super.getPersistence(); return handle && this.sessionFile ? { ...handle, sessionFile: this.sessionFile } : null; }
+    async listCommands(): Promise<AgentSlashCommand[]> {
+        const reply = record(await this.process.request({ type: "get_commands" }, COMMAND_TIMEOUT_MS).catch(() => null));
+        if (!Array.isArray(reply.commands)) return [];
+        return normalizeCommands(reply.commands.map(record).map(command => ({
+            name: text(command.name), description: text(command.description), argumentHint: text(command.argumentHint),
+            kind: command.source === "prompt" || command.source === "skill" ? command.source : text(record(command.sourceInfo).path).startsWith("builtin:") ? "builtin" : "command",
+        })));
+    }
     rewindPoint(): AgentRewindPoint | null { return this.turnPoint; }
     async rewindConversation(value: AgentRewindPoint): Promise<void> {
         if (this.activeTurn) throw new Error("Cannot rewind the Pi conversation while a turn is active");
@@ -188,7 +198,7 @@ class PiSession extends ProviderSession {
         // Pi's prompt acknowledgment may arrive only after agent_end.
         const turnId = this.activeTurn;
         void this.process.request({ type: "prompt", ...payload }, null).then(result => {
-            if (this.activeTurn === turnId && record(result).agentInvoked === false)
+            if (this.activeTurn === turnId && (record(result).agentInvoked === false || record(result).disposition === "handled"))
                 this.finish("completed");
         }, error => { if (this.activeTurn === turnId)
             this.finish(this.canceling ? "canceled" : "failed", errorText(error)); });
