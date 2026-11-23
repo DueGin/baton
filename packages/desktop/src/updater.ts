@@ -45,6 +45,25 @@ export interface UpdateManagerOptions {
 }
 /** A failure that retrying will not fix (missing file, checksum mismatch, a 4xx other than 408/429). */
 class FatalDownload extends Error {}
+/**
+ * Chromium's stack (net.fetch) follows the system proxy; Node's fetch goes direct (or through a TUN). On flaky networks
+ * either one can fail for minutes while the other works, so a request that fails to connect is tried once on the other.
+ * Aborts and HTTP errors are not retried here; a body that breaks mid-stream is resumed by the download loop.
+ */
+async function dualStackFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+  try { return await (net.fetch(String(input), init) as Promise<Response>); }
+  catch (error) {
+    if (init?.signal?.aborted) throw error;
+    try { return await fetch(input, init); }
+    catch (second) { throw new Error(`${networkDetail(error)}; direct: ${networkDetail(second)}`, { cause: second }); }
+  }
+}
+/** The innermost codes of a network error, for logs (net::ERR_…, ECONNRESET, …). */
+function networkDetail(error: unknown): string {
+  const parts: string[] = [];
+  for (let current = error, depth = 0; current instanceof Error && depth < 4; current = (current as { cause?: unknown }).cause, depth++) parts.push(String((current as { code?: unknown }).code ?? current.message));
+  return parts.join(" <- ") || String(error);
+}
 class StatusError extends Error { constructor(readonly status: number) { super(`GitHub 返回 ${status}`); } }
 const retryable = (status: number): boolean => status === 408 || status === 429 || status >= 500;
 const sizeOf = async (file: string): Promise<number> => (await stat(file).catch(() => undefined))?.size ?? 0;
@@ -60,8 +79,7 @@ export class UpdateManager {
   private downloading = false;
 
   constructor(private readonly window: () => BrowserWindow | null, private readonly options: UpdateManagerOptions) {
-    // Chromium's network stack (net.fetch) follows the system proxy; Node's fetch would ignore it.
-    this.fetchImpl = options.fetch ?? ((input, init) => net.fetch(input as string, init) as Promise<Response>);
+    this.fetchImpl = options.fetch ?? dualStackFetch;
     this.version = options.version ?? (app?.getVersion?.() || "0.0.0");
     this.target = updateTarget(options.platform ?? process.platform, options.arch ?? process.arch);
     this.log = options.log ?? (message => console.log(`[update] ${message}`));
@@ -110,8 +128,9 @@ export class UpdateManager {
     const headers: Record<string, string> = { accept: "application/vnd.github+json", "user-agent": "baton-updater" };
     if (token) headers.authorization = `Bearer ${token}`;
     let api: Response | undefined, apiProblem: string | undefined;
+    let apiDetail: string | undefined;
     try { api = await this.fetchImpl(`https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, { headers, signal: AbortSignal.timeout(20000) }); }
-    catch (error) { apiProblem = networkReason(error); }
+    catch (error) { apiProblem = networkReason(error); apiDetail = networkDetail(error); }
     if (api?.ok) {
       try {
         const release = readRelease(await api.json() as unknown, this.target);
@@ -119,9 +138,9 @@ export class UpdateManager {
       } catch (error) { apiProblem = networkReason(error); }
     }
     // The API is rate limited, unreachable or failing: the latest release's own SHA256SUMS.txt names it (no API quota).
-    const fallback = await this.checkWithoutApi().catch((error: unknown) => ({ release: undefined, problem: networkReason(error) }));
+    const fallback = await this.checkWithoutApi();
     if (fallback.release) return this.decide(fallback.release, "github.com");
-    this.log(`check failed: api ${apiProblem ?? api?.status}, github.com ${fallback.problem}`);
+    this.log(`check failed: api ${apiDetail ?? api?.status}, github.com ${fallback.detail ?? fallback.problem}`);
     if (api && (api.status === 401 || api.status === 404)) return this.set({ phase: "error", failedStep: "check", needsToken: true, error: "GitHub 找不到这个仓库的最新版本。如果仓库是私有的，需要一个有读取权限的令牌（填在下面）。" });
     const apiPart = apiProblem ?? (api?.status === 403 || api?.status === 429 ? "接口被限流（匿名每小时 60 次）" : `接口返回 ${api?.status}`);
     return this.set({ phase: "error", failedStep: "check", error: `检查更新失败：${apiPart}，备用地址也没有连上（${fallback.problem}）。请检查网络或代理后重试。` });
@@ -134,11 +153,22 @@ export class UpdateManager {
     return this.set({ phase: order > 0 ? "available" : "current", release, checkedAt: new Date().toISOString() });
   }
 
-  private async checkWithoutApi(): Promise<{ release?: UpdateRelease; problem?: string }> {
-    const response = await this.fetchImpl(latestDownloadUrl(UPDATE_REPO, "SHA256SUMS.txt"), { headers: { "user-agent": "baton-updater" }, signal: AbortSignal.timeout(30000) });
-    if (!response.ok) return { problem: `github.com 返回 ${response.status}` };
-    const release = releaseFromChecksums(await response.text(), this.target!, UPDATE_REPO);
-    return release ? { release } : { problem: "最新版本没有适合这台电脑的安装包" };
+  /** The latest release's SHA256SUMS.txt (tiny): a few tries, since this is the path taken when the network is already bad. */
+  private async checkWithoutApi(): Promise<{ release?: UpdateRelease; problem?: string; detail?: string }> {
+    let last: { problem: string; detail?: string } = { problem: "无法连接 GitHub" };
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const response = await this.fetchImpl(latestDownloadUrl(UPDATE_REPO, "SHA256SUMS.txt"), { headers: { "user-agent": "baton-updater" }, signal: AbortSignal.timeout(30000) });
+        if (response.ok) {
+          const release = releaseFromChecksums(await response.text(), this.target!, UPDATE_REPO);
+          return release ? { release } : { problem: "最新版本没有适合这台电脑的安装包" };
+        }
+        last = { problem: `github.com 返回 ${response.status}` };
+        if (!retryable(response.status)) return last;
+      } catch (error) { last = { problem: networkReason(error), detail: networkDetail(error) }; }
+      if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, (this.options.retryDelayMs ?? 2000) * attempt));
+    }
+    return last;
   }
 
   /**
