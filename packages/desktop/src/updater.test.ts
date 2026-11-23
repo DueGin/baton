@@ -387,3 +387,33 @@ describe("network paths", () => {
     expect(sumsCalls).toBe(3);
   });
 });
+
+describe("the update directory", () => {
+  it("downloads even when a leftover from an earlier install cannot be removed", async () => {
+    const { chmod, mkdir } = await import("node:fs/promises");
+    const stuck = join(userData, "updates", "0.2.0", "unpacked", "baton.app", "Contents");
+    await mkdir(stuck, { recursive: true }); await writeFile(join(stuck, "app.asar"), "x"); await chmod(stuck, 0o000);
+    try {
+      const { fetchImpl } = flaky([{}]);
+      const { instance, logs } = manager(fetchImpl);
+      await instance.check();
+      expect((await instance.download()).phase).toBe("downloaded");
+      expect(logs.some((line) => line.startsWith("could not remove"))).toBe(true);
+    } finally { await chmod(stuck, 0o755); }
+  });
+
+  it("names a file-system failure as such and does not retry it as a network error", async () => {
+    const { chmod, mkdir } = await import("node:fs/promises");
+    await mkdir(join(userData, "updates", "0.2.0"), { recursive: true });
+    await writeFile(part(), big.subarray(0, 1000)); await chmod(part(), 0o444);
+    try {
+      const { fetchImpl, downloadCalls } = flaky([{}]);
+      const { instance } = manager(fetchImpl);
+      await instance.check();
+      const status = await instance.download();
+      expect(status).toMatchObject({ phase: "error", failedStep: "download" });
+      expect(status.error).toBe(`无法写入下载目录（没有写入权限）：${join(userData, "updates", "0.2.0")}。处理后点「继续下载」。`);
+      expect(downloadCalls()).toHaveLength(1);
+    } finally { await chmod(part(), 0o644); }
+  });
+});

@@ -18,6 +18,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { chmod, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { basename, dirname, join } from "node:path";
 import { compareVersions, DOWNLOAD_ATTEMPTS, latestDownloadUrl, networkReason, parseChecksums, readRelease, releaseFromChecksums, responseSize, updateTarget, UPDATE_REPO, type ReleaseAsset, type UpdateRelease, type UpdateStatus } from "./update.js";
 
@@ -45,6 +46,19 @@ export interface UpdateManagerOptions {
 }
 /** A failure that retrying will not fix (missing file, checksum mismatch, a 4xx other than 408/429). */
 class FatalDownload extends Error {}
+/**
+ * Electron's main process patches fs so `.asar` files read as directories: a recursive rm of an unpacked update
+ * (which contains Contents/Resources/app.asar) fails with ENOTEMPTY. Deletions use the unpatched `original-fs`
+ * (plain node:fs outside Electron, e.g. in tests).
+ */
+const plainRm: typeof rm = (() => {
+  try { return (createRequire(import.meta.url)("original-fs") as typeof import("node:fs")).promises.rm; } catch { return rm; }
+})();
+/** File-system failures (not network): reported as such and never retried. */
+const fileSystemError = (error: unknown): string | undefined => {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^E(?:ACCES|PERM|NOSPC|ROFS|NOTEMPTY|NOTDIR|ISDIR|EXIST|MFILE|DQUOT|IO)$/u.test(code) ? code : undefined;
+};
 /**
  * Chromium's stack (net.fetch) follows the system proxy; Node's fetch goes direct (or through a TUN). On flaky networks
  * either one can fail for minutes while the other works, so a request that fails to connect is tried once on the other.
@@ -187,19 +201,20 @@ export class UpdateManager {
     try {
       const token = await this.token();
       await mkdir(directory, { recursive: true });
-      for (const entry of await readdir(directory)) if (entry !== basename(part)) await rm(join(directory, entry), { recursive: true, force: true });
+      // Leftovers from an earlier install (unpacked app, swap script) must not block the download.
+      for (const entry of await readdir(directory)) if (entry !== basename(part)) await this.remove(join(directory, entry));
       let received = await sizeOf(part);
       this.set({ phase: "downloading", progress: total ? received / total : 0, received, total, error: undefined, failedStep: undefined, retrying: undefined, savedPath: undefined });
       for (let attempt = 1; ; attempt++) {
         try {
           total = (await this.fetchPart(release.asset, part, received, token, total)) ?? total;
           received = await sizeOf(part);
-          if (total !== undefined && received > total) { await rm(part, { force: true }); throw new Error("下载的文件比预期大，重新下载"); }
+          if (total !== undefined && received > total) { await plainRm(part, { force: true }); throw new Error("下载的文件比预期大，重新下载"); }
           if (total !== undefined && received < total) throw new Error("terminated: the connection closed early");
           break;
         } catch (error) {
           received = await sizeOf(part);
-          if (error instanceof FatalDownload || attempt >= DOWNLOAD_ATTEMPTS) throw error;
+          if (error instanceof FatalDownload || fileSystemError(error) || attempt >= DOWNLOAD_ATTEMPTS) throw error;
           this.log(`download attempt ${attempt} failed at ${received}/${total ?? "?"}: ${networkReason(error)}`);
           this.set({ phase: "downloading", retrying: attempt, received, total, progress: total ? received / total : undefined });
           await new Promise((resolve) => setTimeout(resolve, Math.min(15000, (this.options.retryDelayMs ?? 2000) * 1.6 ** (attempt - 1))));
@@ -211,19 +226,27 @@ export class UpdateManager {
         const hash = createHash("sha256");
         createReadStream(part).on("data", (chunk) => hash.update(chunk)).on("end", () => resolve(hash.digest("hex"))).on("error", reject);
       });
-      if (actual !== expected) { await rm(part, { force: true }); throw new FatalDownload("下载的文件校验失败（SHA256 不一致），已删除，请重新下载。"); }
+      if (actual !== expected) { await plainRm(part, { force: true }); throw new FatalDownload("下载的文件校验失败（SHA256 不一致），已删除，请重新下载。"); }
       this.log(`sha256 ok ${actual.slice(0, 12)}`);
       await rename(part, file);
       return this.set({ phase: "downloaded", progress: 1, received, total, savedPath: file, retrying: undefined });
     } catch (error) {
       const received = await sizeOf(part);
+      const fsCode = fileSystemError(error);
       const message = error instanceof FatalDownload ? error.message
+        : fsCode ? `无法写入下载目录（${fsCode === "ENOSPC" || fsCode === "EDQUOT" ? "磁盘空间不足" : fsCode === "EACCES" || fsCode === "EPERM" || fsCode === "EROFS" ? "没有写入权限" : fsCode}）：${dirname(part)}。处理后点「继续下载」。`
         : error instanceof StatusError && !retryable(error.status) ? `下载失败：${error.message}。`
         : `下载中断：${networkReason(error)}，已自动重试 ${DOWNLOAD_ATTEMPTS - 1} 次。已下载 ${percent(received, total)}，点「继续下载」会从断点接着下。`;
       return this.set({ phase: "error", failedStep: "download", retrying: undefined, received, total, progress: total ? received / total : undefined, error: message });
     } finally {
       this.downloading = false;
     }
+  }
+
+  /** Best-effort removal: logs and moves on, since a leftover file never matters more than the update itself. */
+  private async remove(path: string): Promise<void> {
+    try { await plainRm(path, { recursive: true, force: true, maxRetries: 3 }); }
+    catch (error) { this.log(`could not remove ${path}: ${error instanceof Error ? error.message : String(error)}`); }
   }
 
   /** One request for the rest of the file (Range from `offset`), appended to `part`. Returns the whole size when known. */
@@ -240,7 +263,7 @@ export class UpdateManager {
         const total = responseSize(response.headers);
         await response.body?.cancel().catch(() => undefined);
         if (total === offset) return total;
-        await rm(part, { force: true }); throw new Error("terminated: the partial file does not match, restarting");
+        await plainRm(part, { force: true }); throw new Error("terminated: the partial file does not match, restarting");
       }
       if (!response.ok || !response.body) throw retryable(response.status) ? new StatusError(response.status) : new FatalDownload(`下载失败：GitHub 返回 ${response.status}。`);
       const resumed = offset > 0 && response.status === 206;   // a 200 means the server ignored Range: start over
@@ -325,7 +348,7 @@ export class UpdateManager {
     if (!current.endsWith(".app")) throw new InstallUnsupported("找不到当前的应用位置，请到 Releases 手动下载安装。");
     if (!(await writableApp(current))) throw new InstallUnsupported(`baton 位于 ${current}，没有写入权限，请到 Releases 手动下载安装。`);
     const work = join(app.getPath("userData"), "updates", version, "unpacked");
-    await rm(work, { recursive: true, force: true }); await mkdir(work, { recursive: true });
+    await plainRm(work, { recursive: true, force: true, maxRetries: 3 }); await mkdir(work, { recursive: true });
     await run("ditto", ["-x", "-k", zipPath, work]).catch(error => { throw new Error(`解压失败：${error instanceof Error ? error.message : String(error)}`); });
     const source = await findApp(work);
     if (!source) throw new Error("压缩包里没有 .app。");
