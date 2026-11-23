@@ -12,7 +12,29 @@ import { externalEnv, spawnProcess } from "../process.js";
 import { mapClaudeCompletedToolCall, mapClaudeFailedToolCall, mapClaudeRunningToolCall } from "./claude/tool-call-mapper.js";
 import { claudeConfigDir, claudeTranscriptPath, lastAssistantEntry, parseClaudeRewindPoint, realClaudeRewindSdk, revertClaudeConversation, type ClaudeRewindSdk } from "./claude/rewind.js";
 export type ClaudeQueryFactory = typeof query;
-type ClaudeClientOptions = ClientOptions & { queryFactory?: ClaudeQueryFactory; rewindSdk?: ClaudeRewindSdk };
+type ClaudeClientOptions = ClientOptions & { cliVersion?: string; queryFactory?: ClaudeQueryFactory; rewindSdk?: ClaudeRewindSdk };
+export function claudeCustomHeaders(headers: string | undefined, versionOutput: string | undefined): string | undefined {
+    const version = versionOutput?.match(/\bv?(\d+\.\d+\.\d+)\b/)?.[1];
+    if (!version || headers?.split(/\r?\n/).some(line => /^\s*user-agent\s*:/i.test(line))) return headers;
+    const userAgent = `User-Agent: claude-cli/${version} (external, cli)`;
+    return headers ? `${headers}${headers.endsWith("\n") ? "" : "\n"}${userAgent}` : userAgent;
+}
+function envKey(env: NodeJS.ProcessEnv | undefined, key: string): string {
+    if (process.platform !== "win32" || !env) return key;
+    return Object.keys(env).find(name => name.toUpperCase() === key) ?? key;
+}
+export function claudeChildEnv(spawnEnv: NodeJS.ProcessEnv, caseInsensitive = false): NodeJS.ProcessEnv {
+    // Some upstream gateways only allow the standard Claude Code CLI User-Agent.
+    const cliEnv = {
+        CLAUDE_CODE_ENTRYPOINT: "cli",
+        // Node omits undefined values when spawning, even after spawnProcess merges the parent env.
+        CLAUDE_AGENT_SDK_VERSION: undefined,
+        CLAUDE_AGENT_SDK_CLIENT_APP: undefined,
+    };
+    const env = { ...spawnEnv };
+    if (caseInsensitive) for (const key of Object.keys(env)) if (Object.hasOwn(cliEnv, key.toUpperCase())) delete env[key];
+    return { ...env, ...cliEnv };
+}
 type ClaudeBlock = { type: "text"; text: string } | { type: "image"; source: { type: "base64"; media_type: "image/png" | "image/jpeg" | "image/gif" | "image/webp"; data: string } };
 type ClaudeContent = string | ClaudeBlock[];
 /** The Messages API caps an image at 5 MB; base64 inflates by 4/3, so stay at 3.75 MB of file.
@@ -125,7 +147,14 @@ class ClaudeSession extends ProviderSession {
             ...(config.systemPrompt ? { systemPrompt: { type: "preset", preset: "claude_code", append: config.systemPrompt } } : {}),
             ...(handle ? { resume: handle.sessionId } : {}), mcpServers: config.mcpServers,
             spawnClaudeCodeProcess: spawnOptions => {
-                const child = spawnProcess(options.command.length > 1 ? options.command[0]! : spawnOptions.command, options.command.length > 1 ? [...options.command.slice(1), ...spawnOptions.args] : spawnOptions.args, { cwd: spawnOptions.cwd, env: externalEnv(spawnOptions.env, options.env, config.env), signal: spawnOptions.signal });
+                const env = externalEnv(claudeChildEnv(spawnOptions.env, process.platform === "win32"), options.env, config.env);
+                const entrypoint = "CLAUDE_CODE_ENTRYPOINT";
+                if (options.env?.[envKey(options.env, entrypoint)] === undefined && config.env?.[envKey(config.env, entrypoint)] === undefined) {
+                    const key = envKey(env, "ANTHROPIC_CUSTOM_HEADERS");
+                    const headers = claudeCustomHeaders(env[key], options.cliVersion);
+                    if (headers !== undefined) env[key] = headers;
+                }
+                const child = spawnProcess(options.command.length > 1 ? options.command[0]! : spawnOptions.command, options.command.length > 1 ? [...options.command.slice(1), ...spawnOptions.args] : spawnOptions.args, { cwd: spawnOptions.cwd, env, signal: spawnOptions.signal });
                 this.child = child;
                 return child;
             },

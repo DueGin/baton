@@ -4,6 +4,7 @@ import { Slice, type Node as PMNode, type Schema } from "@tiptap/pm/model";
 import type { BatonClient } from "../api.js";
 import { docIsEmpty, docToMarkdown, IMAGE_NODE, markdownToDoc, pastedTextDoc } from "../lib/composer-markdown.js";
 import { acceptImages, attachmentName, composerUploads } from "../lib/composer-uploads.js";
+import { isSendKey, sendShortcuts } from "../lib/send-shortcut.js";
 import { imageSource, useImageContext, useImageUrl } from "../lib/images.js";
 import { composerExtensions, imageIdentity, ImageOrderContext, imageStatus, type ComposerImageStatus } from "./composer-extensions.js";
 import { ImageLightbox } from "./Images.js";
@@ -88,12 +89,24 @@ export function Composer({ ref, nodeId, client, placeholder, disabled, imagesEna
     immediatelyRender: typeof window !== "undefined",
     shouldRerenderOnTransaction: false,
     enablePasteRules: ["link"],
-    extensions: composerExtensions({ placeholder: () => props.current.placeholder, submit: () => actions.current.submit() }),
+    extensions: composerExtensions({ placeholder: () => props.current.placeholder }),
     content: drafts.get(nodeId) ?? "",
     editable: !disabled,
     editorProps: {
       attributes: () => ({ class: "composer-editor", role: "textbox", "aria-multiline": "true", "aria-label": "消息", "aria-placeholder": props.current.placeholder, ...(props.current.disabled ? { "aria-disabled": "true" } : {}) }),
       handleDOMEvents: { keydown: (_view: unknown, event: KeyboardEvent) => { shiftHeld.current = event.shiftKey; return false; } },
+      handleKeyDown: (view: Editor["view"], event: KeyboardEvent) => {
+        const shortcut = sendShortcuts.getSnapshot();
+        if (view.composing || !isSendKey(event, shortcut)) return false;
+        if (shortcut === "enter") {
+          const { $from } = view.state.selection;
+          for (let depth = $from.depth; depth > 0; depth--) {
+            const type = $from.node(depth).type;
+            if (type.spec.code || type.name === "listItem" || type.name === "taskItem") return false;
+          }
+        }
+        actions.current.submit(); return true;
+      },
       handlePaste: (view: Editor["view"], event: ClipboardEvent) => {
         const data = event.clipboardData; if (!data) return false;
         const files = imageFiles(data.files); const text = data.getData("text/plain");

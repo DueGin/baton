@@ -1,17 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { applyEvent, type RunEventEnvelope } from "@baton/protocol";
 import { DemoClient } from "./client.js";
-import { backgroundSummary } from "../lib/background.js";
+import { backgroundSummary, groupExitedProcesses } from "../lib/background.js";
 import { summarize } from "../lib/derive.js";
 const base = Date.parse("2026-11-15T01:00:00Z");
 describe("background process demo", () => {
   it("exposes tree/inferred/exited entries and folds the Vite child", async () => {
     const client = new DemoClient(() => base); const snapshot = await client.run("run-background"); const entries = snapshot.backgroundProcesses!;
-    expect(entries).toHaveLength(3); expect(backgroundSummary(snapshot)).toMatchObject({ count: 2, hasPorts: true });
+    expect(entries).toHaveLength(7); expect(backgroundSummary(snapshot)).toMatchObject({ count: 2, hasPorts: true });
     expect(entries.find(process => process.attribution === "tree")).toMatchObject({ command: "npm run dev", ports: [5173], children: [{ pid: 4202 }] });
     expect(entries.some(process => process.attribution === "inferred" && process.ports.includes(8000))).toBe(true);
-    expect(entries.some(process => process.status === "exited")).toBe(true);
-    expect((await client.background()).length).toBe(2); expect((await client.background("all")).length).toBe(3);
+    const groups = groupExitedProcesses(backgroundSummary(snapshot).exited);
+    expect(groups.map(group => group.records.length)).toEqual([3, 1, 1]);
+    expect(groups[0]!.records[0]).toMatchObject({ ports: [55218], command: "go test -tags=integration ./..." });
+    expect((await client.background()).length).toBe(2); expect((await client.background("all")).length).toBe(entries.length);
     expect(summarize(snapshot).backgroundCount).toBe(2);
     for (const process of entries) expect(snapshot.nodes.some(node => node.id === process.nodeId)).toBe(true);
   });
@@ -24,7 +26,7 @@ describe("background process demo", () => {
     await client.dismissBackground(python!.id, { dismissed: true }); expect((await client.background()).length).toBe(1);
     expect((await client.background("all")).find(process => process.id === python!.id)).toMatchObject({ dismissed: true, status: "running" });
     now += 1600; const after = await client.run(before.run.id);
-    expect(after.backgroundProcesses).toHaveLength(3); expect(after.backgroundProcesses![0]).toMatchObject({ status: "exited", stoppedBy: "human" });
+    expect(after.backgroundProcesses).toHaveLength(before.backgroundProcesses!.length); expect(after.backgroundProcesses![0]).toMatchObject({ status: "exited", stoppedBy: "human" });
     controller.abort(); await streaming; expect(events.reduce(applyEvent, before)).toEqual(after); expect(summarize(after).backgroundCount).toBe(0);
     await client.dismissBackground(python!.id, { dismissed: false }); expect((await client.background()).length).toBe(1);
   });

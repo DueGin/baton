@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentEntry, RunPolicy, TeamRecord } from "@baton/protocol";
-import { correctionPrompt, followupPrompt, noticePrompt, systemPrompt } from "./prompts.js";
+import { correctionPrompt, followupPrompt, leadReviewNotice, noticePrompt, systemPrompt } from "./prompts.js";
 
 const policy: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "dynamic" };
 const agent = (id: string, model: string): AgentEntry => ({
@@ -9,6 +9,13 @@ const agent = (id: string, model: string): AgentEntry => ({
 });
 const root = { id: "n1", depth: 0, parentNodeId: null, agentId: "claude" };
 const child = { id: "n2", depth: 1, parentNodeId: "n1", agentId: "codex" };
+const reviewRequirements = [
+  "inspect the diff", "builds, type checks, and tests", "Real run", "the user's current environment",
+  "an unused port", "temporary data directory", "stop only the processes you started", "mock data or simulated agents",
+  "screenshot for each UI acceptance point", "read the image files yourself", "layout, text, and state",
+  "errors or raw markup", "screenshot paths", "what you actually saw", "List unverified points separately",
+  "do not mark an unseen screenshot as passed", "use send to request fixes", "verify it again",
+];
 
 describe("systemPrompt", () => {
   it("makes the root a lead by default and lists the agents it can delegate to", () => {
@@ -23,6 +30,36 @@ describe("systemPrompt", () => {
     const text = systemPrompt(root, policy, []);
     expect(text).toContain("two or more files");
     expect(text).toContain("is NOT trivial: you must build a team");
+  });
+  it("requires personal review of each result only for a non-solo lead when enabled", () => {
+    for (const mode of ["dynamic", "preset"] as const) {
+      const enabled = systemPrompt(root, { ...policy, mode, leadReview: true });
+      const disabled = systemPrompt(root, { ...policy, mode, leadReview: false });
+      expect(enabled).toContain("Lead review is enabled");
+      expect(disabled).not.toContain("Lead review is enabled");
+      for (const requirement of reviewRequirements) {
+        expect(enabled).toContain(requirement);
+        expect(disabled).not.toContain(requirement);
+      }
+    }
+    expect(systemPrompt(child, { ...policy, leadReview: true })).toBe(systemPrompt(child, policy));
+    expect(systemPrompt(root, { ...policy, mode: "solo", leadReview: true })).toBe(systemPrompt(root, { ...policy, mode: "solo" }));
+  });
+  it("delivers the full acceptance procedure only in the enabled policy notice", () => {
+    const enabled = leadReviewNotice(true), disabled = leadReviewNotice(false);
+    expect(enabled).toContain('<baton-notice kind="policy">\nThe human changed the run policy. Lead review is enabled.');
+    expect(disabled).toContain('<baton-notice kind="policy">\nThe human changed the run policy. Lead review is disabled');
+    for (const requirement of reviewRequirements) {
+      expect(enabled).toContain(requirement);
+      expect(disabled).not.toContain(requirement);
+    }
+  });
+  it("discourages waiting in a loop and teaches delegates to yield without reporting", () => {
+    expect(systemPrompt(root, policy)).toContain("Do not call wait in a loop");
+    const guidance = "end your turn without calling report_result";
+    expect(systemPrompt(child, policy)).toContain(guidance);
+    expect(systemPrompt(root, policy)).not.toContain(guidance);
+    expect(systemPrompt({ ...child, depth: 3 }, policy)).not.toContain(guidance);
   });
   it("supports solo and never gives members lead instructions", () => {
     expect(systemPrompt(root, { ...policy, mode: "solo" })).toContain("Work alone");
@@ -77,7 +114,7 @@ describe("agent message tags", () => {
     );
   });
 
-  it.each(["team", "system"] as const)("keeps %s notices distinct from follow-ups", (kind) => {
+  it.each(["team", "system", "policy"] as const)("keeps %s notices distinct from follow-ups", (kind) => {
     expect(noticePrompt(kind, "First line\nSecond line")).toBe(`<baton-notice kind="${kind}">\nFirst line\nSecond line\n</baton-notice>`);
   });
 });

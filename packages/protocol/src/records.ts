@@ -105,6 +105,14 @@ export interface RunPolicy {
    * node that created it (as a queued follow-up message); "off".
    */
   prFeedback?: "off" | "notify" | "auto";
+  /**
+   * Lead review (DESIGN §4.5 "主导者验收"): when true, the lead must verify every delegate's changes
+   * (read the diff, run the relevant build/tests) before accepting them, and send fixes back instead
+   * of accepting unverified work. Default false. Can be toggled mid-run (PATCH policy): the kernel
+   * tells the root node with a <baton-notice kind="policy"> and every later <baton-results> delivery
+   * carries the current rule.
+   */
+  leadReview?: boolean;
   /** Max active members on a team (form_team / additions beyond it are rejected). Default 5. */
   maxTeamSize?: number;
   /** A node with an active turn and no events for this long raises a "stall" escalation. Default 10. */

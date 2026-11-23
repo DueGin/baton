@@ -20,7 +20,7 @@ export interface DeliveredResult {
   artifactsText?: string;
   note?: string;
 }
-export type NoticeKind = "team" | "system" | "correction";
+export type NoticeKind = "team" | "system" | "correction" | "policy";
 /** <baton-message>: another agent session (send_message), DESIGN §4.16. */
 export type SessionMessagePart = { type: "message"; from: string; agent: string; role?: string; nodeTitle?: string; run: string; runTitle?: string; project?: string; text: string };
 export type BatonMessagePart = { type: "text"; text: string } | SessionMessagePart | { type: "notice"; text: string; kind?: NoticeKind } | { type: "followup"; delegationId: string; text: string } | { type: "answer"; questionId: string; text: string } | AssignmentMessage | { type: "results"; results: DeliveredResult[] };
@@ -141,7 +141,7 @@ export function parseBatonMessage(text: string): BatonMessagePart[] | null {
     } else if (tag === "baton-notice") {
       if (!body.trim()) return null;
       const rawKind = /\bkind\s*=\s*["']([^"']+)["']/.exec(head[1]!)?.[1];
-      const kind = rawKind === "team" || rawKind === "system" || rawKind === "correction" ? rawKind : undefined;
+      const kind = rawKind === "team" || rawKind === "system" || rawKind === "correction" || rawKind === "policy" ? rawKind : undefined;
       parts.push({ type: "notice", text: body.trim(), ...(kind ? { kind } : {}) });
     } else if (tag === "baton-assignment") {
       const parsed = assignment(head[1]!, body);
@@ -150,8 +150,16 @@ export function parseBatonMessage(text: string): BatonMessagePart[] | null {
     } else {
       if (head[1]!.trim()) return null;
       const results: DeliveredResult[] = [];
+      const notes: string[] = [];
       let blocks = body.trim();
       while (blocks) {
+        const nextTag = blocks.search(/<\/?result\b/);
+        if (nextTag !== 0) {
+          const note = (nextTag < 0 ? blocks : blocks.slice(0, nextTag)).trim();
+          if (note) notes.push(note);
+          if (nextTag < 0) break;
+          blocks = blocks.slice(nextTag);
+        }
         const result = /^<result((?:[^">]|"[^"]*")*)>\n?([\s\S]*?)<\/result>/.exec(blocks);
         if (!result || /<\/?result\b/.test(result[2]!)) return null;
         const parsed = deliveredResult(result[1]!, result[2]!);
@@ -160,6 +168,7 @@ export function parseBatonMessage(text: string): BatonMessagePart[] | null {
       }
       if (!results.length) return null;
       parts.push({ type: "results", results });
+      if (notes.length) parts.push({ type: "text", text: notes.join("\n\n") });
     }
     recognized = true;
     rest = rest.slice(end + tag.length + 3);

@@ -20,7 +20,7 @@ async function fixture() {
 describe("inline turn indicator", () => {
   it("places a completed-turn footer beneath that turn's final output and a live indicator after the latest item inside the scroll area", async () => {
     const { store, node, turn, snapshot, rows } = await fixture();
-    const render = (value: RunSnapshot, messages: ItemRecord[]) => renderToStaticMarkup(<Transcript snapshot={value} store={store} items={{ [node.id]: messages }} itemStatus={{ [node.id]: "ready" }} nodeId={node.id} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} />);
+    const render = (value: RunSnapshot, messages: ItemRecord[]) => renderToStaticMarkup(<Transcript showTopology={() => undefined} snapshot={value} store={store} items={{ [node.id]: messages }} itemStatus={{ [node.id]: "ready" }} nodeId={node.id} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} />);
     const ended = render(snapshot, rows);
     expect(ended).not.toContain("turn-indicator motion-safe"); expect(ended).not.toContain("正在回复"); expect(ended).toContain("用时 2m 32s"); expect(ended).toContain("1.16M tokens"); expect(ended).toContain("子任务结果");
     expect(ended.indexOf("全部修改完成。")).toBeLessThan(ended.indexOf('data-turn-footer="done"'));

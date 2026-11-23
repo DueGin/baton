@@ -16,14 +16,14 @@ describe("safe agent content rendering", () => {
     const snapshot = await client.run("run-questions"); const question = snapshot.questions[0]!;
     await client.answer(question.id, { answers: { scope: ["当前项目"], checks: ["中文", "权限"] } });
     const live = await client.run(snapshot.run.id); const items = (await client.items(question.nodeId)).items;
-    const html = renderToStaticMarkup(<Transcript snapshot={live} store={store} items={{ [question.nodeId]: items }} itemStatus={{ [question.nodeId]: "ready" }} nodeId={question.nodeId} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} />);
+    const html = renderToStaticMarkup(<Transcript showTopology={() => undefined} snapshot={live} store={store} items={{ [question.nodeId]: items }} itemStatus={{ [question.nodeId]: "ready" }} nodeId={question.nodeId} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} />);
     expect(html.indexOf("先确认两个产品选择")).toBeLessThan(html.indexOf("question-card")); expect(html.indexOf("question-card")).toBeLessThan(html.indexOf("已收到回答，继续执行"));
     expect(html).not.toContain("tool-row"); expect(html).toContain("你的回答："); expect(html).not.toContain("baton-answer-card");
   });
   it("docks a pending question above the composer and leaves a slim marker in the transcript", async () => {
     const now = Date.parse("2026-11-10T07:00:00Z"); const client = new DemoClient(() => now); const store = new RunStore(client);
     const snapshot = await client.run("run-questions"); const question = snapshot.questions[0]!; const items = (await client.items(question.nodeId)).items;
-    const html = renderToStaticMarkup(<Transcript snapshot={snapshot} store={store} items={{ [question.nodeId]: items }} itemStatus={{ [question.nodeId]: "ready" }} nodeId={question.nodeId} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} />);
+    const html = renderToStaticMarkup(<Transcript showTopology={() => undefined} snapshot={snapshot} store={store} items={{ [question.nodeId]: items }} itemStatus={{ [question.nodeId]: "ready" }} nodeId={question.nodeId} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} />);
     const transcript = html.slice(0, html.indexOf('class="composer-stack"')); const stack = html.slice(html.indexOf('class="composer-stack"'));
     expect(transcript).toContain("question-marker"); expect(transcript).toContain("在输入框上方作答"); expect(transcript).not.toContain("question-card");
     expect(stack.indexOf('class="question-dock"')).toBeLessThan(stack.indexOf('class="composer"')); expect(stack).toContain("question-card question-pending is-compact"); expect(stack).toContain("提交回答"); expect(stack).toContain('aria-label="收起问题"');
@@ -33,11 +33,12 @@ describe("safe agent content rendering", () => {
     const now = Date.parse("2026-11-10T07:00:00Z"); const store = new RunStore(new DemoClient(() => now));
     const live = replay(createScenario(0), 30000); const node = live.nodes[0]!;
     expect(live.nodes.some(entry => nodeIsLive(live, entry))).toBe(true);
-    const render = (snapshot: typeof live, actions = true) => renderToStaticMarkup(<Transcript snapshot={snapshot} store={store} items={{ [node.id]: [] }} itemStatus={{ [node.id]: "ready" }} nodeId={node.id} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} {...(actions ? { stopRun: () => undefined, resumeRun: () => undefined } : {})} />);
+    const render = (snapshot: typeof live, actions = true) => renderToStaticMarkup(<Transcript showTopology={() => undefined} snapshot={snapshot} store={store} items={{ [node.id]: [] }} itemStatus={{ [node.id]: "ready" }} nodeId={node.id} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} {...(actions ? { stopRun: () => undefined, resumeRun: () => undefined } : {})} />);
     const working = render(live); expect(working).toContain("composer-stop"); expect(working).toContain('aria-label="停止"'); expect(working).not.toContain('aria-label="发送"'); expect(working).not.toMatch(/<\/svg>(停止|发送|继续)<\/button>/);
     const paused = render({ ...live, run: { ...live.run, status: "paused" } }); expect(paused).toContain("composer-resume"); expect(paused).toContain('aria-label="继续"'); expect(paused).not.toMatch(/<\/svg>继续<\/button>/);
     const restarted = render({ ...live, run: { ...live.run, status: "paused", pauses: [{ at: live.run.createdAt, by: "restart" }] } }); expect(restarted).toContain("baton 重启时有 agent 正在工作"); expect(restarted).toContain("composer-resume");
-    const done = render({ ...live, run: { ...live.run, status: "completed" } }); expect(done).not.toContain("composer-stop"); expect(done).toContain('aria-label="发送"'); expect(done).not.toMatch(/<\/svg>发送<\/button>/);
+    const done = render({ ...live, run: { ...live.run, status: "completed" } }); expect(done).not.toContain("composer-stop"); expect(done).toMatch(/aria-label="发送（(?:⌘|Ctrl) Enter）"/u); expect(done).not.toMatch(/<\/svg>发送<\/button>/);
+    expect(done).not.toContain("发送到当前节点"); expect(working).not.toContain("发送后排队，可在消息上改为引导或立即发送");
     expect(render(live, false)).not.toContain("composer-stop");
   });
   it("keeps queued/retracted rows out of the transcript and places icon actions on steered messages", () => {

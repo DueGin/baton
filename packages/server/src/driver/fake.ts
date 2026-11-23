@@ -31,7 +31,7 @@ export interface FakeContext {
 }
 export type FakeSaveImage = (data: Uint8Array | string, mimeType: string, name?: string) => Promise<AttachmentRef>;
 export type FakeScript = (context: FakeContext) => Promise<void> | void;
-export interface FakeDriverOptions { script?: FakeScript; scripts?: FakeScript[]; steer?: boolean; label?: string; /** Accept image parts (default true). */ images?: boolean; /** Native conversation rewind (default true); false exercises the replay fallback. */ rewind?: boolean }
+export interface FakeDriverOptions { script?: FakeScript; scripts?: FakeScript[]; steer?: boolean; resume?: boolean; label?: string; /** Accept image parts (default true). */ images?: boolean; /** Native conversation rewind (default true); false exercises the replay fallback. */ rewind?: boolean }
 const capabilities = { steer: true, resume: true, reasoning: true, mcp: true, images: true };
 export class FakeDriver implements AgentDriver {
   readonly capabilities: AgentEntry["capabilities"];
@@ -39,7 +39,7 @@ export class FakeDriver implements AgentDriver {
   /** Native rewinds performed by this driver's sessions (points as given), for tests. */
   readonly rewinds: JsonValue[] = [];
   saveImage?: FakeSaveImage;
-  constructor(readonly agentId: string, readonly options: FakeDriverOptions = {}) { this.capabilities = { ...capabilities, steer: options.steer ?? true, images: options.images ?? true }; }
+  constructor(readonly agentId: string, readonly options: FakeDriverOptions = {}) { this.capabilities = { ...capabilities, steer: options.steer ?? true, resume: options.resume ?? true, images: options.images ?? true }; }
   async open(spec: OpenSessionSpec): Promise<FakeSession> {
     const session = new FakeSession(this, spec); this.sessions.push(session); return session;
   }

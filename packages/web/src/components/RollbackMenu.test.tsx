@@ -97,7 +97,7 @@ describe("demo rollback", () => {
     expect(events.some(event => event.type === "item" && event.rolledBack)).toBe(true);
     controller.abort();
     const latest = await client.run(snapshot.run.id);
-    const html = renderToStaticMarkup(<Transcript snapshot={latest} store={store} items={{ [root]: items }} itemStatus={{ [root]: "ready" }} nodeId={root} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} />);
+    const html = renderToStaticMarkup(<Transcript showTopology={() => undefined} snapshot={latest} store={store} items={{ [root]: items }} itemStatus={{ [root]: "ready" }} nodeId={root} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} />);
     expect(html).toContain("rolled-back-toggle");
     expect(html).toMatch(/已回退 \d+ 条消息/);
     expect(html).not.toContain("rolled-back-row");

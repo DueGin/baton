@@ -21,6 +21,9 @@ describe("conversation demo", () => {
     const streaming = client.events(initial.run.id, initial.lastSeq, event => events.push(event), controller.signal);
     const root = initial.run.rootNodeId; const pi = initial.nodes.find(node => node.agentId === "pi")!.id;
     expect((await client.send(root, "立即插入", "steer-1", "steer")).delivery).toBe("steered");
+    const transcript = conversationRows((await client.items(root)).items, [], root);
+    expect(transcript.at(-2)?.row.item).toMatchObject({ clientId: "steer-1", steeredAfterSeq: transcript.at(-3)?.row.seq });
+    expect(transcript.at(-1)?.row.item).toMatchObject({ type: "assistant_message", text: expect.stringContaining("收到引导") });
     const queued = await client.send(pi, "排队补充", "queue-1");
     expect(queued.delivery).toBe("queued");
     expect(await client.send(pi, "排队补充", "queue-1")).toEqual(queued);
@@ -84,6 +87,20 @@ describe("conversation demo", () => {
     now += 60_000;
     expect((await client.items(pi)).items.find(row => row.seq === removed.itemSeq)!.item).toMatchObject({ delivery: "retracted" });
     expect((await client.run(snapshot.run.id)).turns.filter(turn => turn.nodeId === pi)).toHaveLength(2);
+  });
+
+  it("starts a fresh item for a reasoning chunk scheduled after steering", async () => {
+    let now = base; const client = new DemoClient(() => now);
+    const snapshot = await client.run("run-conversation"), nodeId = snapshot.run.rootNodeId;
+    now += 46_000; await client.send(nodeId, "start a new turn");
+    now += 1000; const thinking = (await client.items(nodeId)).items.at(-1)!;
+    expect(thinking.item.type).toBe("reasoning");
+    const steer = await client.send(nodeId, "adjust plan", undefined, "steer");
+    now += 2000; const after = (await client.items(nodeId)).items;
+    const transcript = conversationRows(after, [], nodeId);
+    expect(transcript.slice(-3).map(({ row }) => row.seq)).toEqual([thinking.seq, steer.itemSeq, after.at(-1)!.seq]);
+    expect(after.find(row => row.seq === thinking.seq)).toEqual(thinking);
+    expect(after.at(-1)?.item).toMatchObject({ type: "reasoning", text: "检查当前任务、验收条件和已交付结果，再调整实现。" });
   });
 
   it("delivers multiple queued rows as one turn and starts idle nodes immediately for every mode", async () => {

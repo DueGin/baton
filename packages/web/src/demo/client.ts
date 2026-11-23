@@ -1,5 +1,8 @@
 import { applyEvent, emptyUsage, type CreateRunRequest, type DelegationRecord, type GetItemsResponse, type PatchRunRequest, type PermissionDecision, type RunEvent, type RunEventEnvelope, type RunSnapshot, type TimelineItem, type AddMemberRequest, type ReplaceMemberRequest, type ReassignRequest, type TeamPreset, type TeamPresetInput, type SaveTeamPresetRequest, type TeamRecord, type TeamMember, type TeamMemberSpec, type TeamChange, type TeamProposal, type ApproveTeamProposalRequest, type RejectTeamProposalRequest, type InboxItem, type AnswerQuestionRequest, type ResolveEscalationRequest, type PermissionRule, type CreatePermissionRuleRequest, type QuestionRecord, type EscalationRecord, type SendMessageResponse, type SettingsResponse, type UpdateSettingsRequest, type TestTitleModelRequest, type TestTitleModelResponse } from "@baton/protocol";
 import { idleScenario } from "./idle.js";
+import type { NodeRecord, UpdateNodeConfigRequest, UpdateNodeConfigResponse } from "@baton/protocol";
+import { activeTurn, conversationRows } from "../lib/conversation.js";
+import { compatibleThinking, findModel, thinkingOptions } from "../lib/models.js";
 import type { BackgroundProcess, CancelRunRequest, DismissBackgroundRequest, StopBackgroundRequest, ListBackgroundResponse } from "@baton/protocol";
 import { demoBackground } from "./background.js";
 import { backgroundActive } from "../lib/background.js";
@@ -16,7 +19,7 @@ import { agentMessageDemo } from "./messages.js";
 import { pullRequestDemo } from "./pull-requests.js";
 import { isOpenPr, linkedPullRequests, safePrUrl } from "../lib/pull-requests.js";
 import type { PullRequestRecord, ListPullRequestsResponse, LinkPullRequestRequest, PullRequestFeedbackRequest } from "@baton/protocol";
-import { demoNoticePrompt, demoBriefPrompt, demoResultsPrompt } from "./prompts.js";
+import { demoNoticePrompt, demoBriefPrompt, demoResultDelivery, demoResultsPrompt, demoReviewReminder } from "./prompts.js";
 import { snapshotInbox, sortInbox, permissionPattern } from "../lib/inbox.js";
 import { matchPermissionRule } from "../lib/permission-rules.js";
 import { activeMembers, cleanCandidate, cleanMember, defaultAgentSpec, pendingProposals, validateMembers, validatePreset } from "../lib/teams.js";
@@ -224,14 +227,16 @@ export class DemoClient implements BatonClient {
       data.remaining = data.remaining.filter(event => Date.parse(event.ts) > this.now());
       for (const event of ready) {
         if (terminal(data.snapshot.run.status) && event.type !== "background") continue;
-        this.emit(data, event);
+        if (event.seq > 0 && event.type === "item" && event.item.type === "user_message" && event.item.text.startsWith("<baton-results>")) {
+          this.emit(data, { ...event, item: { ...event.item, text: demoResultDelivery(event.item.text, data.snapshot.run, event.nodeId) } });
+        } else this.emit(data, event);
         if (event.type === "turn.updated" && event.patch.status && event.patch.status !== "running") {
           const nodeId = data.snapshot.turns.find(turn => turn.id === event.turnId)?.nodeId;
           if (nodeId) this.deliverQueued(data, nodeId);
         }
         if (event.seq === 0 && event.type === "delegation.updated" && event.patch.deliveredAt) {
           const edge = data.snapshot.delegations.find(entry => entry.id === event.delegationId);
-          if (edge && edge.result) this.append(data, edge.fromNodeId, { type: "user_message", text: demoResultsPrompt([edge]) });
+          if (edge && edge.result) this.appendResult(data, edge);
         }
       }
       if (!terminal(data.snapshot.run.status) && ready.some(event => event.seq === 0 && event.type !== "background") && data.snapshot.nodes.every(node => node.status === "idle" || terminal(node.status))) this.emit(data, { type: "run.updated", patch: { status: "idle", updatedAt: new Date(this.now()).toISOString() } });
@@ -427,8 +432,11 @@ export class DemoClient implements BatonClient {
     const { blockedByProposal: _blocked, ...edge } = old;
     this.emit(data, { type: "delegation.created", delegation: { ...edge, status: "canceled", endedAt: new Date(this.now()).toISOString() } });
   }
-  private notice(data: DemoRun, nodeId: string, text: string): void {
-    const message = demoNoticePrompt("team", text);
+  private appendResult(data: DemoRun, edge: DelegationRecord): void {
+    this.append(data, edge.fromNodeId, { type: "user_message", text: demoResultDelivery(demoResultsPrompt([edge]), data.snapshot.run, edge.fromNodeId) });
+  }
+  private notice(data: DemoRun, nodeId: string, text: string, kind: "team" | "policy" = "team"): void {
+    const message = demoNoticePrompt(kind, text);
     if (data.snapshot.run.status === "paused") this.heldMessages.set(nodeId, [...this.heldMessages.get(nodeId) ?? [], message]);
     else this.append(data, nodeId, { type: "user_message", text: message });
   }
@@ -467,8 +475,27 @@ export class DemoClient implements BatonClient {
   }
   async patchRun(id: string, request: PatchRunRequest): Promise<void> {
     const data = this.get(id);
+    const previousReview = data.snapshot.run.policy.leadReview === true;
     this.emit(data, { type: "run.updated", patch: { ...(request.title !== undefined ? { title: request.title, titleSource: "human" as const } : {}), policy: { ...data.snapshot.run.policy, ...request.policy }, updatedAt: new Date(this.now()).toISOString() } });
+    const review = data.snapshot.run.policy.leadReview === true;
+    if (review !== previousReview && data.snapshot.run.policy.mode !== "solo") this.notice(data, data.snapshot.run.rootNodeId, review ? `已开启主导者验收。${demoReviewReminder}` : "已关闭主导者验收。", "policy");
     if (request.policy?.autoApprove) for (const permission of data.snapshot.permissions.filter(entry => entry.status === "pending")) await this.resolve(permission.requestId, { response: { behavior: "allow" } }, "policy");
+  }
+  async updateNodeConfig(nodeId: string, request: UpdateNodeConfigRequest): Promise<UpdateNodeConfigResponse> {
+    const data = this.forNode(nodeId);
+    const node = data.snapshot.nodes.find(entry => entry.id === nodeId)!;
+    if (["canceled", "replaced", "failed"].includes(node.status)) throw new HttpError(409, "该节点已结束，无法修改配置");
+    const agent = demoAgents.find(entry => entry.id === node.agentId);
+    const model = (request.model === undefined ? node.model : request.model) ?? agent?.models.find(entry => entry.isDefault)?.id;
+    if (request.model != null && !findModel(agent, request.model)) throw new HttpError(400, "未知模型");
+    if (request.modeId != null && !agent?.modes.some(mode => mode.id === request.modeId)) throw new HttpError(400, "未知权限模式");
+    if (request.thinking != null && !thinkingOptions(agent, model).some(level => level.id === request.thinking)) throw new HttpError(400, "当前模型不支持此思考级别");
+    const patch: Partial<NodeRecord> = { updatedAt: new Date(this.now()).toISOString() };
+    for (const key of ["model", "modeId", "thinking"] as const) if (request[key] !== undefined) patch[key] = request[key] ?? undefined;
+    if (request.model !== undefined && request.thinking === undefined && node.thinking && !compatibleThinking(agent, model, node.thinking)) patch.thinking = undefined;
+    const applied = activeTurn(data.snapshot, nodeId) ? "next_turn" : "now";
+    this.emit(data, { type: "node.updated", nodeId, patch });
+    return { node: { ...node, ...patch }, applied };
   }
   async items(nodeId: string, after = 0): Promise<GetItemsResponse> {
     this.advance(); const data = this.forNode(nodeId);
@@ -508,9 +535,33 @@ export class DemoClient implements BatonClient {
     const delivery = active && mode === "steer" ? "steered" : "turn";
     if (delivery === "turn") this.startReply(data, nodeId, row.item.text);
     const turnId = data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running")?.id;
-    const { queuePosition: _position, ...item } = row.item;
-    this.emit(data, { type: "item", nodeId, itemSeq, turnId, itemTs: row.itemTs, item: { ...item, delivery, ...(interrupted ? { interrupted: true } : {}), ...(mode === "steer" ? { escalated: true } : {}) } });
+    const { queuePosition: _position, steeredAfterSeq: _previousAnchor, ...item } = row.item;
+    const anchor = delivery === "steered" ? this.prepareSteer(data, nodeId, turnId!) : undefined;
+    this.emit(data, { type: "item", nodeId, itemSeq, turnId, itemTs: row.itemTs, item: { ...item, delivery, ...(interrupted ? { interrupted: true } : {}), ...(anchor !== undefined ? { escalated: true, steeredAfterSeq: anchor } : {}) } });
+    if (delivery === "steered") this.appendSteerReply(data, nodeId, turnId!, item.text);
     return { accepted: true, delivery, itemSeq };
+  }
+  private prepareSteer(data: DemoRun, nodeId: string, turnId: string): number {
+    const rows = demoRows(data.log, nodeId);
+    const last = conversationRows(rows, [], nodeId).findLast(entry => !entry.row.rolledBack);
+    const continued = new Map<number, number>();
+    data.remaining = data.remaining.map(event => {
+      if (event.type !== "item" || event.nodeId !== nodeId || event.turnId !== turnId) return event;
+      const prior = rows.find(row => row.seq === event.itemSeq)?.item;
+      if (prior && prior.type !== "reasoning" && prior.type !== "assistant_message") return event;
+      const seq = continued.get(event.itemSeq) ?? this.nextItemSeq(data, nodeId);
+      continued.set(event.itemSeq, seq);
+      if ((event.item.type === "reasoning" || event.item.type === "assistant_message") && prior?.type === event.item.type && event.item.text.startsWith(prior.text)) {
+        const text = event.item.text.slice(prior.text.length).trimStart();
+        return { ...event, itemSeq: seq, item: { ...event.item, text } };
+      }
+      return { ...event, itemSeq: seq };
+    });
+    return last?.row.seq ?? 0;
+  }
+  private appendSteerReply(data: DemoRun, nodeId: string, turnId: string, text: string): void {
+    if (data.remaining.some(event => event.type === "item" && event.nodeId === nodeId && event.turnId === turnId && (event.item.type === "assistant_message" || event.item.type === "reasoning"))) return;
+    this.append(data, nodeId, { type: "assistant_message", text: `收到引导，我会按这条补充继续：${text}` });
   }
   async checkpoints(nodeId: string): Promise<ListCheckpointsResponse> {
     this.advance(); const data = this.forNode(nodeId);
@@ -744,7 +795,7 @@ export class DemoClient implements BatonClient {
       if (edge) {
         const delivered: DelegationRecord = { ...edge, status: "completed", endedAt: ts, deliveredAt: ts, deliveredVia: "turn", result: { status: decision.response.behavior === "allow" ? "success" : "partial", summary: "Command Palette 和键盘导航实现完成。", reported: true, finalText: "实现与验证完成。", artifacts: [{ kind: "file", value: "src/components/SearchPalette.tsx" }], result: { tests: 8, keyboardNavigation: true } } };
         this.emit(data, { type: "delegation.updated", delegationId: edge.id, patch: delivered });
-        this.append(data, delivered.fromNodeId, { type: "user_message", text: demoResultsPrompt([delivered]) });
+        this.appendResult(data, delivered);
       }
       const rootId = data.snapshot.run.rootNodeId;
       this.append(data, rootId, { type: "assistant_message", text: "所有委派结果已汇总。\n\n- 搜索 API 与中文兼容回退已完成，12 个测试通过。\n- Command Palette 与键盘导航已完成。\n- 安全审查建议均已纳入。\n\n索引子任务的环境问题已通过 LIKE 回退解决。可以继续发消息安排下一轮。" });
@@ -760,7 +811,7 @@ export class DemoClient implements BatonClient {
         if (pending) {
           const result: DelegationRecord = { ...pending, status: "completed", endedAt: ts, deliveredAt: ts, deliveredVia: "turn", result: { status: "success", summary: "集成回归验证完成。", reported: true, finalText: "验证完成" } };
           this.emit(data, { type: "delegation.updated", delegationId: pending.id, patch: result });
-          this.append(data, result.fromNodeId, { type: "user_message", text: demoResultsPrompt([result]) });
+          this.appendResult(data, result);
         }
       }
       this.emit(data, { type: "run.updated", patch: { status: "idle", updatedAt: ts } });

@@ -20,6 +20,14 @@ export function sessionGuidance(agentId: string): string[] {
 }
 const BACKGROUND_GUIDANCE = "When you start a long-running process (dev server, watcher or background service), tell the human in your reply what it is, its port(s), and how to stop it.";
 const PR_GUIDANCE = 'When you create a pull/merge request, make the command print its URL (gh pr create does this by default), and include {kind:"url", value:<PR URL>} in report_result.artifacts when reporting your result. Tell the human the PR URL in your reply.';
+const LEAD_REVIEW_RULE = [
+  "Personally verify each member's changes before accepting them:",
+  "1. Static checks: inspect the diff and run the relevant builds, type checks, and tests.",
+  "2. Real run: exercise the affected workflow in the user's current environment by starting the app, calling the API, or running the CLI as appropriate. Leave the user's running instances, ports, and data untouched: use an unused port and a temporary data directory for your own instance, and stop only the processes you started when done. If a real run is blocked by missing credentials, cost, or side effects, exercise the same workflow with mock data or simulated agents and explain why.",
+  "3. Screenshots: capture a screenshot for each UI acceptance point using browser automation or macOS screencapture. Save the screenshots in a temporary directory, then use your own image-reading tools to read the image files yourself, one by one. Check layout, text, and state against expectations, and look for errors or raw markup. Do not use open or otherwise display the files on the user's computer in place of inspecting them yourself.",
+  "4. Report: in your final answer list each acceptance point, how you verified it, the screenshot paths where applicable, and what you actually saw in each image. List unverified points separately with reasons. If capture or image reading is unavailable, say so and do not mark an unseen screenshot as passed.",
+  "Do not accept unverified work. If you find a problem, use send to request fixes from the responsible member, then verify it again after the fix.",
+].join("\n");
 
 function describeAgent(agent: AgentEntry): string {
   const model = agent.models.find((m) => m.isDefault)?.id ?? agent.models[0]?.id;
@@ -61,7 +69,7 @@ export function systemPrompt(
     "- replace_member: lead only; swap a failing, stalled or poorly matched member and reassign its unfinished work. reassign: move one of your own assignments to another role or agent.",
     "- delegate: hand a self-contained task to another agent. Returns immediately. The delegate cannot see your conversation, so give it the goal, the relevant context and file paths, the files it owns, the interfaces it must respect, and acceptance criteria.",
     "- Results arrive automatically in a <baton-results> message when a delegate finishes. Do not poll. If you have nothing else to do, end your turn; you will be woken up with the results.",
-    "- wait: block up to 50 s for results, only when you cannot continue without them.",
+    "- wait: block briefly (up to 50 s) only if you need a result shortly and have nothing else to do. Do not call wait in a loop; end your turn and the results will wake you automatically.",
     "- get_result: full result of one delegation (notifications may be truncated).",
     "- send: follow-up instruction or answer to one of your delegates. cancel: stop a delegate and everything below it. status: overview of your delegations.",
     ...sessionGuidance(node.id),
@@ -112,11 +120,13 @@ export function systemPrompt(
   if (!isRoot && node.role) lines.push("", `Your team role: ${node.role}.`, `Your responsibilities: ${team?.members.find((m) => m.id === node.memberId)?.responsibilities ?? "Follow your assignment."}`, "Other roles own the files and responsibilities in the roster above; avoid file clashes.");
   if (isRoot) {
     lines.push("", "You are the root agent: answer the human directly. Do not call report_result.");
+    if (policy.leadReview) lines.push("", "Lead review is enabled.", LEAD_REVIEW_RULE);
   } else {
     lines.push(
       "",
       "You are a delegate. Your assignment arrives in a <baton-assignment> message. Stay within its scope and the files it gives you.",
       "A <baton-followup> message comes from the agent that delegated to you and contains its follow-up instructions or answers.",
+      ...(canDelegate ? ["After delegating, if you have nothing else to do, end your turn without calling report_result. Your delegates' <baton-results> will wake you. Report only when your whole assignment is done."] : []),
       "When done, call report_result exactly once (status success / partial / failed, a plain-text summary of what you did, what you found and what is left, plus `result` and `artifacts` when useful), then end your turn.",
       "If the assignment is read-only, do not modify files.",
       "Modify only the files assigned to you. Do not run git commit, push, merge, rebase, checkout, reset or stash; the lead handles integration.",
@@ -157,9 +167,15 @@ export function messagePrompt(sender: { agentId: string; agent: string; role?: s
   return `<${MESSAGE_TAG}${head}>\n${message.replaceAll(`</${MESSAGE_TAG}>`, `&lt;/${MESSAGE_TAG}>`)}\n</${MESSAGE_TAG}>`;
 }
 
-export function noticePrompt(kind: "correction" | "team" | "system", message: string): string {
+export function noticePrompt(kind: "correction" | "team" | "system" | "policy", message: string): string {
   return `<baton-notice kind="${kind}">\n${message}\n</baton-notice>`;
 }
+
+export function leadReviewNotice(enabled: boolean): string {
+  return noticePrompt("policy", enabled ? `The human changed the run policy. Lead review is enabled.\n${LEAD_REVIEW_RULE}` : "The human changed the run policy. Lead review is disabled; mandatory per-member review no longer applies.");
+}
+
+export const LEAD_REVIEW_REMINDER = noticePrompt("policy", "Lead review: follow the lead-review rules in your system prompt or latest policy notice before accepting these results: check the diff and builds, type checks, and tests; exercise the workflow in isolation, using mocks if needed; and capture and personally inspect UI screenshots. Report your checks, screenshot paths and findings, and any gaps; use send for fixes and verify again.");
 
 /** One <result> block per delegation; the console keys its cards on the `delegation` attribute. */
 export function resultsPrompt(delegations: DelegationRecord[]): string {

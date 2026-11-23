@@ -14,7 +14,7 @@ export function messageActions(delivery: Delivery | undefined, state?: MessageAc
 export interface OutgoingMessage {
   clientId: string; nodeId: string; text: string; ts: string;
   state: "sending" | "accepted" | "failed"; delivery?: Delivery; itemSeq?: number; interrupted?: boolean; error?: string;
-  turnId?: string; queuePosition?: number; deliveryOrder?: number; editedAt?: string;
+  turnId?: string; queuePosition?: number; deliveryOrder?: number; editedAt?: string; steeredAfterSeq?: number;
   acknowledged?: boolean;
 }
 const outgoingMaxAge = 120_000;
@@ -30,7 +30,7 @@ export function reconcileOutgoing(messages: OutgoingMessage[], row: ItemRecord):
   const exact = messages.findIndex(message => message.nodeId === row.nodeId && (item.clientId === message.clientId || row.seq === message.itemSeq));
   const index = exact >= 0 ? exact : messages.findIndex(message => !message.acknowledged && outgoingMatches(message, row));
   return messages.map((message, i) => i === index
-    ? { ...message, state: "accepted", acknowledged: true, text: item.text, ts: row.ts, itemSeq: row.seq, delivery: item.delivery ?? message.delivery, interrupted: item.interrupted, turnId: row.turnId ?? message.turnId, queuePosition: item.queuePosition, deliveryOrder: item.deliveryOrder, editedAt: item.editedAt, error: undefined } : message);
+    ? { ...message, state: "accepted", acknowledged: true, text: item.text, ts: row.ts, itemSeq: row.seq, delivery: item.delivery ?? message.delivery, interrupted: item.interrupted, turnId: row.turnId ?? message.turnId, queuePosition: item.queuePosition, deliveryOrder: item.deliveryOrder, editedAt: item.editedAt, steeredAfterSeq: item.steeredAfterSeq, error: undefined } : message);
 }
 /** Persisted rows replace optimistic entries; stale in-flight entries must not keep a run alive. */
 export function pruneOutgoing(messages: OutgoingMessage[], rows: ItemRecord[], now: number): OutgoingMessage[] {
@@ -47,12 +47,18 @@ export interface ConversationEntry { row: ItemRecord; outgoing?: OutgoingMessage
 export function messageRows(rows: ItemRecord[], outgoing: OutgoingMessage[], nodeId: string): ConversationEntry[] {
   const messages = rows.reduce(reconcileOutgoing, outgoing).filter(message => message.nodeId === nodeId);
   const result = rows.filter(row => row.nodeId === nodeId).map(row => ({ row, outgoing: messages.find(message => row.item.type === "user_message" && (row.item.clientId === message.clientId || row.seq === message.itemSeq)) }));
-  for (const [index, message] of messages.entries()) if (!result.some(entry => entry.outgoing?.clientId === message.clientId)) result.push({ row: { seq: message.itemSeq ?? -(index + 1), nodeId, turnId: message.turnId, ts: message.ts, item: { type: "user_message", text: message.text, clientId: message.clientId, delivery: message.delivery, interrupted: message.interrupted, queuePosition: message.queuePosition, deliveryOrder: message.deliveryOrder, editedAt: message.editedAt } }, outgoing: message });
+  for (const [index, message] of messages.entries()) if (!result.some(entry => entry.outgoing?.clientId === message.clientId)) result.push({ row: { seq: message.itemSeq ?? -(index + 1), nodeId, turnId: message.turnId, ts: message.ts, item: { type: "user_message", text: message.text, clientId: message.clientId, delivery: message.delivery, interrupted: message.interrupted, queuePosition: message.queuePosition, deliveryOrder: message.deliveryOrder, editedAt: message.editedAt, steeredAfterSeq: message.steeredAfterSeq } }, outgoing: message });
   return result;
 }
 
 export function conversationRows(rows: ItemRecord[], outgoing: OutgoingMessage[], nodeId: string): ConversationEntry[] {
-  const visible = messageRows(rows, outgoing, nodeId).filter(({ row }) => row.item.type !== "user_message" || !["queued", "retracted"].includes(row.item.delivery ?? ""));
+  const anchored: Array<{ entry: ConversationEntry; after: number }> = [];
+  const visible = messageRows(rows, outgoing, nodeId).filter(entry => {
+    const item = entry.row.item;
+    if (item.type !== "user_message") return true;
+    if (item.delivery === "steered" && item.steeredAfterSeq !== undefined) { anchored.push({ entry, after: item.steeredAfterSeq }); return false; }
+    return item.delivery !== "queued" && item.delivery !== "retracted";
+  });
   const startsTurn = ({ row }: ConversationEntry) => row.item.type === "user_message" && row.item.delivery === "turn" && row.turnId !== undefined;
   const isSteered = ({ row }: ConversationEntry) => row.item.type === "user_message" && row.item.delivery === "steered" && row.turnId !== undefined;
   const starting = new Map<string, ConversationEntry[]>();
@@ -82,6 +88,35 @@ export function conversationRows(rows: ItemRecord[], outgoing: OutgoingMessage[]
   }
   for (const [id, group] of starting) if (!emitted.has(id)) result.push(...group);
   for (const group of steered.values()) result.push(...group);
+  return placeSteered(result, anchored);
+}
+
+function placeSteered(base: ConversationEntry[], anchored: Array<{ entry: ConversationEntry; after: number }>): ConversationEntry[] {
+  if (!anchored.length) return base;
+  const positions = new Map(base.map(({ row }, index) => [row.seq, index]));
+  const bySeq = new Set(anchored.map(record => record.entry.row.seq));
+  const gaps = new Map<number, ConversationEntry[]>(), followers = new Map<number, ConversationEntry[]>();
+  for (const { entry, after } of anchored.sort((left, right) => left.entry.row.seq - right.entry.row.seq)) {
+    const chained = bySeq.has(after) && after !== entry.row.seq;
+    const groups = chained ? followers : gaps;
+    const exact = positions.get(after);
+    const gap = chained ? after : exact !== undefined ? exact + 1 : base.findIndex(({ row }) => row.seq > after);
+    const key = gap < 0 ? base.length : gap;
+    const group = groups.get(key) ?? []; group.push(entry); groups.set(key, group);
+  }
+  const rendered = new Set<number>(), result: ConversationEntry[] = [];
+  const append = (entry: ConversationEntry) => {
+    if (rendered.has(entry.row.seq)) return;
+    rendered.add(entry.row.seq); result.push(entry); followers.get(entry.row.seq)?.forEach(append);
+  };
+  base.forEach((entry, index) => { gaps.get(index)?.forEach(append); append(entry); });
+  gaps.get(base.length)?.forEach(append);
+  for (const { entry, after } of anchored) {
+    if (rendered.has(entry.row.seq)) continue;
+    const slot = result.findIndex(({ row }) => row.seq > Math.max(entry.row.seq, after));
+    const start = result.length; append(entry);
+    if (slot >= 0) result.splice(slot, 0, ...result.splice(start));
+  }
   return result;
 }
 
@@ -110,10 +145,11 @@ export function nodeIsLive(snapshot: RunSnapshot, node: NodeRecord): boolean {
   return snapshot.run.status !== "paused" && Boolean(activeTurn(snapshot, node.id));
 }
 export function quietSeconds(now: number, lastEventAt: number): number { return Math.max(0, Math.floor((now - lastEventAt) / 1000)); }
-export interface ConversationPhase {
+interface TimedConversationPhase {
   kind: "waiting" | "reasoning" | "tool" | "reply" | "permission" | "question" | "children" | "interrupted";
   label: string; since: string; toolSince?: string; reasoning?: string; related: string[]; quiet: number; tokens?: number;
 }
+export type ConversationPhase = TimedConversationPhase | { kind: "idle_children"; label: string; related: string[] };
 export function usageTokens(usage?: Usage): number | undefined {
   return usage && (usage.inputTokens !== undefined || usage.outputTokens !== undefined) ? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0) : undefined;
 }
@@ -125,6 +161,10 @@ export function conversationPhase(snapshot: RunSnapshot, node: NodeRecord, rows:
   const questions = snapshot.questions.filter(question => question.nodeId === node.id && question.status === "pending");
   const inFlight = sending && inFlightMessage([sending], rows, node.id, now);
   if (!turn && !children.length && !inFlight && !questions.length && !permissions.length) return null;
+  const relatedChildren = () => children.map(edge => edge.toNodeId).filter(id => snapshot.nodes.some(entry => entry.id === id));
+  if (!turn && children.length && !inFlight && !questions.length && !permissions.length) {
+    return { kind: "idle_children", label: `空闲 · 等待 ${children.length} 个子任务，结果送达后自动继续`, related: relatedChildren() };
+  }
   const since = turn?.startedAt ?? inFlight?.ts ?? questions[0]?.askedAt ?? permissions[0]?.requestedAt ?? children[0]?.createdAt ?? node.updatedAt;
   const lastOutputAt = lastEventAt ?? rows.reduce((latest, row) => Math.max(latest, Date.parse(row.ts)), Date.parse(since));
   const turnRows = rows.filter(row => (row.item.type !== "user_message" || !["queued", "retracted"].includes(row.item.delivery ?? "")) && (turn ? row.turnId === turn.id || (!row.turnId && Date.parse(row.ts) >= Date.parse(turn.startedAt)) : Date.parse(row.ts) >= Date.parse(since)));
@@ -135,8 +175,7 @@ export function conversationPhase(snapshot: RunSnapshot, node: NodeRecord, rows:
   if (interrupted && now >= interruptedAt && now - interruptedAt < 5000) return { ...phase, kind: "interrupted", label: "已中断，正在处理你的新消息" };
   if (permissions.length) return { ...phase, kind: "permission", label: "等待授权", related: [node.id] };
   if (questions.length) return { ...phase, kind: "question", label: "等你回答", related: questions.map(question => question.id) };
-  const waitingChildren = () => ({ ...phase, kind: "children" as const, label: `等待 ${children.length} 个子任务`, related: children.map(edge => edge.toNodeId).filter(id => snapshot.nodes.some(entry => entry.id === id)) });
-  if (!turn) return children.length ? waitingChildren() : phase;
+  if (!turn) return phase;
   const tool = snapshot.toolSpans.filter(span => span.nodeId === node.id && span.status === "running" && (span.turnId === turn.id || !span.turnId && Date.parse(span.startedAt) >= Date.parse(turn.startedAt))).at(-1);
   if (tool) {
     const toolRow = rows.findLast(row => row.item.type === "tool_call" && row.item.callId === tool.callId);
@@ -147,7 +186,7 @@ export function conversationPhase(snapshot: RunSnapshot, node: NodeRecord, rows:
   if (latest?.item.type === "tool_call" && latest.item.status === "running") return { ...phase, kind: "tool", label: `正在执行 ${latest.item.detail.type}: ${latest.item.name}`, toolSince: latest.ts };
   if (latest?.item.type === "reasoning") return { ...phase, kind: "reasoning", label: "思考中", reasoning: latest.item.text };
   if (latest?.item.type === "assistant_message") return { ...phase, kind: "reply", label: "正在回复…" };
-  if (children.length) return waitingChildren();
+  if (children.length) return { ...phase, kind: "children", label: `等待 ${children.length} 个子任务`, related: relatedChildren() };
   return phase;
 }
 
