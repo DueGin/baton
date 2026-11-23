@@ -32,6 +32,10 @@ export interface UpdateStatus {
   needsToken?: boolean;
   savedPath?: string;
   checkedAt?: string;
+  /** While downloading: the retry in progress after a network failure. */
+  retrying?: number;
+  /** Which step an error belongs to; a failed download can be resumed. */
+  failedStep?: "check" | "download" | "install";
 }
 export interface WindowChrome { theme: "system" | "light" | "dark"; background: string; foreground: string }
 declare global { interface Window { batonDesktop?: BatonDesktopBridge } }

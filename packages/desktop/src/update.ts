@@ -9,8 +9,10 @@
 
 export const UPDATE_REPO = "DueGin/baton";
 export type UpdatePhase = "idle" | "checking" | "current" | "available" | "downloading" | "downloaded" | "installing" | "error";
-export interface ReleaseAsset { name: string; size: number; apiUrl: string }
-export interface UpdateRelease { version: string; notes: string; pageUrl: string; publishedAt: string; asset: ReleaseAsset; checksum?: ReleaseAsset }
+/** `downloadUrl` (github.com, no API quota) is tried first; `apiUrl` needs the API and serves private repositories. */
+export interface ReleaseAsset { name: string; size: number; apiUrl: string; downloadUrl?: string }
+/** `sha256`: the expected hash, when the release was found through its SHA256SUMS.txt (no API). */
+export interface UpdateRelease { version: string; notes: string; pageUrl: string; publishedAt: string; asset: ReleaseAsset; checksum?: ReleaseAsset; sha256?: string }
 export interface UpdateStatus {
   phase: UpdatePhase;
   currentVersion: string;
@@ -24,7 +26,13 @@ export interface UpdateStatus {
   needsToken?: boolean;
   savedPath?: string;
   checkedAt?: string;
+  /** While downloading: the retry in progress after a network failure (1-based). */
+  retrying?: number;
+  /** Which step an `error` belongs to; a failed download can be resumed. */
+  failedStep?: "check" | "download" | "install";
 }
+/** One try plus retries for a download; a failed run keeps the partial file for 继续下载. */
+export const DOWNLOAD_ATTEMPTS = 6;
 
 /** "v0.2.0-beta.1" → number[] / labels. Only numeric segments and a prerelease tag are meaningful here. */
 export function parseVersion(value: string): { numbers: number[]; prerelease: string | null } | null {
@@ -73,7 +81,7 @@ export function readRelease(raw: unknown, target: UpdateTarget): UpdateRelease |
   const chosen = usable.find(asset => assetMatches(asset.name as string, target));
   if (!chosen) return null;
   const sums = usable.find(asset => asset.name === "SHA256SUMS.txt");
-  const toAsset = (asset: GitHubAsset): ReleaseAsset => ({ name: asset.name as string, size: asset.size as number, apiUrl: asset.url as string });
+  const toAsset = (asset: GitHubAsset): ReleaseAsset => ({ name: asset.name as string, size: asset.size as number, apiUrl: asset.url as string, ...(typeof asset.browser_download_url === "string" ? { downloadUrl: asset.browser_download_url } : {}) });
   return {
     version, pageUrl: typeof release.html_url === "string" ? release.html_url : "", notes: typeof release.body === "string" ? release.body : "",
     publishedAt: typeof release.published_at === "string" ? release.published_at : "",
@@ -91,10 +99,49 @@ export function parseChecksums(text: string): Map<string, string> {
   return sums;
 }
 
-/** Total bytes from a `content-length`, or from a `content-range` (`bytes 0-1023/4096`) when GitHub omits it. */
-export function responseSize(headers: { get(name: string): string | null }): number | undefined {
+/**
+ * The whole file's size: a `content-range` total (`bytes 100-1023/4096`, or the star form a 416 sends), else
+ * `content-length` plus the offset the response starts at.
+ */
+export function responseSize(headers: { get(name: string): string | null }, offset = 0): number | undefined {
+  const range = /bytes\s+(?:\d+-\d+|\*)\/(\d+)/u.exec(headers.get("content-range") ?? "");
+  if (range?.[1]) return Number(range[1]);
   const length = Number(headers.get("content-length"));
-  if (Number.isFinite(length) && length > 0) return length;
-  const range = /bytes\s+\d+-\d+\/(\d+)/u.exec(headers.get("content-range") ?? "");
-  return range?.[1] ? Number(range[1]) : undefined;
+  return Number.isFinite(length) && length > 0 ? offset + length : undefined;
+}
+
+/** `https://github.com/<repo>/releases/latest/download/<name>`: the latest release's asset, without the API. */
+export const latestDownloadUrl = (repo: string, name: string): string => `https://github.com/${repo}/releases/latest/download/${name}`;
+/**
+ * The release named by a SHA256SUMS.txt (fetched from the latest release): its asset for this machine gives the
+ * version (`baton-<version>-mac-arm64.zip`), the download URL and the expected hash in one request.
+ */
+export function releaseFromChecksums(text: string, target: UpdateTarget, repo: string): UpdateRelease | null {
+  for (const [name, sha256] of parseChecksums(text)) {
+    if (!assetMatches(name, target)) continue;
+    const version = new RegExp(`^baton-(.+)${suffix[target].replace(/[.]/gu, "\\.")}$`, "u").exec(name)?.[1];
+    if (!version || !parseVersion(version)) continue;
+    const tag = `v${version}`;
+    return { version, notes: "", pageUrl: `https://github.com/${repo}/releases/tag/${tag}`, publishedAt: "", asset: { name, size: 0, apiUrl: "", downloadUrl: `https://github.com/${repo}/releases/download/${tag}/${name}` }, sha256 };
+  }
+  return null;
+}
+
+/** A plain-language reason for a network failure (undici and Chromium error codes alike), keeping unknown messages. */
+export function networkReason(error: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; current !== undefined && current !== null && depth < 4; depth++) {
+    if (!(current instanceof Error)) { parts.push(String(current)); break; }
+    parts.push(current.name, current.message, String((current as { code?: unknown }).code ?? ""));
+    current = (current as { cause?: unknown }).cause;
+  }
+  const text = parts.join(" ");
+  if (/timeout|timed out|ETIMEDOUT|stalled/iu.test(text)) return "连接超时";
+  if (/ENOTFOUND|EAI_AGAIN|NAME_NOT_RESOLVED/iu.test(text)) return "无法解析 GitHub 的域名";
+  if (/certificate|CERT_|SSL|TLS|handshake/iu.test(text)) return "和 GitHub 的安全连接建立失败";
+  if (/ECONNREFUSED|CONNECTION_REFUSED|ERR_PROXY|TUNNEL_CONNECTION/iu.test(text)) return "连接被拒绝（检查代理设置）";
+  if (/terminated|ECONNRESET|socket hang up|other side closed|CONNECTION_(?:CLOSED|RESET|ABORTED)|ERR_HTTP2|premature|aborted/iu.test(text)) return "网络连接中断";
+  if (/fetch failed|network|INTERNET_DISCONNECTED/iu.test(text)) return "无法连接 GitHub";
+  return error instanceof Error ? error.message : String(error);
 }
