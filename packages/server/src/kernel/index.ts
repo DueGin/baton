@@ -6,7 +6,7 @@ import type { DriverEvent, DriverRegistry, DriverSession, OpenSessionSpec, Promp
 import type { Attachments } from "../attachments/index.js";
 import { attachmentLabel, attachmentPrompt, attachmentText, type AttachmentFile } from "./images.js";
 import { Store } from "../store/index.js";
-import { briefPrompt, correctionPrompt, followupPrompt, messagePrompt, noticePrompt, resultsPrompt, systemPrompt } from "./prompts.js";
+import { briefPrompt, correctionPrompt, followupPrompt, LEAD_REVIEW_REMINDER, leadReviewNotice, messagePrompt, noticePrompt, resultsPrompt, systemPrompt } from "./prompts.js";
 import { Teams, type ResolvedMember } from "./teams.js";
 import { HumanInteraction } from "./human.js";
 import { PermissionRules, HUMAN_DENIAL } from "./permission-rules.js";
@@ -15,7 +15,7 @@ import type { TitleNaming } from "../titles/index.js";
 import type { ProcessSource } from "../background/attribution.js";
 import { Projects } from "../projects/index.js";
 import { nativePrompts, nativeUpdatedInput } from "./questions.js";
-import type { QuestionRecord } from "@baton/protocol";
+import type { QuestionRecord, UpdateNodeConfigRequest, UpdateNodeConfigResponse } from "@baton/protocol";
 import type { Checkpoints } from "../checkpoints/index.js";
 import { Rollbacks } from "./rollback.js";
 
@@ -27,11 +27,18 @@ export function isBatonToolPermission(request: PermissionRequest): boolean {
   const server = request.input?.serverName ?? request.input?.server_name ?? request.input?.server;
   return server === "baton";
 }
-export const DEFAULT_POLICY: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "dynamic", teamApproval: true, maxTeamSize: 5, stallMinutes: 10, prFeedback: "notify" };
+export const DEFAULT_POLICY: RunPolicy = { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, mode: "dynamic", teamApproval: true, maxTeamSize: 5, stallMinutes: 10, prFeedback: "notify", leadReview: false };
 const now = (): string => new Date().toISOString();
 const active = (status: string): boolean => ["starting", "running", "waiting_permission", "queued"].includes(status);
 const sessionRole = (node: NodeRecord): string | undefined => node.role ?? (node.parentNodeId === null ? "lead" : undefined);
 const done = (d: DelegationRecord): boolean => ["completed", "failed", "canceled", "replaced"].includes(d.status);
+const undelivered = (delegation: DelegationRecord): boolean => delegation.status !== "replaced" && (!done(delegation) || !delegation.deliveredAt);
+const waitingForChildren = (snapshot: RunSnapshot, nodeId: string): number => snapshot.delegations.filter((delegation) => delegation.fromNodeId === nodeId && undelivered(delegation)).length;
+function resultDeliveryParts(delegations: DelegationRecord[], node: NodeRecord, policy: RunPolicy): string[] {
+  if (!delegations.length) return [];
+  const results = resultsPrompt(delegations);
+  return node.parentNodeId === null && policy.mode !== "solo" && policy.leadReview === true ? [results, LEAD_REVIEW_REMINDER] : [results];
+}
 const addUsage = (a: UsageTotals, b: UsageTotals): UsageTotals => ({ inputTokens: a.inputTokens + b.inputTokens, cachedInputTokens: a.cachedInputTokens + b.cachedInputTokens, outputTokens: a.outputTokens + b.outputTokens, costUsd: a.costUsd + b.costUsd });
 /** `initial`: the run's first prompt, a human message without its own queued row. */
 interface QueuedPrompt { text: string; trigger: TurnTrigger; humanItem?: ItemRecord; initial?: boolean }
@@ -45,7 +52,9 @@ const RESUME_PROMPT = noticePrompt("system", "The human paused this run and has 
 const RESTART_RESUME_PROMPT = noticePrompt("system", "baton was restarted while you were working, which interrupted your turn. The human has resumed the run. Check what you had already done (files, commands, delegations) and continue where you left off.");
 interface Runtime {
   token: string; session?: DriverSession; opening?: Promise<DriverSession>; unsubscribe?: () => void;
+  closing?: Promise<void>; reopenAfterTurn?: boolean;
   turnId?: string; driverTurnId?: string; report?: ReportResultInput; finalText: string; corrections: number;
+  finalMessageId?: string; steeredTextPrefixes?: Map<string, string>;
   usage: UsageTotals; chain: Promise<void>; queued: QueuedPrompt[]; pendingMessages: Map<number, ItemRecord>;
   pendingItem?: ItemRecord; itemTimer?: NodeJS.Timeout; lastItem?: ItemRecord; closed: boolean;
   idleTimer?: NodeJS.Timeout; stallTimer?: NodeJS.Timeout;
@@ -118,7 +127,7 @@ export class Kernel {
       session: (id) => this.session(id),
       closeSession: (id) => this.closeSession(id, true),
       patchNode: (id, patch) => this.patchNode(id, patch),
-      resetConversation: (id) => { const rt = this.runtime(id); rt.lastItem = undefined; rt.finalText = ""; rt.report = undefined; },
+      resetConversation: (id) => { const rt = this.runtime(id); rt.lastItem = undefined; rt.finalText = ""; rt.finalMessageId = undefined; rt.steeredTextPrefixes = undefined; rt.report = undefined; },
       restart: (id, notice) => this.restartAfterRollback(id, notice),
       log: (runId, error, id) => this.log(runId, error, id),
       closed: (id) => this.stopped || this.canceling.has(id) || ["canceled", "replaced"].includes(this.store.node(id).status),
@@ -280,11 +289,12 @@ export class Kernel {
     if (policy.mode !== undefined && !["dynamic", "preset", "solo"].includes(policy.mode)) throw new Error("Invalid collaboration mode");
     const { delegation: _legacy, ...normalized } = policy as RunPolicy & { delegation?: unknown };
     if (policy.teamApproval !== undefined && typeof policy.teamApproval !== "boolean") throw new Error("Invalid teamApproval policy");
+    if (policy.leadReview !== undefined && typeof policy.leadReview !== "boolean") throw new Error("Invalid leadReview policy");
     if (policy.maxTeamSize !== undefined && (!Number.isInteger(policy.maxTeamSize) || policy.maxTeamSize < 1)) throw new Error("Invalid maxTeamSize");
     if (policy.maxRoundsPerDelegation !== undefined && (!Number.isInteger(policy.maxRoundsPerDelegation) || policy.maxRoundsPerDelegation < 0)) throw new Error("Invalid maxRoundsPerDelegation");
     if (policy.stallMinutes !== undefined && (!Number.isFinite(policy.stallMinutes) || policy.stallMinutes <= 0)) throw new Error("Invalid stallMinutes");
     if (policy.prFeedback !== undefined && !["off", "notify", "auto"].includes(policy.prFeedback)) throw new Error("Invalid prFeedback policy");
-    const result: RunPolicy = { ...DEFAULT_POLICY, ...normalized, mode: normalized.mode ?? "dynamic", teamApproval: normalized.teamApproval ?? true };
+    const result: RunPolicy = { ...DEFAULT_POLICY, ...normalized, mode: normalized.mode ?? "dynamic", teamApproval: normalized.teamApproval ?? true, leadReview: normalized.leadReview ?? false };
     if (!result.maxRoundsPerDelegation) delete result.maxRoundsPerDelegation; // 0 = unlimited, stored as absent
     return result;
   }
@@ -292,20 +302,68 @@ export class Kernel {
     const s = this.store.snapshot(id);
     if (input.title !== undefined && (typeof input.title !== "string" || !input.title.trim())) throw new Error("Invalid title");
     if (input.policy?.maxTeamSize !== undefined && input.policy.maxTeamSize < (s.run.team?.members.filter((m) => m.status === "active").length ?? 0)) throw new Error("maxTeamSize cannot be smaller than the active roster");
-    this.emit(id, { type: "run.updated", patch: { ...(input.title ? { title: input.title, titleSource: "human" } : {}), policy: this.validatePolicy({ ...s.run.policy, ...input.policy, mode: s.run.policy.mode, teamApproval: input.policy?.teamApproval ?? s.run.policy.teamApproval }), updatedAt: now() } });
+    const policy = this.validatePolicy({ ...s.run.policy, ...input.policy, mode: s.run.policy.mode, teamApproval: input.policy?.teamApproval ?? s.run.policy.teamApproval });
+    this.emit(id, { type: "run.updated", patch: { ...(input.title ? { title: input.title, titleSource: "human" } : {}), policy, updatedAt: now() } });
+    if (policy.mode !== "solo" && (policy.leadReview ?? false) !== (s.run.policy.leadReview ?? false)) this.enqueue(s.run.rootNodeId, leadReviewNotice(policy.leadReview === true));
     if (input.policy?.stallMinutes !== undefined) for (const n of s.nodes) if (this.runtimes.get(n.id)?.turnId) this.armStall(n.id);
     if (input.policy?.autoApprove) for (const p of s.permissions) if (p.status === "pending") void this.respondPermission(p.id, { behavior: "allow" }, "policy").catch((e: unknown) => this.log(id, e));
     return this.store.snapshot(id);
   }
+  async updateNodeConfig(id: string, input: UpdateNodeConfigRequest): Promise<UpdateNodeConfigResponse> {
+    const editableNode = (): NodeRecord => {
+      const node = this.store.node(id);
+      if (["failed", "canceled", "replaced"].includes(node.status) || this.canceling.has(id)) throw new MessageError(`Cannot configure node with status ${node.status}`);
+      return node;
+    };
+    const initial = editableNode();
+    const agent = (await this.registry.detect()).find((entry) => entry.id === initial.agentId);
+    const rt = this.runtime(id);
+    if (rt.opening) await rt.opening.catch(() => {});
+    const node = editableNode();
+    const model = input.model === undefined ? node.model : input.model ?? undefined;
+    const modeId = input.modeId === undefined ? node.modeId : input.modeId ?? undefined;
+    let thinking = input.thinking === undefined ? node.thinking : input.thinking ?? undefined;
+    const selectedModel = agent?.models.find((entry) => model === undefined ? entry.isDefault : entry.id === model);
+    const levels = selectedModel?.thinkingOptions ?? [];
+    if (input.model != null && agent?.models.length && !selectedModel) throw new Error("Unknown model for this agent");
+    if (input.modeId != null && agent?.modes.length && !agent.modes.some((entry) => entry.id === modeId)) throw new Error("Unknown mode for this agent");
+    if (input.thinking != null && levels.length && !levels.some((level) => level.id === thinking)) throw new Error("Unknown thinking level for this model");
+    if (input.thinking === undefined && model !== node.model && selectedModel && !levels.some((level) => level.id === thinking)) thinking = undefined;
+
+    const applied = rt.turnId ? "next_turn" : "now";
+    const patch: Partial<NodeRecord> = {};
+    const changes: string[] = [];
+    const config = { model, modeId, thinking };
+    for (const key of ["model", "modeId", "thinking"] as const) {
+      const value = config[key];
+      if (value === node[key]) continue;
+      patch[key] = value;
+      changes.push(`${key}=${value === undefined ? "agent default" : JSON.stringify(value)}`);
+    }
+    if (!changes.length) return { node, applied };
+    if ((rt.session || node.persistence != null || node.turns > 0) && !this.registry.get(node.agentId)?.capabilities.resume) {
+      throw new MessageError("该 agent 不支持续接会话，切换配置会丢失上下文");
+    }
+    if (applied === "next_turn") rt.reopenAfterTurn = true;
+    this.patchNode(id, patch);
+    this.emit(node.runId, { type: "log", level: "info", nodeId: id, message: `Human updated session configuration: ${changes.join(", ")}${applied === "next_turn" ? " (next turn)" : ""}` });
+    if (applied === "now" && (rt.session || rt.closing)) {
+      if (rt.session) this.patchNode(id, { persistence: rt.session.persistence() ?? node.persistence });
+      await this.closeSession(id, true).catch((error: unknown) => this.log(node.runId, error, id));
+      if (!rt.turnId) this.armIdle(id);
+    }
+    return { node: this.store.node(id), applied };
+  }
   private async session(id: string): Promise<DriverSession> {
     const rt = this.runtime(id);
+    if (rt.closing) await rt.closing.catch(() => {});
     if (this.stopped) throw new Error("Daemon is shutting down");
     if (rt.closed) {
       if (["canceled", "replaced"].includes(this.store.node(id).status)) throw new Error("Node session has been closed");
       rt.closed = false; rt.token = randomBytes(32).toString("hex"); this.identities.set(rt.token, id);
     }
-    if (rt.session) return rt.session;
     if (rt.opening) return rt.opening;
+    if (rt.session) return rt.session;
     rt.opening = (async () => {
       const n = this.store.node(id), driver = this.registry.get(n.agentId);
       if (!driver) throw new Error(`Agent unavailable: ${n.agentId}`);
@@ -317,7 +375,9 @@ export class Kernel {
       rt.session = session;
       rt.unsubscribe = session.subscribe((event) => {
         if (!rt.closed && !this.stopped) this.armStall(id);
-        rt.chain = rt.chain.then(() => this.onEvent(id, event)).catch((error: unknown) => { this.log(n.runId, error, id); this.failNode(id, error); });
+        rt.chain = rt.chain.then(() => {
+          if (rt.session === session) return this.onEvent(id, event);
+        }).catch((error: unknown) => { this.log(n.runId, error, id); this.failNode(id, error); });
       });
       const info = await session.runtimeInfo();
       this.patchNode(id, { ...(info.model ? { model: info.model } : {}), ...(info.modeId ? { modeId: info.modeId } : {}), persistence: session.persistence() ?? undefined });
@@ -345,8 +405,12 @@ export class Kernel {
     if (["canceled", "replaced"].includes(n.status) || this.canceling.has(id)) throw new Error("Node is canceled");
     // A human message's turn gets a rollback checkpoint: snapshot the cwd while the session opens.
     const snapshot = prompts.some((p) => p.humanItem || p.initial) ? this.options.checkpoints?.snapshot(n.cwd) : undefined;
-    const session = await this.session(id);
+    let session = await this.session(id);
     const files = await snapshot;
+    while (rt.closing || session !== rt.session) {
+      if (this.stopped || this.canceling.has(id)) throw new Error("Node has been canceled or daemon stopped");
+      session = await this.session(id);
+    }
     prompts = prompts.filter((p) => !p.humanItem || rt.pendingMessages.has(p.humanItem.seq));
     if (!prompts.length) return "queued";
     if (rt.turnId || this.paused(n.runId) || (rt.interrupting && !interrupt) || this.rollbacks.active(n.runId)) { this.queuePrompts(id, prompts); return "queued"; }
@@ -368,6 +432,7 @@ export class Kernel {
     // Only messages from other sessions, to a delegate that already delivered: answer them without reopening the assignment.
     rt.sideTurn = n.delegationId && prompts.every((p) => p.trigger === "message") && done(this.store.delegation(n.delegationId)) ? n.status : undefined;
     const turnId = randomUUID(); rt.turnId = turnId; rt.driverTurnId = undefined; rt.report = undefined; rt.finalText = ""; rt.usage = emptyUsage(); rt.lastItem = undefined;
+    rt.finalMessageId = undefined; rt.steeredTextPrefixes = undefined;
     const checkpointAt = now();
     this.emit(n.runId, { type: "turn.started", turn: { id: turnId, runId: n.runId, nodeId: id, trigger, delegationId: n.delegationId ?? undefined, status: "running", startedAt: now() } });
     this.patchNode(id, { status: "running", activity: "Thinking…", turns: n.turns + 1, error: undefined, endedAt: undefined });
@@ -530,9 +595,21 @@ export class Kernel {
   private deliverMessage(id: string, row: ItemRecord, delivery: "turn" | "steered", turnId: string, deliveryOrder?: number): void {
     const rt = this.runtime(id);
     if (row.item.type !== "user_message" || !rt.pendingMessages.delete(row.seq)) return;
-    const { queuePosition: _position, deliveryOrder: _order, ...item } = row.item;
-    const next = { ...row, turnId, item: { ...item, delivery, ...(deliveryOrder !== undefined ? { deliveryOrder } : {}) } };
+    const { queuePosition: _position, deliveryOrder: _order, steeredAfterSeq: _previousAnchor, ...item } = row.item;
+    let steeredAfterSeq: number | undefined;
+    if (delivery === "steered") {
+      this.splitSteeredText(id, turnId);
+      steeredAfterSeq = this.store.items(id).findLast((entry) => entry.seq !== row.seq)?.seq;
+    }
+    const next = { ...row, turnId, item: { ...item, delivery, ...(deliveryOrder !== undefined ? { deliveryOrder } : {}), ...(steeredAfterSeq !== undefined ? { steeredAfterSeq } : {}) } };
     this.replaceMessage(id, next);
+  }
+  private splitSteeredText(id: string, turnId: string): void {
+    this.flushItem(id);
+    const rt = this.runtime(id);
+    if (rt.turnId !== turnId) return;
+    if (rt.finalMessageId && rt.finalText) (rt.steeredTextPrefixes ??= new Map()).set(rt.finalMessageId, rt.finalText);
+    rt.lastItem = undefined;
   }
   private abandonMessages(id: string): void {
     const rt = this.runtime(id); rt.queued = []; this.store.clearHeldPrompts(id);
@@ -543,7 +620,7 @@ export class Kernel {
   }
   private async drainMessages(id: string): Promise<void> {
     const rt = this.runtime(id);
-    if (rt.queued.length && !rt.closed && !rt.interrupting && !this.paused(this.store.node(id).runId)) {
+    if (rt.queued.length && !rt.interrupting && !this.paused(this.store.node(id).runId)) {
       const prompts = rt.queued.splice(0), keys = prompts.flatMap((prompt) => prompt.humanItem ? [`${id}:${prompt.humanItem.seq}`] : []);
       this.persistQueue(id);
       // Reserve before startPrompts awaits session startup; an edit must not race its
@@ -560,7 +637,10 @@ export class Kernel {
     if (rt.turnId) {
       const turnId = rt.turnId;
       const outcome = await rt.session?.steer(this.promptFor(id, text));
-      if (outcome === "steered" && !this.interruptedTurn(id, turnId)) { this.addItem(id, { type: "user_message", text }); return; }
+      if (outcome === "steered" && !this.interruptedTurn(id, turnId)) {
+        this.splitSteeredText(id, turnId);
+        this.addItem(id, { type: "user_message", text }); return;
+      }
       this.queuePrompts(id, [{ text, trigger }]); return;
     }
     await this.startTurn(id, text, trigger);
@@ -839,7 +919,18 @@ export class Kernel {
       case "session": this.patchNode(id, { persistence: rt.session?.persistence() ?? undefined }); break;
       case "turn_started": if (rt.turnId) { rt.driverTurnId = event.turnId; this.emit(n.runId, { type: "turn.updated", turnId: rt.turnId, patch: { driverTurnId: event.turnId } }); } break;
       // The kernel records every prompt it sends as a user_message itself; drop provider echoes.
-      case "item": if (event.item.type !== "user_message") this.addItem(id, event.item, event.timestamp); this.human.refreshActivity(id); break;
+      case "item": {
+        let item = event.item;
+        if (item.type === "assistant_message" && item.messageId) {
+          const prefix = rt.steeredTextPrefixes?.get(item.messageId);
+          if (prefix && item.text.startsWith(prefix)) {
+            if (item.text.length === prefix.length) break;
+            item = { ...item, text: item.text.slice(prefix.length) };
+          }
+        }
+        if (item.type !== "user_message") this.addItem(id, item, event.timestamp);
+        this.human.refreshActivity(id); break;
+      }
       case "usage": this.usage(id, event.usage); break;
       case "turn_completed": await this.finishTurn(id, "completed", event.usage); break;
       case "turn_failed": await this.finishTurn(id, "failed", undefined, event.error); break;
@@ -865,8 +956,8 @@ export class Kernel {
         const p = this.store.snapshot(n.runId).permissions.find((p) => p.id === `${id}:${event.requestId}`);
         if (p?.status === "pending") this.resolvePermission(p, event.response, "human"); break;
       }
-      case "mode_changed": this.patchNode(id, { modeId: event.modeId ?? undefined }); break;
-      case "model_changed": this.patchNode(id, { model: event.model ?? undefined }); break;
+      case "mode_changed": if (!rt.reopenAfterTurn) this.patchNode(id, { modeId: event.modeId ?? undefined }); break;
+      case "model_changed": if (!rt.reopenAfterTurn) this.patchNode(id, { model: event.model ?? undefined }); break;
       case "closed": rt.closed = true; this.abandonMessages(id); if (rt.turnId) await this.finishTurn(id, "failed", undefined, event.error || "Agent session closed"); this.identities.delete(rt.token); rt.session = undefined; break;
     }
   }
@@ -910,7 +1001,10 @@ export class Kernel {
       row = { nodeId: id, seq: previous?.seq ?? (existing.at(-1)?.seq ?? 0) + 1, turnId: item.type === "user_message" && item.delivery === "queued" ? undefined : rt.turnId, ts: previous?.ts ?? ts, item };
     }
     rt.lastItem = row;
-    if (row.item.type === "assistant_message") rt.finalText = row.item.text;
+    if (row.item.type === "assistant_message") {
+      rt.finalMessageId = row.item.messageId;
+      rt.finalText = (rt.finalMessageId ? rt.steeredTextPrefixes?.get(rt.finalMessageId) ?? "" : "") + row.item.text;
+    }
     if (text) { rt.pendingItem = row; rt.itemTimer ??= setTimeout(() => this.flushItem(id), 100); }
     else this.store.appendItem(n.runId, row);
     if (item.type === "tool_call") {
@@ -954,6 +1048,10 @@ export class Kernel {
     this.emit(n.runId, { type: "turn.updated", turnId, patch: { status, endedAt: now(), usage: { inputTokens: rt.usage.inputTokens, cachedInputTokens: rt.usage.cachedInputTokens, outputTokens: rt.usage.outputTokens, totalCostUsd: rt.usage.costUsd }, error } });
     for (const p of this.store.snapshot(n.runId).permissions) if (p.nodeId === id && p.status === "pending") this.emit(n.runId, { type: "permission", permission: { ...p, status: "expired", resolvedAt: now() } });
     for (const span of this.store.snapshot(n.runId).toolSpans) if (span.nodeId === id && span.status === "running") this.emit(n.runId, { type: "tool.span", span: { ...span, status: status === "completed" ? "completed" : status, endedAt: now() } });
+    if (rt.reopenAfterTurn) {
+      rt.reopenAfterTurn = false;
+      void this.closeSession(id, true).catch((err: unknown) => this.log(n.runId, err, id));
+    }
     if (interrupted) {
       // A human redirect ends only this turn: no result capture, terminal node state,
       // descendant cancellation, or queue drain. The caller starts the replacement turn.
@@ -961,13 +1059,16 @@ export class Kernel {
       this.updateRun(n.runId);
       return;
     }
-    const blocking = this.store.snapshot(n.runId).questions.find((q) => q.nodeId === id && q.blocking && q.status === "pending");
+    const snapshot = this.store.snapshot(n.runId);
+    const blocking = snapshot.questions.find((q) => q.nodeId === id && q.blocking && q.status === "pending");
+    const waiting = status === "completed" && !rt.report && n.delegationId ? waitingForChildren(snapshot, id) : 0;
     if (status === "completed" && blocking && !rt.report) {
       this.patchNode(id, { status: "idle", activity: `等你回答: ${blocking.question}` }); this.updateRun(n.runId); this.armIdle(id); await this.drainMessages(id); await this.deliver(id); return;
     }
     const sideTurn = rt.sideTurn; rt.sideTurn = undefined;
     // The assignment's outcome stands: return to the delivered status whatever happened in this turn.
     if (n.delegationId && sideTurn !== undefined) this.patchNode(id, { status: sideTurn, activity: status === "completed" ? "Answered a session message" : `Session message turn ${status}${error ? `: ${error}` : ""}`, endedAt: now() });
+    else if (waiting) this.patchNode(id, { status: "idle", activity: `Waiting for ${waiting} delegates` });
     else if (n.delegationId) {
       const d = this.store.delegation(n.delegationId);
       const result: DelegationResult = { status: status === "completed" ? rt.report?.status ?? "success" : "failed", summary: rt.report?.summary ?? (rt.finalText || error || "No final response"), result: rt.report?.result as JsonValue | undefined, artifacts: rt.report?.artifacts, reported: !!rt.report, finalText: rt.finalText, error };
@@ -1002,7 +1103,13 @@ export class Kernel {
       if (rt.turnId || this.paused(this.store.node(id).runId)) return;
       const n = this.store.node(id);
       const s = this.store.snapshot(n.runId);
-      if (s.questions.some((q) => q.nodeId === id && q.status === "pending") || s.run.team?.proposals.some((p) => p.status === "pending") || this.store.notices(id).length || s.nodes.some((node) => active(node.status)) || s.delegations.some((d) => !done(d) || (d.status !== "replaced" && !d.deliveredAt))) { this.armIdle(id); return; }
+      if (n.delegationId && n.status === "idle" && waitingForChildren(s, id)) {
+        if (n.persistence != null && this.registry.get(n.agentId)?.capabilities.resume) {
+          void this.closeSession(id, true).catch((error: unknown) => this.log(n.runId, error));
+        } else this.armIdle(id);
+        return;
+      }
+      if (s.questions.some((q) => q.nodeId === id && q.status === "pending") || s.run.team?.proposals.some((p) => p.status === "pending") || this.store.notices(id).length || s.nodes.some((node) => active(node.status)) || s.delegations.some(undelivered)) { this.armIdle(id); return; }
       void this.closeSession(id).then(() => {
         if (!n.parentNodeId && n.status === "idle") { this.patchNode(id, { status: "completed", endedAt: now() }); this.updateRun(n.runId); }
       }).catch((e: unknown) => this.log(n.runId, e));
@@ -1021,7 +1128,8 @@ export class Kernel {
     this.deliveryTimers.set(parentId, setTimeout(() => { this.deliveryTimers.delete(parentId); void this.deliver(parentId).catch((e: unknown) => this.log(this.store.node(parentId).runId, e)); }, this.options.deliveryDebounceMs ?? 1500));
   }
   private delivered(d: DelegationRecord, via: NonNullable<DelegationRecord["deliveredVia"]>): void {
-    if (!d.deliveredAt) this.patchDelegation(d.id, { deliveredAt: now(), deliveredVia: via });
+    const current = this.store.delegation(d.id);
+    if (!current.deliveredAt && done(current) && current.status !== "replaced" && current.round === d.round) this.patchDelegation(d.id, { deliveredAt: now(), deliveredVia: via });
   }
   private async deliver(parentId: string): Promise<void> {
     if (this.stopped || this.deliveryTimers.has(parentId) || this.delivering.has(parentId) || this.canceling.has(parentId)) return;
@@ -1030,24 +1138,21 @@ export class Kernel {
     const parent = this.store.node(parentId), rt = this.runtime(parentId);
     if (rt.interrupting || this.paused(parent.runId) || this.resuming.has(parent.runId) || this.rollbacks.active(parent.runId)) return;
     if (["canceled", "failed", "replaced"].includes(parent.status)) return;
-    const pending = this.store.snapshot(parent.runId).delegations.filter((d) => d.fromNodeId === parentId && done(d) && d.status !== "replaced" && !this.replacing.has(d.id) && d.result && !d.deliveredAt);
+    const snapshot = this.store.snapshot(parent.runId);
+    const pending = snapshot.delegations.filter((d) => d.fromNodeId === parentId && done(d) && d.status !== "replaced" && !this.replacing.has(d.id) && d.result && !d.deliveredAt);
     const notices = this.store.notices(parentId);
     if (!pending.length && !notices.length) return;
-    const text = [pending.length ? resultsPrompt(pending) : "", ...notices.map((notice) => notice.text)].filter(Boolean).join("\n\n");
+    const text = [...resultDeliveryParts(pending, parent, snapshot.run.policy), ...notices.map((notice) => notice.text)].filter(Boolean).join("\n\n");
     if (rt.turnId) {
       const turnId = rt.turnId;
-      // Reserve before awaiting the provider so a concurrent delivery cannot enqueue the
-      // same results. A failed/unsupported steer releases the reservation.
-      for (const d of pending) this.delivered(d, "steer");
-      let outcome: Awaited<ReturnType<DriverSession["steer"]>> | undefined;
-      try { outcome = await rt.session?.steer(this.promptFor(parentId, text)); }
-      catch (error) { for (const d of pending) this.patchDelegation(d.id, { deliveredAt: undefined, deliveredVia: undefined }); throw error; }
-      if (outcome !== "steered" || this.interruptedTurn(parentId, turnId)) {
-        for (const d of pending) this.patchDelegation(d.id, { deliveredAt: undefined, deliveredVia: undefined });
-        if (!rt.turnId) this.scheduleDelivery(parentId);
+      const outcome = await rt.session?.steer(this.promptFor(parentId, text));
+      if (outcome !== "steered" || rt.turnId !== turnId || rt.interrupting === turnId) {
+        if (rt.turnId !== turnId) this.scheduleDelivery(parentId);
         return;
       }
+      for (const d of pending) this.delivered(d, "steer");
       this.store.deleteNotices(notices.map((notice) => notice.id));
+      this.splitSteeredText(parentId, turnId);
       this.addItem(parentId, { type: "user_message", text });
     } else {
       // Mark before starting a new provider turn, which can synchronously call get_result.
@@ -1140,9 +1245,10 @@ export class Kernel {
         if (["canceled", "replaced"].includes(node.status)) { this.store.forgetPausedNode(node.id); continue; }
         const rt = this.runtime(node.id);
         const prompts: QueuedPrompt[] = interrupted.has(node.id) ? [{ text: resumePrompt, trigger: "resume" }] : [];
-        const pending = this.store.snapshot(id).delegations.filter((d) => d.fromNodeId === node.id && done(d) && d.status !== "replaced" && d.result && !d.deliveredAt);
+        const snapshot = this.store.snapshot(id);
+        const pending = snapshot.delegations.filter((d) => d.fromNodeId === node.id && done(d) && d.status !== "replaced" && d.result && !d.deliveredAt);
         const notices = this.store.notices(node.id);
-        const content = [pending.length ? resultsPrompt(pending) : "", ...notices.map((notice) => notice.text)].filter(Boolean).join("\n\n");
+        const content = [...resultDeliveryParts(pending, node, snapshot.run.policy), ...notices.map((notice) => notice.text)].filter(Boolean).join("\n\n");
         if (content) prompts.push({ text: content, trigger: "result" });
         prompts.push(...rt.queued.splice(0)); this.persistQueue(node.id);
         // A queued delegate may have been created just before a restart, before its
@@ -1192,9 +1298,15 @@ export class Kernel {
   }
   private async closeSession(id: string, preserveQueue = false): Promise<void> {
     const rt = this.runtime(id); clearTimeout(rt.idleTimer); clearTimeout(rt.stallTimer); this.identities.delete(rt.token); rt.unsubscribe?.(); rt.closed = true; if (preserveQueue) this.persistQueue(id); else this.abandonMessages(id);
-    await rt.opening?.catch(() => {});
-    await rt.session?.close(); rt.session = undefined;
-    for (const finish of this.waits.get(id) ?? []) finish(); this.waits.delete(id);
+    if (rt.closing) return rt.closing;
+    const close = async (): Promise<void> => {
+      if (rt.opening) await rt.opening.catch(() => {});
+      const session = rt.session; rt.session = undefined;
+      try { await session?.close(); }
+      finally { for (const finish of this.waits.get(id) ?? []) finish(); this.waits.delete(id); }
+    };
+    rt.closing = close();
+    try { await rt.closing; } finally { rt.closing = undefined; }
   }
   async shutdown(): Promise<void> {
     this.stopped = true; this.titleController.abort();

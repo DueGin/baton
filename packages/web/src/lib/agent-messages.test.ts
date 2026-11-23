@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ItemRecord, ToolCallDetail } from "@baton/protocol";
 import { agentMessageDemo } from "../demo/messages.js";
+import { demoResultsPrompt } from "../demo/prompts.js";
 import { parseBatonMessage } from "./baton-messages.js";
 import { partAgentCards, toolAgentCard } from "./agent-messages.js";
 const base = Date.parse("2026-11-10T07:00:00Z"); const { snapshot, items } = agentMessageDemo(base);
@@ -8,6 +9,13 @@ const root = snapshot.nodes[0]!; const api = snapshot.delegations.find(edge => e
 const child = snapshot.nodes.find(node => node.id === api.toNodeId)!;
 function tool(name: string, detail: ToolCallDetail, node = root): ItemRecord { return { nodeId: node.id, seq: 80, ts: new Date(base).toISOString(), item: { type: "tool_call", callId: "test", name, status: "completed", detail } }; }
 describe("agent-to-agent message mapping", () => {
+  it("shows every delivered result followed by a system-styled policy notice", () => {
+    const text = `${demoResultsPrompt([api, { ...api, id: "another" }])}\n\n<baton-notice kind="policy">请验收成员的改动。</baton-notice>`;
+    const row: ItemRecord = { seq: 90, nodeId: root.id, ts: root.createdAt, item: { type: "user_message", text } };
+    const cards = parseBatonMessage(text)?.flatMap((part, index) => partAgentCards(part, row, root, snapshot, index));
+    expect(cards?.map(card => card.heading)).toEqual(["收到结果", "收到结果", "策略通知"]);
+    expect(cards?.[2]).toMatchObject({ kind: "notice", counterpart: { role: "系统", agentId: "generic" }, body: { type: "text", text: "请验收成员的改动。" } });
+  });
   it("maps every required parent/child artifact with correct counterparts", () => {
     const cards = items.flatMap(row => {
       const node = snapshot.nodes.find(node => node.id === row.nodeId)!;

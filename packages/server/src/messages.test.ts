@@ -69,10 +69,82 @@ describe("human message delivery", () => {
     expect(result.delivery).toBe("steered");
     expect(rows().find((r) => r.seq === result.itemSeq)).toMatchObject({
       turnId: run.turns[0]!.id,
-      item: { type: "user_message", text: "change approach", clientId: "steer-client", delivery: "steered", escalated: false },
+      item: { type: "user_message", text: "change approach", clientId: "steer-client", delivery: "steered", escalated: false, steeredAfterSeq: 1 },
     });
     expect(driver.sessions[0]!.steered).toEqual(["change approach"]);
     expect(driver.sessions[0]!.prompts).toEqual(["start"]);
+  });
+
+  it.each(["assistant_message", "reasoning"] as const)("anchors a queued steer between %s fragments", async (type) => {
+    const streaming = gate(), remaining = gate();
+    const firstFragment = Promise.withResolvers<void>();
+    const { server, root, rows } = await setup({ script: async (context) => {
+      await streaming.wait(context);
+      context.item({ type, text: "First fragment." });
+      firstFragment.resolve();
+      await remaining.wait(context);
+      context.item({ type, text: "Second fragment." });
+    } });
+    const queued = await server.kernel.message(root, "change direction");
+    streaming.release();
+    await firstFragment.promise;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(await server.kernel.deliverHumanMessage(root, queued.itemSeq, "steer")).toMatchObject({ delivery: "steered" });
+    const anchor = rows().at(-1)!;
+    expect(anchor.item).toEqual({ type, text: "First fragment." });
+    expect(anchor.seq).toBeGreaterThan(queued.itemSeq);
+    expect(rows().find((row) => row.seq === queued.itemSeq)).toMatchObject({ item: { steeredAfterSeq: anchor.seq } });
+
+    remaining.release();
+    await until(() => server.store.node(root).status === "idle");
+    const fragments = rows().filter((row) => row.item.type === type);
+    expect(fragments.map((row) => row.item)).toEqual([{ type, text: "First fragment." }, { type, text: "Second fragment." }]);
+    expect(fragments[0]!.seq).toBe(anchor.seq);
+    expect(fragments[1]!.seq).toBeGreaterThan(anchor.seq);
+  });
+
+  it("strips displayed prefixes from cumulative snapshots across two steers", async () => {
+    const middle = gate(), end = gate();
+    const { server, root, rows } = await setup({ script: async (context) => {
+      const snapshot = (text: string) => context.item({ type: "assistant_message", text, messageId: "stream" });
+      snapshot("Before.");
+      await middle.wait(context);
+      snapshot("Before.");
+      snapshot("Before. After one");
+      snapshot("Before. After one.");
+      await end.wait(context);
+      snapshot("Before. After one. After two.");
+    } });
+    const fragments = () => rows().filter((row) => row.item.type === "assistant_message");
+    await until(() => fragments().length === 1);
+    expect(await server.kernel.message(root, "first steer", undefined, "steer")).toMatchObject({ delivery: "steered" });
+    middle.release();
+    await until(() => fragments().length === 2);
+    expect(await server.kernel.message(root, "second steer", undefined, "steer")).toMatchObject({ delivery: "steered" });
+    end.release();
+    await until(() => server.store.node(root).status === "idle");
+    expect(fragments().map(({ item }) => item)).toEqual(["Before.", " After one.", " After two."].map((text) => ({ type: "assistant_message", text, messageId: "stream" })));
+  });
+
+  it("starts a new parent output item after steering a delegation result", async () => {
+    const remaining = gate();
+    const { server, root, rows } = await setup({ script: async (context) => {
+      if (context.prompt.includes("<baton-assignment")) { context.text("Child report."); return; }
+      context.item({ type: "assistant_message", text: "Parent before.", messageId: "parent" });
+      await remaining.wait(context);
+      context.item({ type: "assistant_message", text: "Parent before. Parent after.", messageId: "parent" });
+    } });
+    await until(() => rows().some((row) => row.item.type === "assistant_message"));
+    const child = await server.kernel.delegate(root, { agent: "root", title: "child", task: "work" });
+    const resultRow = () => rows().find((row) => row.item.type === "user_message" && row.item.text.startsWith("<baton-results>"));
+    await until(() => !!resultRow());
+    expect(server.store.delegation(child.delegationId).deliveredVia).toBe("steer");
+    remaining.release();
+    await until(() => server.store.node(root).status === "idle");
+    const output = rows().filter((row) => row.item.type === "assistant_message");
+    expect(output.map(({ item }) => item)).toEqual(["Parent before.", " Parent after."].map((text) => ({ type: "assistant_message", text, messageId: "parent" })));
+    expect(output[0]!.seq).toBeLessThan(resultRow()!.seq);
+    expect(output[1]!.seq).toBeGreaterThan(resultRow()!.seq);
   });
 
   it("persists unsupported steer immediately and updates the same row when drained", async () => {
@@ -151,6 +223,31 @@ describe("human message delivery", () => {
       { type: "user_message", text: followup },
       expect.objectContaining({ text: "human instruction", delivery: "steered" }),
     ]);
+  });
+
+  it("starts a new child output item after steering a parent follow-up", async () => {
+    const finish = gate();
+    const { server, root } = await setup({ script: async (context) => {
+      if (!context.prompt.includes("<baton-assignment")) return;
+      context.item({ type: "assistant_message", text: "Child before.", messageId: "child" });
+      await finish.wait(context);
+      context.item({ type: "assistant_message", text: "Child before. Child after.", messageId: "child" });
+    } });
+    await until(() => server.store.node(root).status === "idle");
+    const child = await server.kernel.delegate(root, { agent: "root", title: "child", task: "work" });
+    const childNodeId = child.nodeId!;
+    const childRows = () => server.store.items(childNodeId);
+    await until(() => childRows().some(({ item }) => item.type === "assistant_message"));
+    await server.kernel.tool(root, "send", { delegationId: child.delegationId, message: "parent instruction" });
+    const followup = childRows().find(({ item }) => item.type === "user_message" && item.text.startsWith("<baton-followup"))!;
+    expect(followup.item).not.toHaveProperty("steeredAfterSeq");
+    finish.release();
+    await until(() => server.store.delegation(child.delegationId).status === "completed");
+    const output = childRows().filter(({ item }) => item.type === "assistant_message");
+    expect(output.map(({ item }) => item)).toEqual(["Child before.", " Child after."].map((text) => ({ type: "assistant_message", text, messageId: "child" })));
+    expect(output[0]!.seq).toBeLessThan(followup.seq);
+    expect(output[1]!.seq).toBeGreaterThan(followup.seq);
+    expect(server.store.delegation(child.delegationId).result?.finalText).toBe("Child before. Child after.");
   });
 
   it("leaves canceled queued messages visible and appends a warning exactly once", async () => {
@@ -485,7 +582,7 @@ describe("human message delivery", () => {
     expect(response.status).toBe(202);
     const body = await response.json() as SendMessageResponse;
     expect(body).toEqual({ accepted: true, delivery, itemSeq: expect.any(Number) });
-    expect(rows().find((r) => r.seq === body.itemSeq)?.item).toEqual({ type: "user_message", text: "API request", clientId: "api-client", delivery, ...(delivery === "steered" ? { escalated: false } : {}), ...(delivery === "queued" ? { queuePosition: 1 } : {}) });
+    expect(rows().find((r) => r.seq === body.itemSeq)?.item).toEqual({ type: "user_message", text: "API request", clientId: "api-client", delivery, ...(delivery === "steered" ? { escalated: false, steeredAfterSeq: 1 } : {}), ...(delivery === "queued" ? { queuePosition: 1 } : {}) });
   });
 });
 

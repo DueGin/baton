@@ -1,4 +1,5 @@
-import type { DelegationRecord } from "@baton/protocol";
+import type { DelegationRecord, RunRecord } from "@baton/protocol";
+import type { NoticeKind } from "../lib/baton-messages.js";
 
 /** Browser-only mirrors of server/kernel/prompts.ts; parity is verified in web tests. */
 export function demoBriefPrompt(d: DelegationRecord): string {
@@ -14,8 +15,12 @@ const escapeAttr = (value: string): string => value.replace(/&/g, "&amp;").repla
 export function demoFollowupPrompt(delegationId: string, message: string): string {
   return `<baton-followup delegation="${escapeAttr(delegationId)}">\n${message}\n</baton-followup>`;
 }
-export function demoNoticePrompt(kind: "team" | "system" | "correction", message: string): string {
+export function demoNoticePrompt(kind: NoticeKind, message: string): string {
   return `<baton-notice kind="${kind}">\n${message}\n</baton-notice>`;
+}
+export const demoReviewReminder = "主导者请亲自验收：查看 diff，运行相关构建和测试，验证实际效果；不合格请打回。";
+export function demoResultDelivery(results: string, run: RunRecord, recipient: string): string {
+  return run.policy.mode !== "solo" && run.policy.leadReview && recipient === run.rootNodeId ? `${results}\n\n${demoNoticePrompt("policy", demoReviewReminder)}` : results;
 }
 export function demoResultsPrompt(delegations: DelegationRecord[]): string {
   const blocks = delegations.map(d => {

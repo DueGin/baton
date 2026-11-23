@@ -37,6 +37,10 @@ describe("settings navigation", () => {
     const live = renderToStaticMarkup(<SettingsContent {...content({ section: "about", demo: false })} />);
     expect(live).toContain("Local daemon"); expect(live).toContain("http://127.0.0.1:7433"); expect(live).toContain('class="is-live"');
   });
+  it("offers the send shortcut under conversation preferences", () => {
+    const html = renderToStaticMarkup(<SettingsContent {...content({ section: "conversation" })} />);
+    expect(html).toContain('aria-label="发送快捷键"'); expect(html).toContain("Enter 发送，Enter 换行");
+  });
   it("renders one category per page; single-card pages are marked so the card title is not repeated", () => {
     const general = renderToStaticMarkup(<SettingsContent {...content({ section: "general" })} />);
     expect(general).toContain("<h1>通用</h1>"); expect(general).toContain("外观"); expect(general).not.toContain("默认 Run 策略");

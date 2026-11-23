@@ -1,9 +1,11 @@
 import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { AgentEntry, ItemRecord, NodeRecord, QuestionRecord, RunSnapshot, ToolCallDetail } from "@baton/protocol";
 import { activeTurn, conversationPhase, conversationRows, messageActionKey, queuedRows, nodeIsLive, inFlightMessage, type OutgoingMessage, type MessageActionState, type MessageAction } from "../lib/conversation.js";
-import { clock, displayStatus, treeOrder } from "../lib/derive.js";
-import { AgentMark, Empty, Icon, Status } from "./common.js";
-import { Select, type SelectOption } from "./Select.js";
+import { clock } from "../lib/derive.js";
+import { AgentMark, Empty, Icon } from "./common.js";
+import { SessionTabs } from "./SessionTabs.js";
+import { SessionConfig } from "./SessionConfig.js";
+import { shortcutLabel, useSendShortcut } from "../lib/send-shortcut.js";
 import type { RunStore } from "../store.js";
 import { AgentMessageCard } from "./AgentMessageCard.js";
 import { partAgentCards, toolAgentCard } from "../lib/agent-messages.js";
@@ -104,23 +106,16 @@ function QuestionMarker({ question, jump }: { question: QuestionRecord; jump: (i
   const prompts = questionPrompts(question);
   return <button type="button" className="question-marker" onClick={() => jump(question.id)} title="跳到输入框上方的问题卡片"><i aria-hidden="true" /><strong>等你回答</strong><span>{markdownPlainText(prompts[0]?.question ?? question.question)}{prompts.length > 1 ? ` 等 ${prompts.length} 个问题` : ""}</span><small>在输入框上方作答 ↓</small></button>;
 }
-/** The conversation node selector: the run's nodes in tree order, indented by depth, live and paused ones marked. */
-export function nodeOptions(snapshot: RunSnapshot): SelectOption[] {
-  return treeOrder(snapshot.nodes).map(entry => {
-    const paused = snapshot.run.status === "paused" && !["canceled", "completed", "failed", "replaced"].includes(entry.status);
-    const live = nodeIsLive(snapshot, entry);
-    return { value: entry.id, label: entry.title, description: [entry.agentId, entry.role, entry.model].filter(Boolean).join(" · "), icon: <AgentMark agent={entry.agentId} small />, depth: entry.depth, ...(paused ? { hint: "已暂停" } : live ? { hint: "运行中" } : {}) };
-  });
-}
 const EMPTY_REFS: ReadonlyMap<string, RunSnapshot> = new Map();
 /** Snapshots of the other runs, so a session message shows its sender even after switching runs (DESIGN §4.16). */
-export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNodeId, now, inspect, projectName, answer, decline, busy, stopRun, resumeRun, agents = [], refs = EMPTY_REFS }: {
+export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNodeId, now, inspect, showTopology, projectName, answer, decline, busy, stopRun, resumeRun, agents = [], refs = EMPTY_REFS }: {
   refs?: ReadonlyMap<string, RunSnapshot>;
   agents?: AgentEntry[]; answer: HumanActions["answer"]; decline?: HumanActions["decline"]; busy: boolean; projectName?: string; stopRun?: () => void; resumeRun?: () => void; snapshot: RunSnapshot; store: RunStore; items: Record<string, ItemRecord[]>; itemStatus: Record<string, string>;
-  nodeId: string; setNodeId: (id: string) => void; now: number; inspect: (id: string) => void;
+  nodeId: string; setNodeId: (id: string) => void; now: number; inspect: (id: string) => void; showTopology: (id: string) => void;
 }) {
   const [follow, setFollow] = useState(true); const bottom = useRef<HTMLDivElement>(null);
   const composer = useRef<ComposerHandle>(null);
+  const sendLabel = `发送（${shortcutLabel(useSendShortcut())}）`;
   const [composerStatus, setComposerStatus] = useState<ComposerStatus>({ empty: true, uploading: false, failed: false });
   const scroll = useRef<HTMLDivElement>(null); const node = snapshot.nodes.find(entry => entry.id === nodeId) ?? snapshot.nodes[0];
   const state = store.getSnapshot();
@@ -171,8 +166,8 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
   const imagesEnabled = agent?.capabilities.images === true;
   const closed = node ? ["canceled", "replaced"].includes(node.status) : false;
   if (!node) return <Empty>等待根节点创建…</Empty>;
-  return <ImageContext value={imageContext}><div className="transcript-view"><div className="view-toolbar conversation-toolbar"><div className="transcript-selector"><Select label="选择会话节点" variant="ghost" value={node.id} onChange={setNodeId} options={nodeOptions(snapshot)} popoverMinWidth={300} popoverMaxWidth={460} /><Status status={displayStatus(node, snapshot)} /></div><div className="conversation-toolbar-actions"><span className="muted">{messages.length} items</span><button className="text-button" onClick={() => inspect(node.id)} title="查看当前节点详情">节点详情 ↗</button></div></div>
-    <div className="transcript-body"><div className="transcript-scroll" ref={scroll} onScroll={() => { const el = scroll.current; if (el) setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 100); }}><div className="transcript-content">{itemStatus[node.id] === "loading" && <div className="loading-line">正在加载会话…</div>}{itemStatus[node.id] === "error" && <button className="button" onClick={() => { void store.loadItems(node.id, true); }}>重试加载会话</button>}{entries.map((entry, index) => {
+  return <ImageContext value={imageContext}><div className="transcript-view"><div className="view-toolbar conversation-toolbar"><SessionTabs snapshot={snapshot} selected={node.id} select={setNodeId} inspect={inspect} showTopology={showTopology} /><div className="conversation-toolbar-actions"><span className="muted">{messages.length} items</span><button className="text-button" onClick={() => inspect(node.id)} title="查看当前节点详情">节点详情 ↗</button></div></div>
+    <div className="transcript-body" id="session-content" role="tabpanel" aria-labelledby={`session-tab-${node.id}`}><div className="transcript-scroll" ref={scroll} onScroll={() => { const el = scroll.current; if (el) setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 100); }}><div className="transcript-content">{itemStatus[node.id] === "loading" && <div className="loading-line">正在加载会话…</div>}{itemStatus[node.id] === "error" && <button className="button" onClick={() => { void store.loadItems(node.id, true); }}>重试加载会话</button>}{entries.map((entry, index) => {
       const start = rolled.start[index]!, key = start >= 0 ? groupKey(start) : "", hidden = start >= 0 && !revealed.has(key);
       const toggle = start === index ? <RolledBackToggle count={rolled.size.get(index)!} open={!hidden} toggle={() => setRevealed(current => { const next = new Set(current); if (next.has(key)) next.delete(key); else next.add(key); return next; })} /> : null;
       if (hidden) return toggle && <Fragment key={`rolled:${key}`}>{toggle}</Fragment>;
@@ -180,14 +175,15 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
       return <Fragment key={entry.type === "question" ? entry.question.id : entry.entry.outgoing?.clientId ?? entry.entry.row.seq}>{toggle}{start >= 0 ? <div className="rolled-back-row">{content}</div> : content}</Fragment>;
     })}{!entries.length && itemStatus[node.id] === "ready" && <Empty>这个节点还没有消息。</Empty>}{phase && <TurnIndicator key={node.id} phase={phase} snapshot={snapshot} now={now} inspect={inspect} jumpQuestion={jumpQuestion} />}<div ref={bottom} /></div></div><ConversationOutline items={outline} scroll={scroll} /></div>
     <div className="composer-stack">{dockQuestions.length > 0 && <div className="question-dock" aria-label="待回答的问题">{dockQuestions.map(question => <QuestionCard key={question.id} inline compact question={question} answer={answer} decline={decline} busy={busy} />)}</div>}
-    <div className="composer-tools"><BackgroundPopover projectName={projectName} key={snapshot.run.id} snapshot={snapshot} now={now} client={store.client} /><PullRequestPopover key={`pr:${snapshot.run.id}`} snapshot={snapshot} client={store.client} inspect={inspect} /></div>
+    <div className="composer-tools"><BackgroundPopover projectName={projectName} key={snapshot.run.id} snapshot={snapshot} now={now} client={store.client} inspect={inspect} /><PullRequestPopover key={`pr:${snapshot.run.id}`} snapshot={snapshot} client={store.client} inspect={inspect} /></div>
     <QueueDock key={node.id} entries={queue} actions={state.messageActions} pending={queueState?.pending} error={queueState?.error} reorder={order => { void store.reorderQueue(node.id, order); }} act={(seq, action) => store.actOnMessage(node.id, seq, action)} edit={(seq, text) => store.editMessage(node.id, seq, text)} />
     <form className="composer" onSubmit={event => { event.preventDefault(); composer.current?.submit(); }}
       onDragOver={event => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
       onDrop={event => { if (event.defaultPrevented || !event.dataTransfer.types.includes("Files")) return; event.preventDefault(); composer.current?.attach([...event.dataTransfer.files]); }}>
       <LazyComposer key={node.id} ref={composer} nodeId={node.id} client={store.client} placeholder={`向 ${node.agentId} 发送消息…${live ? "（运行中也可发送）" : ""}`} disabled={closed} imagesEnabled={imagesEnabled} onSend={send} onStatus={setComposerStatus} />
-      <div className="composer-footer">{composerStatus.hint ? <span className="composer-hint" role="status">{composerStatus.hint}</span> : <span title="送达方式会显示在消息旁">{snapshot.run.status === "paused" ? snapshot.run.pauses?.at(-1)?.by === "restart" ? "baton 重启时有 agent 正在工作，会话已暂停 · 点「继续」让它们接着跑" : "会话已暂停，消息会在继续后送达" : live ? "运行中 · 发送后排队，可在消息上改为引导或立即发送" : "发送到当前节点"} · ⌘ / Ctrl + Enter</span>}<div className="composer-actions"><AttachImageButton enabled={imagesEnabled} disabled={closed} attach={files => composer.current?.attach(files)} />{composerAction === "stop" ? <button type="button" className="button composer-stop composer-icon-action" disabled={busy} aria-label="停止" title="停止本会话中所有正在工作的 agent（可继续）" onClick={() => stopRun?.()}><Icon name="stop" size={13} /></button>
+      {composerStatus.hint ? <div className="composer-hint" role="status">{composerStatus.hint}</div> : snapshot.run.status === "paused" && <div className="composer-paused-hint" role="status">{snapshot.run.pauses?.at(-1)?.by === "restart" ? "baton 重启时有 agent 正在工作，会话已暂停 · 点「继续」让它们接着跑" : "会话已暂停，消息会在继续后送达"}</div>}
+      <div className="composer-footer">{agent && <SessionConfig key={node.id} agent={agent} node={node} updateNodeConfig={store.updateNodeConfig} />}<div className="composer-actions"><AttachImageButton enabled={imagesEnabled} disabled={closed} attach={files => composer.current?.attach(files)} />{composerAction === "stop" ? <button type="button" className="button composer-stop composer-icon-action" disabled={busy} aria-label="停止" title="停止本会话中所有正在工作的 agent（可继续）" onClick={() => stopRun?.()}><Icon name="stop" size={13} /></button>
       : composerAction === "resume" ? <button type="button" className="button primary composer-resume composer-icon-action" disabled={busy} aria-label="继续" title="继续本会话" onClick={() => resumeRun?.()}><Icon name="play" size={13} /></button>
-      : <button className="button primary composer-send composer-icon-action" disabled={composerStatus.empty || closed || composerStatus.uploading} aria-label="发送" title={composerStatus.uploading ? "图片上传中…" : composerStatus.failed ? "有图片上传失败" : "发送 · ⌘ / Ctrl + Enter"}><Icon name="arrow" size={15} /></button>}</div></div></form></div>
+      : <button className="button primary composer-send composer-icon-action" disabled={composerStatus.empty || closed || composerStatus.uploading} aria-label={sendLabel} title={`${sendLabel}${composerStatus.uploading ? " · 图片上传中…" : composerStatus.failed ? " · 有图片上传失败" : ""}`}><Icon name="arrow" size={15} /></button>}</div></div></form></div>
   </div></ImageContext>;
 }

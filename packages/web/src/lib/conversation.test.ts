@@ -8,6 +8,28 @@ const ts = new Date(base).toISOString();
 const pending: OutgoingMessage = { clientId: "c1", nodeId: "n", text: "hello", state: "sending", ts };
 const row: ItemRecord = { seq: 9, nodeId: "n", ts, item: { type: "user_message", text: "hello", clientId: "c1", delivery: "queued" } };
 describe("message delivery", () => {
+  const output = (seq: number): ItemRecord => ({ seq, nodeId: "n", ts, turnId: "t", item: { type: "assistant_message", text: `output ${seq}` } });
+  const steer = (seq: number, after?: number): ItemRecord => ({ ...output(seq), item: { type: "user_message", text: `steer ${seq}`, delivery: "steered", steeredAfterSeq: after } });
+  const order = (rows: ItemRecord[]) => conversationRows(rows, [], "n").map(({ row }) => row.seq);
+  it("anchors steered input between outputs, sorts ties and keeps legacy steers at turn end", () => {
+    const rows = [output(1), steer(3, 5), steer(2, 5), steer(4), output(5), output(6)];
+    expect(order(rows)).toEqual([1, 5, 2, 3, 6, 4]);
+    expect(order([...rows, output(7)])).toEqual([1, 5, 2, 3, 6, 7, 4]);
+  });
+  it("falls forward past hidden, absent and self anchors, and can follow an earlier steered message", () => {
+    const hidden: ItemRecord = { ...output(3), item: { type: "user_message", text: "queued", delivery: "queued" } };
+    expect(order([output(1), steer(2, 3), hidden, steer(4, 3), output(6)])).toEqual([1, 2, 4, 6]);
+    expect(order([output(1), steer(2, 5), output(6)])).toEqual([1, 2, 6]);
+    expect(order([output(1), steer(2, 7), steer(3, 2), output(6), output(7), output(8)])).toEqual([1, 6, 7, 2, 3, 8]);
+    expect(order([output(1), steer(2, 2), output(3)])).toEqual([1, 2, 3]);
+    expect(order([output(1), steer(2, 3), steer(3, 2), output(4)])).toEqual([1, 2, 3, 4]);
+  });
+  it("keeps an accepted optimistic steer in place until its authoritative anchor arrives", () => {
+    const outgoing: OutgoingMessage = { ...pending, state: "accepted", itemSeq: 4, delivery: "steered", steeredAfterSeq: 2 };
+    const rows = [output(1), output(2), output(3), output(5)];
+    expect(conversationRows(rows, [outgoing], "n").map(({ row }) => row.seq)).toEqual([1, 2, 4, 3, 5]);
+    expect(conversationRows([...rows, steer(4, 3)], [outgoing], "n").map(({ row }) => row.seq)).toEqual([1, 2, 3, 4, 5]);
+  });
   it("shows optimistic messages immediately and reconciles clientId or itemSeq without duplicates", () => {
     expect(conversationRows([], [pending], "n")[0]!.outgoing?.state).toBe("sending");
     const queued = reconcileOutgoing([pending], row);
@@ -64,7 +86,7 @@ describe("conversation live phase", () => {
     expect(phase()?.label).toBe("已发送，等待响应…");
     expect(phase([textRow("reasoning")])).toMatchObject({ kind: "reasoning", reasoning: "new output", quiet: 45 });
     expect(phase([textRow("assistant_message")])?.label).toBe("正在回复…");
-    expect(conversationPhase(snapshot, node, [], base + 45_000, base + 40_000)?.quiet).toBe(5);
+    expect(conversationPhase(snapshot, node, [], base + 45_000, base + 40_000)).toMatchObject({ quiet: 5 });
     expect(quietSeconds(base, base + 1000)).toBe(0);
   });
   it("prioritizes permission, human questions and executing tools", () => {
@@ -84,6 +106,10 @@ describe("conversation live phase", () => {
   it("shows child waiting and hides the bar once the node is done", () => {
     const edge = { ...original.delegations[0]!, fromNodeId: node.id, status: "running" as const };
     expect(phase([], { ...snapshot, delegations: [edge] })?.kind).toBe("children");
+    const idle = { ...node, status: "idle" as const };
+    const value = { ...snapshot, turns: [], delegations: [edge] };
+    expect(conversationPhase(value, idle, [], base)).toEqual({ kind: "idle_children", label: "空闲 · 等待 1 个子任务，结果送达后自动继续", related: [] });
+    expect(displayStatus(idle, value)).toBe("waiting_children");
     expect(conversationPhase({ ...snapshot, turns: [] }, { ...node, status: "idle" }, [], base)).toBeNull();
   });
   it("never resurrects a completed idle turn from a stale accepted send or its final assistant text (08:14:38–08:17:10 regression)", () => {
@@ -108,8 +134,8 @@ describe("conversation live phase", () => {
     expect(conversationPhase({ ...quiet, permissions: [permission] }, node, rows, base)?.kind).toBe("permission");
     const question = { id: "async-question", nodeId: node.id, runId: snapshot.run.id, status: "pending" as const, question: "确认范围", blocking: false, delivery: "async" as const, askedAt: ts };
     expect(conversationPhase({ ...quiet, questions: [question] }, node, rows, base)?.kind).toBe("question");
-    expect(phase()?.tokens).toBeUndefined();
-    expect(phase([], { ...snapshot, turns: [{ ...snapshot.turns[0]!, usage: { inputTokens: 1000, outputTokens: 160 } }] })?.tokens).toBe(1160);
+    expect(phase()).toMatchObject({ tokens: undefined });
+    expect(phase([], { ...snapshot, turns: [{ ...snapshot.turns[0]!, usage: { inputTokens: 1000, outputTokens: 160 } }] })).toMatchObject({ tokens: 1160 });
   });
   it("links inline questions by card id and suppresses live indicators while paused", () => {
     const question = { id: "question-id", runId: snapshot.run.id, nodeId: node.id, question: "请选择", blocking: false, delivery: "inline" as const, source: "native" as const, status: "pending" as const, askedAt: ts };

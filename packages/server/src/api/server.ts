@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ATTACHMENT_MAX_BYTES, ATTACHMENT_MIME_TYPES, type PullRequestFeedbackRequest, CreateProjectRequest, PatchProjectRequest, CreatePermissionRuleRequest, ResolveEscalationRequest, ApproveTeamProposalRequest, AddMemberRequest, ReplaceMemberRequest, ReassignRequest, SaveTeamPresetRequest, TeamPresetInput, CreateRunRequest, PatchRunRequest, PermissionDecision, RunEventEnvelope, SendMessageResponse, UpdateSettingsRequest, TestTitleModelRequest, RollbackRequest } from "@baton/protocol";
+import type { UpdateNodeConfigRequest } from "@baton/protocol";
 import type { DriverRegistry } from "../driver/types.js";
 import { FakeDriverRegistry } from "../driver/fake.js";
 import { Store } from "../store/index.js";
@@ -313,9 +314,19 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
       }
       const checkpointChanges = /^\/api\/checkpoints\/([^/]+)\/changes$/.exec(path);
       if (method === "GET" && checkpointChanges) { json(response, 200, await kernel.rollbacks.changes(segment(checkpointChanges[1]!))); return; }
-      const node = /^\/api\/nodes\/([^/]+)\/(items|messages|cancel|queue|checkpoints|rollback)$/.exec(path);
+      const node = /^\/api\/nodes\/([^/]+)(?:\/(items|messages|cancel|queue|checkpoints|rollback))?$/.exec(path);
       if (node) {
         const id = segment(node[1]!); store.node(id);
+        if (method === "PATCH" && !node[2]) {
+          const input = record(await body(request)), config: UpdateNodeConfigRequest = {};
+          for (const key of ["model", "modeId", "thinking"] as const) {
+            const value = input[key];
+            if (value === undefined) continue;
+            if (value !== null && (typeof value !== "string" || !value.trim())) throw new HttpError(400, `${key} must be a nonempty string or null`);
+            config[key] = value;
+          }
+          json(response, 200, await kernel.updateNodeConfig(id, config)); return;
+        }
         if (method === "GET" && node[2] === "checkpoints") { json(response, 200, kernel.rollbacks.list(id)); return; }
         if (method === "POST" && node[2] === "rollback") { json(response, 200, await kernel.rollbacks.rollback(id, record(await body(request)) as unknown as RollbackRequest)); return; }
         if (method === "PUT" && node[2] === "queue") {

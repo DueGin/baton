@@ -14,7 +14,7 @@ describe("queue dock and icon accessibility", () => {
     expect(html.indexOf('data-queue-seq="2"')).toBeLessThan(html.indexOf('data-queue-seq="1"'));
     expect(html).toContain('aria-expanded="true"'); expect(html).toContain('aria-label="拖动第 1 条排队消息"');
     expect(html).toContain('aria-label="上移第 1 条排队消息"'); expect(html).toContain('aria-label="下移第 1 条排队消息"');
-    expect(html).toContain('aria-label="展开消息全文"'); expect(html).toContain('aria-label="引导发送"'); expect(html).toContain('aria-label="编辑"'); expect(html).not.toContain('aria-label="撤回"'); expect(html).not.toContain('aria-label="删除这条"');
+    expect(html).toContain('aria-label="展开消息全文"'); expect(html).toContain('aria-label="引导发送"'); expect(html).toContain('aria-label="编辑"'); expect(html.match(/aria-label="删除排队消息"/g)).toHaveLength(2); expect(html).toContain('title="删除这条排队消息"'); expect(html).not.toContain('aria-label="确认删除？"');
     expect(html).not.toContain('aria-label="立即发送"'); expect(html).not.toContain(">引导发送<"); expect(html).not.toContain("<script>");
     expect(html).toContain("&lt;script&gt;"); expect(html).toContain('aria-label="排队中"');
   });
@@ -24,9 +24,9 @@ describe("queue dock and icon accessibility", () => {
     expect(html).toContain("该 agent 不支持引导"); expect(html).toContain('aria-label="立即发送"'); expect(html).not.toContain('aria-label="引导发送"'); expect(html).toContain('aria-busy="true"');
     expect(renderToStaticMarkup(<QueueDock entries={[]} actions={{}} reorder={() => undefined} act={() => undefined} edit={async () => true} />)).toBe("");
   });
-  it("only exposes delete inside the inline editor, with save/cancel and a confirmation", () => {
+  it("also keeps delete in the inline editor, with save/cancel and a confirmation", () => {
     const html = renderToStaticMarkup(<QueueMessageEditor text="修改文本" busy={false} save={async () => true} cancel={() => undefined} remove={async () => undefined} />);
-    expect(html).toContain('aria-label="编辑排队消息"'); expect(html).toContain("修改文本"); expect(html).toContain('aria-label="保存"'); expect(html).toContain('aria-label="取消编辑"'); expect(html).toContain('aria-label="删除这条"'); expect(html).toContain("Shift+Enter 换行"); expect(html).not.toContain('aria-label="确认删除"');
+    expect(html).toContain('aria-label="编辑排队消息"'); expect(html).toContain("修改文本"); expect(html).toContain('aria-label="保存"'); expect(html).toContain('aria-label="取消编辑"'); expect(html).toContain('aria-label="删除这条"'); expect(html).toMatch(/(?:⌘|Ctrl) Enter 保存 · Enter 换行/u); expect(html).not.toContain('aria-label="确认删除"');
     const confirmation = renderToStaticMarkup(<DeleteQueuedMessage busy={false} close={() => undefined} remove={async () => undefined} />);
     expect(confirmation).toContain('aria-label="确认删除"'); expect(confirmation).toContain("这条消息不会送达 agent");
     const empty = renderToStaticMarkup(<QueueMessageEditor text="  " busy={false} save={async () => true} cancel={() => undefined} remove={async () => undefined} />);

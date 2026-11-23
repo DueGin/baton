@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyEvent, type GetItemsResponse, type RunEventEnvelope } from "@baton/protocol";
 import { DemoClient } from "./demo/client.js";
 import { createScenario, replay } from "./demo/scenario.js";
-import { deliveryLabel } from "./lib/conversation.js";
+import { conversationRows, deliveryLabel } from "./lib/conversation.js";
 import { mergeItems, RunStore } from "./store.js";
 import { HttpError } from "./api.js";
 import { messageActionKey } from "./lib/conversation.js";
@@ -12,6 +12,19 @@ const base = Date.parse("2026-11-10T07:00:00Z");
 afterEach(() => vi.useRealTimers());
 
 describe("RunStore and protocol integration", () => {
+  it("shows confirmed config resets even before SSE catches up, without replacing other live node fields", async () => {
+    const client = new DemoClient(() => base), store = new RunStore(client);
+    try {
+      await store.open("run-questions"); const snapshot = store.getSnapshot().snapshot!, before = snapshot.nodes[0]!;
+      expect(before.model).toBeTruthy();
+      vi.spyOn(client, "updateNodeConfig").mockImplementation(async () => {
+        store.apply({ type: "node.updated", nodeId: before.id, runId: snapshot.run.id, seq: snapshot.lastSeq + 1, ts: before.updatedAt, patch: { activity: "live", modeId: "plan" } });
+        return { node: { ...before, model: undefined }, applied: "next_turn" };
+      });
+      await store.updateNodeConfig(before.id, { model: null });
+      expect(store.getSnapshot().snapshot?.nodes[0]).toMatchObject({ model: undefined, activity: "live", modeId: "plan" });
+    } finally { store.close(); }
+  });
   it("replays structured question replacements and pause/resume metadata without duplicating cards", async () => {
     const client = new DemoClient(() => base); const store = new RunStore(client); await store.open("run-questions");
     const before = store.getSnapshot().snapshot!; const question = before.questions[0]!;
@@ -234,6 +247,22 @@ describe("message actions", () => {
     const rows = store.getSnapshot().items[nodeId]!.filter(row => row.seq === itemSeq);
     expect(rows).toHaveLength(1); expect(rows[0]!.item).toMatchObject({ delivery: "turn", interrupted: true });
     expect(store.getSnapshot().outgoing.at(-1)).toMatchObject({ delivery: "turn", interrupted: true }); store.close();
+  });
+  it("anchors a steer confirmed over HTTP until the ordered event arrives", async () => {
+    const { client, store, nodeId, itemSeq } = await setup();
+    try {
+      const before = store.getSnapshot();
+      const last = conversationRows(before.items[nodeId]!, before.outgoing, nodeId).at(-1)!.row.seq;
+      vi.spyOn(client, "deliver").mockResolvedValue({ accepted: true, delivery: "steered", itemSeq });
+      await store.actOnMessage(nodeId, itemSeq, "steer");
+      const envelope = { type: "item" as const, runId: before.snapshot!.run.id, nodeId, ts: new Date(base).toISOString(), itemTs: new Date(base).toISOString() };
+      const next = itemSeq + 1;
+      store.apply({ ...envelope, item: { type: "assistant_message", text: "new output" }, itemSeq: next, seq: before.snapshot!.lastSeq + 1 });
+      const transcript = () => conversationRows(store.getSnapshot().items[nodeId]!, store.getSnapshot().outgoing, nodeId).map(entry => entry.row.seq);
+      expect(transcript().slice(-3)).toEqual([last, itemSeq, next]);
+      store.apply({ ...envelope, itemSeq, item: { type: "user_message", text: "新的要求", delivery: "steered", steeredAfterSeq: next }, seq: before.snapshot!.lastSeq + 2 });
+      expect(transcript().slice(-3)).toEqual([last, next, itemSeq]);
+    } finally { store.close(); }
   });
   it("does not let a late HTTP steering acknowledgement overwrite a delivered SSE row", async () => {
     const { client, store, nodeId, itemSeq } = await setup();

@@ -1,11 +1,12 @@
 // Ported from Paseo (https://github.com/getpaseo/paseo) packages/server/src/server/agent/providers/claude/agent.test.ts @63ea3e5 — Copyright (c) 2025-present Mohamed Boudra, Apache-2.0. Modified for baton.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { text as readStreamText } from "node:stream/consumers";
 import { setTimeout as delay } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Query, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { ClaudeAgentClient, type ClaudeQueryFactory } from "./claude-agent.js";
+import type { Options, Query, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { ClaudeAgentClient, claudeCustomHeaders, type ClaudeQueryFactory } from "./claude-agent.js";
 import type { AgentSession, AgentStreamEvent, SaveImage } from "../agent-sdk-types.js";
 class Messages implements AsyncIterable<SDKMessage> {
     private values: SDKMessage[] = [];
@@ -28,17 +29,72 @@ let home: string;
 let session: AgentSession | undefined;
 beforeEach(async () => { home = await mkdtemp(join(tmpdir(), "baton-claude-test-")); });
 afterEach(async () => { await session?.close(); session = undefined; await rm(home, { recursive: true, force: true }); });
-function setup(saveImage?: SaveImage) {
+function setup(saveImage?: SaveImage, options: { env?: Record<string, string>; cliVersion?: string } = {}) {
     const messages = new Messages();
     let captured: Parameters<ClaudeQueryFactory>[0] | undefined;
     const generator = messages[Symbol.asyncIterator]();
     const query = Object.assign(generator, { supportedModels: vi.fn(async () => [{ value: "fake", displayName: "Fake", description: "", supportedEffortLevels: ["high"] }]), cancelAsyncMessage: vi.fn(async (_uuid: string) => true), interrupt: vi.fn(async () => { messages.push(result(0, true)); }), close: vi.fn(() => messages.end()) }) as unknown as Query;
     const factory: ClaudeQueryFactory = input => { captured = input; return query; };
-    const client = new ClaudeAgentClient({ home, command: ["fake-claude"], queryFactory: factory, saveImage });
+    const client = new ClaudeAgentClient({ home, command: ["fake-claude"], queryFactory: factory, saveImage, ...options });
     return { client, messages, query, options: () => captured!.options!, input: () => captured!.prompt };
 }
 function result(cost = 0.01, failed = false): unknown { return { type: "result", subtype: failed ? "error_during_execution" : "success", is_error: failed, session_id: "claude-session", total_cost_usd: cost, usage: { input_tokens: 10, cache_read_input_tokens: 2, output_tokens: 4 }, modelUsage: { fake: { inputTokens: cost * 1000, cacheReadInputTokens: cost * 200, outputTokens: cost * 400, contextWindow: 10000 } }, errors: failed ? ["aborted"] : undefined }; }
 async function wait(events: AgentStreamEvent[], type: AgentStreamEvent["type"]): Promise<void> { await expect.poll(() => events.some(event => event.type === type), { interval: 5 }).toBe(true); }
+describe("Claude request headers", () => {
+    const version = "2.1.322 (Claude Code)";
+    const ua = "User-Agent: claude-cli/2.1.322 (external, cli)";
+    it("uses the real CLI version", () => {
+        expect(claudeCustomHeaders(undefined, version)).toBe(ua);
+    });
+    it("appends to existing headers", () => {
+        const headers = "X-First: a\r\nX-Second: b\r\n";
+        expect(claudeCustomHeaders(headers, version)).toBe(headers + ua);
+    });
+    it("preserves a user-supplied User-Agent without changing any bytes", () => {
+        const headers = "X-First: a\r\n  uSeR-aGeNt : custom\r\n";
+        expect(claudeCustomHeaders(headers, version)).toBe(headers);
+    });
+    it("leaves headers alone when the CLI version is absent or unparseable", () => {
+        expect(claudeCustomHeaders(undefined, undefined)).toBeUndefined();
+        expect(claudeCustomHeaders("X-First: a", "unavailable")).toBe("X-First: a");
+    });
+});
+async function readClaudeChildEnv(options: Options): Promise<unknown> {
+    const keys = ["CLAUDE_CODE_ENTRYPOINT", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_AGENT_SDK_CLIENT_APP", "ANTHROPIC_CUSTOM_HEADERS"];
+    const child = options.spawnClaudeCodeProcess!({
+        command: process.execPath,
+        args: ["-e", `console.log(JSON.stringify(process.env, ${JSON.stringify(keys)}))`],
+        cwd: home,
+        env: { CLAUDE_CODE_ENTRYPOINT: "sdk-ts", CLAUDE_AGENT_SDK_VERSION: "0.3.246", CLAUDE_AGENT_SDK_CLIENT_APP: "sdk-app" },
+        signal: new AbortController().signal,
+    });
+    return JSON.parse(await readStreamText(child.stdout)) as unknown;
+}
+describe("Claude Code child environment", () => {
+    const providerOverrides = {
+        CLAUDE_CODE_ENTRYPOINT: "provider-entrypoint",
+        CLAUDE_AGENT_SDK_VERSION: "provider-version",
+        CLAUDE_AGENT_SDK_CLIENT_APP: "provider-app",
+    };
+    const sessionOverrides = { CLAUDE_CODE_ENTRYPOINT: "session-entrypoint", CLAUDE_AGENT_SDK_CLIENT_APP: "" };
+    it.each([
+        { name: "removes SDK metadata even without a version", expected: { CLAUDE_CODE_ENTRYPOINT: "cli" } },
+        { name: "preserves explicit provider values and skips the automatic UA", cliVersion: "2.1.322", providerEnv: providerOverrides, expected: providerOverrides },
+        { name: "lets session values override provider values", cliVersion: "2.1.322", providerEnv: providerOverrides, sessionEnv: sessionOverrides, expected: { ...providerOverrides, ...sessionOverrides } },
+        { name: "appends the UA to inherited headers", cliVersion: "2.1.322 (Claude Code)", parentHeaders: "X-Inherited: ok", expected: { CLAUDE_CODE_ENTRYPOINT: "cli", ANTHROPIC_CUSTOM_HEADERS: "X-Inherited: ok\nUser-Agent: claude-cli/2.1.322 (external, cli)" } },
+        { name: "preserves an effective session UA", cliVersion: "2.1.322", parentHeaders: "X-Inherited: ok", providerEnv: { ANTHROPIC_CUSTOM_HEADERS: "X-Provider: ok" }, sessionEnv: { ANTHROPIC_CUSTOM_HEADERS: "X-Session: ok\nuser-agent: custom" }, expected: { CLAUDE_CODE_ENTRYPOINT: "cli", ANTHROPIC_CUSTOM_HEADERS: "X-Session: ok\nuser-agent: custom" } },
+    ])("$name", async ({ cliVersion, parentHeaders, providerEnv, sessionEnv, expected }) => {
+        vi.stubEnv("CLAUDE_AGENT_SDK_CLIENT_APP", "parent-app");
+        vi.stubEnv("ANTHROPIC_CUSTOM_HEADERS", parentHeaders);
+        try {
+            const fake = setup(undefined, { cliVersion, env: providerEnv });
+            session = await fake.client.createSession({ cwd: home, env: sessionEnv });
+            expect(await readClaudeChildEnv(fake.options())).toStrictEqual(expected);
+        } finally {
+            vi.unstubAllEnvs();
+        }
+    });
+});
 describe("Claude SDK client", () => {
     it("passes MCP, append system prompt, thinking and env through SDK options", async () => {
         const fake = setup();

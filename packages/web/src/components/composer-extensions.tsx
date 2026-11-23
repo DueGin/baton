@@ -117,18 +117,7 @@ const BulletToTask = Extension.create({
   },
 });
 
-/** ⌘/Ctrl+Enter sends (never mid-IME composition); Enter and Shift+Enter keep their editor meaning. */
-function submitKeys(submit: () => void): AnyExtension {
-  return Extension.create({
-    name: "composerSubmit",
-    priority: 1000,
-    addKeyboardShortcuts() {
-      return { "Mod-Enter": ({ editor }) => { if (!editor.view.composing) submit(); return true; } };
-    },
-  });
-}
-
-export function composerExtensions(options: { placeholder: () => string; submit: () => void }): AnyExtension[] {
+export function composerExtensions(options: { placeholder: () => string }): AnyExtension[] {
   return [
     // Typing right after `code` leaves the code span (TipTap's mark is inclusive by default).
     Code.extend({ inclusive: false }),
@@ -140,6 +129,5 @@ export function composerExtensions(options: { placeholder: () => string; submit:
     CjkEmphasis,
     BulletToTask,
     Placeholder.configure({ placeholder: () => options.placeholder(), showOnlyWhenEditable: false }),
-    submitKeys(options.submit),
   ];
 }

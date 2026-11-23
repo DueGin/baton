@@ -1,5 +1,5 @@
-import { applyEvent, type ItemRecord, type RunEventEnvelope, type RunSnapshot } from "@baton/protocol";
-import { messageActionKey, pruneOutgoing, queuedRows, reconcileOutgoing, type MessageAction, type MessageActionState, type OutgoingMessage } from "./lib/conversation.js";
+import { applyEvent, type ItemRecord, type NodeRecord, type RunEventEnvelope, type RunSnapshot, type UpdateNodeConfigRequest } from "@baton/protocol";
+import { conversationRows, messageActionKey, pruneOutgoing, queuedRows, reconcileOutgoing, type MessageAction, type MessageActionState, type OutgoingMessage } from "./lib/conversation.js";
 import { HttpError, type BatonClient } from "./api.js";
 import { queueEditError } from "./lib/queue-editor.js";
 
@@ -51,6 +51,19 @@ export class RunStore {
   }
 
   close(): void { this.generation++; this.controller?.abort(); clearTimeout(this.retry); }
+  updateNodeConfig = async (nodeId: string, request: UpdateNodeConfigRequest) => {
+    const generation = this.generation, before = this.state.snapshot?.nodes.find(node => node.id === nodeId);
+    const response = await this.client.updateNodeConfig(nodeId, request);
+    const snapshot = this.state.snapshot, current = snapshot?.nodes.find(node => node.id === nodeId);
+    if (generation === this.generation && snapshot && before && current) {
+      const patch: Partial<NodeRecord> = {};
+      for (const key of ["model", "modeId", "thinking"] as const) {
+        if (current[key] === before[key] && current[key] !== response.node[key]) patch[key] = response.node[key];
+      }
+      if (Object.keys(patch).length) this.update({ snapshot: { ...snapshot, nodes: snapshot.nodes.map(node => node.id === nodeId ? { ...node, ...patch } : node) } });
+    }
+    return response;
+  };
   apply = (event: RunEventEnvelope): void => {
     const snapshot = this.state.snapshot;
     if (!snapshot || snapshot.run.id !== event.runId || event.seq <= snapshot.lastSeq) return;
@@ -190,6 +203,7 @@ export class RunStore {
     const before = this.state.items[nodeId]?.find(row => row.seq === itemSeq);
     const outgoingBefore = this.state.outgoing.find(row => row.nodeId === nodeId && row.itemSeq === itemSeq);
     const interruptsTurn = action === "interrupt" && this.state.snapshot?.turns.some(turn => turn.nodeId === nodeId && turn.status === "running") === true;
+    const anchor = action === "steer" ? conversationRows(this.state.items[nodeId] ?? [], this.state.outgoing, nodeId).findLast(({ row }) => row.seq > 0 && !row.rolledBack)?.row.seq ?? 0 : undefined;
     const setAction = (patch: MessageActionState) => this.update({ messageActions: { ...this.state.messageActions, [key]: patch } });
     setAction({ ...previous, pending: action, error: undefined });
     try {
@@ -199,10 +213,10 @@ export class RunStore {
       const current = this.state.items[nodeId]?.find(row => row.seq === itemSeq);
       // SSE replacements are authoritative; provide an immediate fallback when HTTP arrives first.
       if (current && current === before && current.item.type === "user_message") {
-        const row: ItemRecord = { ...current, item: { ...current.item, delivery, queuePosition: delivery === "queued" ? current.item.queuePosition : undefined, ...(interruptsTurn && delivery === "turn" ? { interrupted: true } : {}), ...(action === "steer" && delivery === "steered" ? { escalated: true } : {}) } };
+        const row: ItemRecord = { ...current, item: { ...current.item, delivery, queuePosition: delivery === "queued" ? current.item.queuePosition : undefined, ...(interruptsTurn && delivery === "turn" ? { interrupted: true } : {}), ...(action === "steer" && delivery === "steered" ? { escalated: true, steeredAfterSeq: anchor } : {}) } };
         this.update({ items: { ...this.state.items, [nodeId]: mergeItems(this.state.items[nodeId] ?? [], [row]) }, outgoing: reconcileOutgoing(this.state.outgoing, row) });
       } else if (!current && outgoingBefore) {
-        this.update({ outgoing: this.state.outgoing.map(row => row === outgoingBefore ? { ...row, delivery, interrupted: interruptsTurn && delivery === "turn" } : row) });
+        this.update({ outgoing: this.state.outgoing.map(row => row === outgoingBefore ? { ...row, delivery, steeredAfterSeq: delivery === "steered" ? anchor : undefined, interrupted: interruptsTurn && delivery === "turn" } : row) });
       }
       const latestDelivery = this.state.items[nodeId]?.find(row => row.seq === itemSeq)?.item;
       setAction({ steerUnsupported: response?.steerUnsupported === true && (!latestDelivery || latestDelivery.type === "user_message" && latestDelivery.delivery === "queued") });

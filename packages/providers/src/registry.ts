@@ -128,11 +128,15 @@ export class ProviderRegistry {
                 if (!executable) throw new Error(`Executable not found: ${definition.command[0]}`);
                 const command = [executable, ...definition.command.slice(1)];
                 entry.command = command;
-                entry.version = await probeVersion(command, env, this.options.timeoutMs ?? 5000, definition.spec?.versionArgs);
-                const diagnostic = definition.spec ? versionDiagnostic(entry.version, definition.spec) : undefined;
+                try {
+                    entry.version = await probeVersion(command, env, this.options.timeoutMs ?? 5000, definition.spec?.versionArgs);
+                } catch (error) {
+                    if (definition.provider !== "claude") throw error;
+                }
+                const diagnostic = definition.spec && entry.version !== undefined ? versionDiagnostic(entry.version, definition.spec) : undefined;
                 if (diagnostic) { entry.status = "error"; entry.diagnostic = diagnostic; return entry; }
                 const options = { ...this.options, command, env: definition.env, spec: definition.spec };
-                const client = definition.provider === "claude" ? new ClaudeAgentClient(options) : definition.provider === "codex" ? new CodexAppServerAgentClient(options) : definition.provider === "pi" ? new PiRpcAgentClient(options) : new ACPAgentClient(options);
+                const client = definition.provider === "claude" ? new ClaudeAgentClient({ ...options, cliVersion: entry.version }) : definition.provider === "codex" ? new CodexAppServerAgentClient(options) : definition.provider === "pi" ? new PiRpcAgentClient(options) : new ACPAgentClient(options);
                 const catalog = await client.fetchCatalog();
                 entry.models = definition.models ?? catalog.models;
                 entry.modes = catalog.modes;

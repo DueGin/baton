@@ -13,7 +13,7 @@ import { RunStore } from "../store.js";
 import { createScenario, replay } from "../demo/scenario.js";
 import type { BatonClient } from "../api.js";
 
-const schema = getSchema(composerExtensions({ placeholder: () => "", submit: () => undefined }));
+const schema = getSchema(composerExtensions({ placeholder: () => "" }));
 const valid = (markdown: string) => { const node = schema.nodeFromJSON(markdownToDoc(markdown)); node.check(); return node; };
 
 describe("composer document", () => {
@@ -84,7 +84,7 @@ describe("composer rendering", () => {
   });
   it("offers the image button only when the node's agent accepts images", () => {
     const store = new RunStore(new DemoClient(() => now)); const live = replay(createScenario(0), 30000);
-    const render = (agentId: string, agents: AgentEntry[] = demoAgents) => { const node = live.nodes.find(entry => entry.agentId === agentId)!; return renderToStaticMarkup(<Transcript agents={agents} snapshot={live} store={store} items={{ [node.id]: [] }} itemStatus={{ [node.id]: "ready" }} nodeId={node.id} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} stopRun={() => undefined} />); };
+    const render = (agentId: string, agents: AgentEntry[] = demoAgents) => { const node = live.nodes.find(entry => entry.agentId === agentId)!; return renderToStaticMarkup(<Transcript showTopology={() => undefined} agents={agents} snapshot={live} store={store} items={{ [node.id]: [] }} itemStatus={{ [node.id]: "ready" }} nodeId={node.id} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} stopRun={() => undefined} />); };
     const attach = (html: string) => /<button[^>]*composer-attach[^>]*>/.exec(html)?.[0] ?? "";
     expect(attach(render("claude"))).not.toContain("disabled"); expect(attach(render("claude"))).toContain('aria-label="添加图片"');
     expect(attach(render("pi"))).toContain('disabled=""'); expect(attach(render("pi"))).toContain('title="当前 agent 不支持图片"');

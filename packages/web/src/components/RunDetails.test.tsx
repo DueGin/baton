@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { DemoClient } from "../demo/client.js";
 import { RunBar } from "./RunBar.js";
 import { RunDetails } from "./RunDetails.js";
-import { nodeOptions, Transcript } from "./Transcript.js";
+import { Transcript } from "./Transcript.js";
 import { TurnIndicator } from "./TurnIndicator.js";
 import { RunStore } from "../store.js";
 
@@ -13,7 +13,7 @@ describe("compact Run chrome", () => {
     const snapshot = await new DemoClient(() => now).run("run-demo");
     const html = renderToStaticMarkup(<RunBar snapshot={snapshot} tab="transcript" setTab={() => undefined} detailsOpen={false} toggleDetails={() => undefined} />);
     expect(html).toContain(`title="${snapshot.run.title}"`);
-    expect(html.match(/role="tab"/g)).toHaveLength(4);
+    expect([...html.matchAll(/id="run-tab-(\w+)"/g)].map(match => match[1])).toEqual(["transcript", "topology", "timeline", "team"]);
     expect(html).toContain('id="run-tab-transcript" role="tab" aria-selected="true"');
     expect(html).toContain('aria-expanded="false"'); expect(html).toContain('aria-controls="run-details"');
     expect(html).not.toContain(snapshot.run.cwd); expect(html).not.toContain("取消 Run");
@@ -21,8 +21,8 @@ describe("compact Run chrome", () => {
   });
   it("keeps full metadata, policy and cancel actions in the details panel", async () => {
     const snapshot = await new DemoClient(() => now).run("run-demo");
-    const html = renderToStaticMarkup(<RunDetails snapshot={snapshot} now={now} connection="live" busy={false} close={() => undefined} autoApprove={() => undefined} cancel={() => undefined} openTeam={() => undefined} openPending={() => undefined} />);
-    for (const text of [snapshot.run.title, snapshot.run.cwd, "复制路径", "Run 详情", "活跃 / 总节点", "Cached tokens", "运行时间", "委派 / 回合", "权限请求", "名单确认", "Agent 提问", "需要介入", "动态组队", "autoApprove", "团队人数", "停滞提醒", "委派轮次", "查看团队", "取消 Run"]) expect(html).toContain(text);
+    const html = renderToStaticMarkup(<RunDetails leadReview={() => undefined} snapshot={snapshot} now={now} connection="live" busy={false} close={() => undefined} autoApprove={() => undefined} cancel={() => undefined} openTeam={() => undefined} openPending={() => undefined} />);
+    for (const text of [snapshot.run.title, snapshot.run.cwd, "复制路径", "Run 详情", "活跃 / 总节点", "Cached tokens", "运行时间", "委派 / 回合", "权限请求", "名单确认", "Agent 提问", "需要介入", "动态组队", "autoApprove", "主导者验收改动", "团队人数", "停滞提醒", "委派轮次", "查看团队", "取消 Run"]) expect(html).toContain(text);
     expect(html).toContain('aria-label="关闭 Run 详情"');
   });
   it("exposes title editing, regeneration and generated source without expanding the header", async () => {
@@ -33,8 +33,8 @@ describe("compact Run chrome", () => {
   });
   it("lists the same run-wide processes in compact details", async () => {
     const client = new DemoClient(() => now); const snapshot = await client.run("run-background");
-    const html = renderToStaticMarkup(<RunDetails snapshot={snapshot} client={client} now={now} connection="live" busy={false} close={() => undefined} autoApprove={() => undefined} cancel={() => undefined} openTeam={() => undefined} openPending={() => undefined} />);
-    for (const text of ["后台进程", "background-list is-compact", "npm run dev", "推断", "localhost:5173", "已退出 1 个"]) expect(html).toContain(text);
+    const html = renderToStaticMarkup(<RunDetails leadReview={() => undefined} snapshot={snapshot} client={client} now={now} connection="live" busy={false} close={() => undefined} autoApprove={() => undefined} cancel={() => undefined} openTeam={() => undefined} openPending={() => undefined} />);
+    for (const text of ["后台进程", "background-list is-compact", "npm run dev", "推断", "localhost:5173", "已退出 5 个", "×3"]) expect(html).toContain(text);
   });
   it("keeps status on one line by default and names child waiting time correctly", async () => {
     const snapshot = await new DemoClient(() => now).run("run-demo");
@@ -50,10 +50,10 @@ describe("compact Run chrome", () => {
     expect(bar()).toContain('aria-label="暂停会话"'); expect(bar()).not.toContain('aria-label="继续会话"');
     snapshot.run = await client.pauseRun(snapshot.run.id);
     expect(bar()).toContain('aria-label="继续会话"'); expect(bar()).toContain("已暂停"); expect(bar()).toContain("status-paused");
-    const transcript = renderToStaticMarkup(<Transcript snapshot={snapshot} store={store} items={{}} itemStatus={{}} nodeId={snapshot.run.rootNodeId} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} />);
-    expect(transcript).toContain("会话已暂停，消息会在继续后送达"); expect(transcript).toContain('aria-label="选择会话节点"'); expect(nodeOptions(snapshot).find(option => option.value === snapshot.run.rootNodeId)?.hint).toBe("已暂停");
+    const transcript = renderToStaticMarkup(<Transcript showTopology={() => undefined} snapshot={snapshot} store={store} items={{}} itemStatus={{}} nodeId={snapshot.run.rootNodeId} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} />);
+    expect(transcript).toContain("会话已暂停，消息会在继续后送达"); expect(transcript).not.toContain("选择会话节点"); expect(transcript).toContain('role="tablist" aria-label="节点会话"'); expect(transcript).toContain("status-paused");
     expect(transcript).not.toContain('aria-label="消息" disabled'); expect(transcript).not.toContain("conversation-live");
-    const details = renderToStaticMarkup(<RunDetails snapshot={snapshot} now={now + 30000} connection="live" busy={false} close={() => undefined} autoApprove={() => undefined} cancel={() => undefined} openTeam={() => undefined} openPending={() => undefined} />);
+    const details = renderToStaticMarkup(<RunDetails leadReview={() => undefined} snapshot={snapshot} now={now + 30000} connection="live" busy={false} close={() => undefined} autoApprove={() => undefined} cancel={() => undefined} openTeam={() => undefined} openPending={() => undefined} />);
     expect(details).toContain("暂停记录"); expect(details).toContain("尚未继续");
   });
 });

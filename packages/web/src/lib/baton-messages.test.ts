@@ -38,6 +38,12 @@ describe("baton protocol transcript messages", () => {
     expect(parseBatonMessage(`preface\n${briefPrompt(edge)}\nafter`)).toMatchObject([{ type: "text", text: "preface\n" }, { type: "assignment", delegationId: edge.id }, { type: "text", text: "\nafter" }]);
   });
 
+  it("preserves legacy prose outside result blocks without accepting broken result tags", () => {
+    const message = demoResultsPrompt([edge, { ...edge, id: "other" }]).replace("</result>", "</result>\n验收要求：查看 diff。").replace("</baton-results>", "请跑相关测试。\n</baton-results>");
+    expect(parseBatonMessage(message)).toMatchObject([{ type: "results", results: [{ delegationId: edge.id }, { delegationId: "other" }] }, { type: "text", text: "验收要求：查看 diff。\n\n请跑相关测试。" }]);
+    expect(parseBatonMessage(message.replace("请跑相关测试。", "<result>incomplete"))).toBeNull();
+  });
+
   it("retains truncated result text without throwing", () => {
     const large = { ...edge, result: { status: "failed" as const, summary: "Failed", reported: true, finalText: "", result: { details: "x".repeat(9000) } } };
     const parts = parseBatonMessage(resultsPrompt([large]));
@@ -49,7 +55,7 @@ describe("baton protocol transcript messages", () => {
     expect(parseBatonMessage('<baton-notice kind="reassigned" old="d1">\n任务 d1 → d2\n<script>bad()</script>\n</baton-notice>')).toEqual([{ type: "notice", text: '任务 d1 → d2\n<script>bad()</script>' }]);
     expect(parseBatonMessage('<baton-notice>missing end')).toBeNull();
     expect(parseBatonMessage('<baton-notice> </baton-notice>')).toBeNull();
-    for (const kind of ["team", "system", "correction"] as const) expect(parseBatonMessage(`<baton-notice kind="${kind}">通知内容</baton-notice>`)).toEqual([{ type: "notice", kind, text: "通知内容" }]);
+    for (const kind of ["team", "system", "correction", "policy"] as const) expect(parseBatonMessage(`<baton-notice kind="${kind}">通知内容</baton-notice>`)).toEqual([{ type: "notice", kind, text: "通知内容" }]);
   });
   it("parses followups with decoded delegation IDs and rejects incomplete or invalid wrappers", () => {
     expect(parseBatonMessage('<baton-followup delegation="d&amp;1">请补充测试\n\n- 中文</baton-followup>')).toEqual([{ type: "followup", delegationId: "d&1", text: "请补充测试\n\n- 中文" }]);
@@ -75,7 +81,7 @@ describe("baton protocol transcript messages", () => {
 
   it("keeps browser demo format exactly equal to server output", () => {
     expect(demoFollowupPrompt('d"<&', "追问\n正文")).toBe(followupPrompt('d"<&', "追问\n正文"));
-    for (const kind of ["team", "system", "correction"] as const) expect(demoNoticePrompt(kind, "内容")).toBe(noticePrompt(kind, "内容"));
+    for (const kind of ["team", "system", "correction", "policy"] as const) expect(demoNoticePrompt(kind, "内容")).toBe(noticePrompt(kind, "内容"));
     expect(parseBatonMessage(correctionPrompt(["tests must be a number"]))?.[0]).toMatchObject({ type: "notice", kind: "correction" });
     for (const delegation of snapshot.delegations) expect(demoBriefPrompt(delegation)).toBe(briefPrompt(delegation));
     expect(demoResultsPrompt(snapshot.delegations)).toBe(resultsPrompt(snapshot.delegations));

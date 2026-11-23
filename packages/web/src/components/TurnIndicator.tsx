@@ -5,7 +5,16 @@ import { startTurnTicker, turnElapsed, turnFooter, turnTokens } from "../lib/tur
 import { Icon } from "./common.js";
 import { Markdown } from "./Markdown.js";
 
-export function TurnIndicator({ phase, snapshot, now: sharedNow, inspect, jumpQuestion }: { jumpQuestion?: (id: string) => void; phase: ConversationPhase; snapshot: RunSnapshot; now?: number; inspect: (id: string) => void }) {
+interface IndicatorProps { jumpQuestion?: (id: string) => void; phase: ConversationPhase; snapshot: RunSnapshot; now?: number; inspect: (id: string) => void }
+
+export function TurnIndicator({ phase, ...props }: IndicatorProps) {
+  if (phase.kind === "idle_children") return <div className="turn-indicator phase-idle-children"><div className="turn-indicator-line"><span role="status">{phase.label}</span>
+    {phase.related.map(id => <button type="button" key={id} className="text-button" onClick={() => props.inspect(id)}>{props.snapshot.nodes.find(node => node.id === id)?.title ?? "子任务"} ↗</button>)}
+  </div></div>;
+  return <TimedIndicator {...props} phase={phase} />;
+}
+
+function TimedIndicator({ phase, snapshot, now: sharedNow, inspect, jumpQuestion }: IndicatorProps & { phase: Exclude<ConversationPhase, { kind: "idle_children" }> }) {
   const [localNow, setNow] = useState(Date.now); const now = sharedNow ?? localNow;
   const [expanded, setExpanded] = useState(false); const previewId = useId();
   useEffect(() => sharedNow === undefined ? startTurnTicker(setNow) : undefined, [sharedNow]);
