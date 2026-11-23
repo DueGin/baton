@@ -145,3 +145,14 @@ export function networkReason(error: unknown): string {
   if (/fetch failed|network|INTERNET_DISCONNECTED/iu.test(text)) return "无法连接 GitHub";
   return error instanceof Error ? error.message : String(error);
 }
+
+export interface StoredUpdate { name: string; updatedAt: number }
+/**
+ * Which `updates/<version>` directories to delete on startup: the current version's, the newest one (likely a pending
+ * update) and anything written within `keepRecentMs` (a download paused by quitting) stay; everything else goes.
+ */
+export function staleUpdates(entries: StoredUpdate[], currentVersion: string, keepRecentMs = 24 * 60 * 60 * 1000, now = Date.now()): string[] {
+  const sorted = [...entries].sort((a, b) => b.updatedAt - a.updatedAt);
+  const newest = sorted[0]?.name;
+  return sorted.filter(entry => entry.name !== currentVersion && entry.name !== newest && now - entry.updatedAt > keepRecentMs).map(entry => entry.name);
+}

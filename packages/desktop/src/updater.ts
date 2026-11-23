@@ -20,7 +20,7 @@ import { createReadStream } from "node:fs";
 import { chmod, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { basename, dirname, join } from "node:path";
-import { compareVersions, DOWNLOAD_ATTEMPTS, latestDownloadUrl, networkReason, parseChecksums, readRelease, releaseFromChecksums, responseSize, updateTarget, UPDATE_REPO, type ReleaseAsset, type UpdateRelease, type UpdateStatus } from "./update.js";
+import { compareVersions, DOWNLOAD_ATTEMPTS, latestDownloadUrl, networkReason, parseChecksums, readRelease, releaseFromChecksums, responseSize, staleUpdates, updateTarget, UPDATE_REPO, type ReleaseAsset, type UpdateRelease, type UpdateStatus } from "./update.js";
 
 export interface UpdateManagerOptions {
   /** Environment of the login shell; `GITHUB_TOKEN` / `GH_TOKEN` are read from it. */
@@ -102,6 +102,24 @@ export class UpdateManager {
   }
 
   get(): UpdateStatus { return { ...this.status }; }
+
+  /**
+   * Startup housekeeping: delete the install packages of earlier versions (each is ~150 MB). The current version's
+   * directory, the newest one (a pending update) and recent ones are kept; a failure is only logged.
+   */
+  async pruneOldDownloads(): Promise<string[]> {
+    const root = join(app.getPath("userData"), "updates");
+    try {
+      const entries = await Promise.all((await readdir(root, { withFileTypes: true })).filter(entry => entry.isDirectory()).map(async entry => ({ name: entry.name, updatedAt: (await stat(join(root, entry.name)).catch(() => ({ mtimeMs: 0 }))).mtimeMs })));
+      const stale = staleUpdates(entries, this.version);
+      for (const name of stale) await this.remove(join(root, name));
+      if (stale.length) this.log(`removed old update downloads: ${stale.join(", ")}`);
+      return stale;
+    } catch (error) {
+      this.log(`could not prune old update downloads: ${error instanceof Error ? error.message : String(error)}`);
+      return [];
+    }
+  }
 
   private set(patch: Partial<UpdateStatus>): UpdateStatus {
     this.status = { ...this.status, ...patch, currentVersion: this.version };

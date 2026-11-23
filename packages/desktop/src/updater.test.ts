@@ -417,3 +417,25 @@ describe("the update directory", () => {
     } finally { await chmod(part(), 0o644); }
   });
 });
+
+describe("startup housekeeping", () => {
+  it("deletes earlier versions' downloads but keeps the current one", async () => {
+    const { mkdir, utimes } = await import("node:fs/promises");
+    const old = Date.now() / 1000 - 5 * 24 * 60 * 60;
+    for (const version of ["0.2.0", "0.2.1", "0.3.1"]) {
+      const dir = join(userData, "updates", version);
+      await mkdir(dir, { recursive: true }); await writeFile(join(dir, "baton-1-mac-arm64.zip"), "x");
+      if (version !== "0.3.1") await utimes(dir, old, old);
+    }
+    const { instance, logs } = manager(github().fetchImpl);
+    expect((await instance.pruneOldDownloads()).sort()).toEqual(["0.2.0", "0.2.1"]);
+    await expect(stat(join(userData, "updates", "0.2.0"))).rejects.toThrow();
+    await expect(stat(join(userData, "updates", "0.2.1"))).rejects.toThrow();
+    await expect(stat(join(userData, "updates", "0.3.1", "baton-1-mac-arm64.zip"))).resolves.toBeTruthy();
+    expect(logs.some((line) => line.includes("removed old update downloads: 0.2.0, 0.2.1"))).toBe(true);
+    // Nothing left to do the second time, and no directory at all is fine too.
+    expect(await instance.pruneOldDownloads()).toEqual([]);
+    await rm(join(userData, "updates"), { recursive: true, force: true });
+    expect(await instance.pruneOldDownloads()).toEqual([]);
+  });
+});

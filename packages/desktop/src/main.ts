@@ -276,6 +276,7 @@ else {
     }
     const env = await loginShellEnv(process.env);
     updater = new UpdateManager(() => window, { env, settingsPath: settingsPathFor(app.getPath("userData")), confirmInstall, quitForUpdate: () => { void quitNow(); } });
+    void updater.pruneOldDownloads().catch(() => undefined);
     manager = new DaemonManager({ home, executable: process.execPath, entry: app.isPackaged ? join(process.resourcesPath, "runtime", "packages", "server", "dist", "cli", "main.js") : resolve(here, "../../server/dist/cli/main.js"), env,
       connected: current => {
         const reconnecting = Boolean(connection); connection = current;
