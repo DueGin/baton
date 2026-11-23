@@ -1,6 +1,6 @@
 /** REST request/response bodies (DESIGN §7). */
 import type { AttachmentRef, PermissionResponse } from "./timeline.js";
-import type { AgentEntry, BackgroundProcess, PullRequestRecord, ProjectRecord, ProjectSummary, DelegationRecord, InboxItem, ItemRecord, PermissionRule, RunPolicy, RunSnapshot, RunSummary, TeamCandidateSpec, TeamMemberSpec, TeamPreset } from "./records.js";
+import type { AgentEntry, BackgroundProcess, PullRequestRecord, ProjectRecord, ProjectSummary, DelegationRecord, InboxItem, ItemRecord, NodeRecord, PermissionRule, RunPolicy, RunSnapshot, RunSummary, TeamCandidateSpec, TeamMemberSpec, TeamPreset } from "./records.js";
 
 export interface CreateRunRequest {
   /** Root agent. Optional when `teamPresetId` is given (the preset's lead is used). */
@@ -31,7 +31,30 @@ export interface CreateRunRequest {
 
 export interface PatchRunRequest {
   title?: string;
-  policy?: Partial<Pick<RunPolicy, "autoApprove" | "maxDepth" | "maxActiveChildren" | "budget" | "teamApproval" | "maxTeamSize" | "stallMinutes" | "maxRoundsPerDelegation">>;
+  policy?: Partial<Pick<RunPolicy, "autoApprove" | "maxDepth" | "maxActiveChildren" | "budget" | "teamApproval" | "maxTeamSize" | "stallMinutes" | "maxRoundsPerDelegation" | "leadReview">>;
+}
+
+/**
+ * PATCH /api/nodes/:nodeId — switch one session's model, mode (permission mode) or thinking level
+ * (DESIGN §8.3 "会话配置"). Omitted fields stay as they are; `null` resets the field to the agent's
+ * default. Values are validated against the node agent's catalog (unknown model / mode / thinking
+ * level → 400). Rejected (409) for terminal nodes (completed is allowed: a follow-up reopens it).
+ *
+ * The kernel stores the new values on the node right away (`node.updated`; when a field is cleared
+ * it re-emits the whole record as `node.created`, see DESIGN §6 "清空字段"). An idle node's provider
+ * session is closed and is resumed from its persistence handle with the new spec on the next turn;
+ * a running node keeps its current turn and switches when that turn ends.
+ */
+export interface UpdateNodeConfigRequest {
+  model?: string | null;
+  modeId?: string | null;
+  thinking?: string | null;
+}
+
+export interface UpdateNodeConfigResponse {
+  node: NodeRecord;
+  /** "next_turn": the node was busy; the change applies when its current turn ends. */
+  applied: "now" | "next_turn";
 }
 
 /**

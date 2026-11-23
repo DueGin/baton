@@ -101,6 +101,13 @@ export type TimelineItem =
       interrupted?: boolean;
       /** True when a queued message was later steered into the running turn ("引导发送"). */
       escalated?: boolean;
+      /**
+       * Steered messages only: the node's last item seq at the moment the message reached the agent.
+       * The console shows the message right after that item, so output produced after the steer
+       * renders below it. The kernel also starts a new item for the next assistant text/reasoning
+       * chunk instead of merging into the one that was streaming when the steer landed.
+       */
+      steeredAfterSeq?: number;
       /** Set when the human edited the text while it was queued. */
       editedAt?: string;
       /** Position in the node's queue while delivery is "queued" (ascending = delivered first). */

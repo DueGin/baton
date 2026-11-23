@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,7 +12,7 @@ import { FakeDriver, FakeDriverRegistry, type FakeScript, type FakeDriverOptions
 import { exportRun } from "./telemetry/index.js";
 const servers: BatonServer[] = [], homes: string[] = [];
 afterEach(async () => { for (const server of servers.splice(0)) await server.close(); for (const home of homes.splice(0)) await rm(home, { recursive: true, force: true }); });
-async function setup(scripts: Record<string, FakeScript | FakeDriverOptions>, options: { deliveryDebounceMs?: number; maxActiveNodes?: number; home?: string } = {}): Promise<BatonServer> {
+async function setup(scripts: Record<string, FakeScript | FakeDriverOptions>, options: { deliveryDebounceMs?: number; maxActiveNodes?: number; home?: string; idleTimeoutMs?: number } = {}): Promise<BatonServer> {
   const home = options.home ?? await mkdtemp(join(tmpdir(), "baton-test-")); if (!homes.includes(home)) homes.push(home);
   const server = await startServer({ home, port: 0, registry: new FakeDriverRegistry(scripts), deliveryDebounceMs: 20, ...options }); servers.push(server); return server;
 }
@@ -20,6 +20,121 @@ async function until(test: () => boolean, timeout = 4000): Promise<void> { const
 async function create(server: BatonServer, agent = "root", policy = {}): Promise<RunSnapshot> { return server.kernel.createRun({ projectId: (await server.kernel.projects.create({ path: tmpdir() })).id, agent, cwd: tmpdir(), prompt: "start", policy: { teamApproval: false, ...policy } }); }
 function children(server: BatonServer, id: string): DelegationRecord[] { return server.store.snapshot(id).delegations; }
 const idle: FakeScript = (c) => { c.text("Done."); };
+
+describe("lead review policy", () => {
+  it("notifies the lead when toggled, and adds review instructions to results only while enabled", async () => {
+    const server = await setup({ root: idle, worker: idle });
+    const { run } = await create(server);
+    const root = run.rootNodeId;
+    const prompts = () => server.store.items(root).flatMap(({ item }) => item.type === "user_message" ? [item.text] : []);
+    const notices = () => prompts().filter((text) => text.includes('<baton-notice kind="policy">'));
+    const results = () => prompts().filter((text) => text.startsWith("<baton-results>"));
+    const patchPolicy = (policy: unknown) => fetch(`http://127.0.0.1:${server.port}/api/runs/${run.id}`, { method: "PATCH", headers: { authorization: `Bearer ${server.token}`, "content-type": "application/json" }, body: JSON.stringify({ policy }) });
+    await until(() => server.store.node(root).status === "idle");
+    expect((await patchPolicy({ leadReview: "yes" })).status).toBe(400);
+    expect((await patchPolicy({ leadReview: true })).status).toBe(200);
+    await until(() => notices().length === 1);
+    expect(notices()[0]).toContain("Lead review is enabled");
+    expect((await patchPolicy({ leadReview: true })).status).toBe(200);
+    await server.kernel.delegate(root, { agent: "worker", title: "First", task: "First change" });
+    await until(() => results().length === 1);
+    expect(results()[0]).toMatch(/\nLead review: .*inspect the diff.*\n<\/baton-results>$/);
+    expect(notices()).toHaveLength(1);
+
+    expect((await patchPolicy({ leadReview: false })).status).toBe(200);
+    await until(() => notices().length === 2);
+    expect(notices()[1]).toContain("Lead review is disabled");
+    await server.kernel.delegate(root, { agent: "worker", title: "Second", task: "Second change" });
+    await until(() => results().length === 2);
+    expect(results()[1]).not.toContain("Lead review:");
+  });
+
+  it("does not queue a policy notice in a solo run", async () => {
+    const server = await setup({ root: idle });
+    const { run } = await create(server, "root", { mode: "solo" });
+    await server.kernel.pauseRun(run.id);
+    expect(server.kernel.patchRun(run.id, { policy: { leadReview: true } }).run.policy.leadReview).toBe(true);
+    expect(server.store.notices(run.rootNodeId)).toEqual([]);
+  });
+});
+
+describe("event-driven delegates", () => {
+  it.each(["running", "undelivered", "non-resumable", "missing persistence"] as const)("yields and wakes with the same conversation (%s)", async (scenario) => {
+    const childFinished = new AbortController(), middleFinished = new AbortController();
+    const steering = Promise.withResolvers<void>(), releaseSteer = Promise.withResolvers<void>();
+    const idleTimeoutMs = 150;
+    const canClose = scenario !== "non-resumable" && scenario !== "missing persistence";
+    const waitFor = (signal: AbortSignal, turn: AbortSignal) => {
+      const either = AbortSignal.any([signal, turn]);
+      return either.aborted ? Promise.resolve() : new Promise<void>((resolve) => either.addEventListener("abort", () => resolve(), { once: true }));
+    };
+    const server = await setup({
+      root: idle,
+      middle: { steer: false, resume: scenario !== "non-resumable", script: async (context) => {
+        if (context.turn === 1) {
+          await context.call("delegate", { agent: "leaf", title: "Leaf", task: "Collect data" });
+          if (scenario === "undelivered" || scenario === "missing persistence") await waitFor(middleFinished.signal, context.signal);
+          context.text("Waiting for the data");
+        } else {
+          if (!context.prompt.includes("<baton-results>") || !context.prompt.includes("Leaf data")) throw new Error("Missing leaf result");
+          await context.call("report_result", { status: "success", summary: "Integrated leaf data", result: { integrated: true } });
+        }
+      } },
+      leaf: async (context) => {
+        await waitFor(childFinished.signal, context.signal);
+        await context.call("report_result", { status: "success", summary: "Leaf data" });
+      },
+    }, { idleTimeoutMs });
+    const { run } = await create(server);
+    await until(() => server.store.node(run.rootNodeId).status === "idle");
+    const middle = await server.kernel.delegate(run.rootNodeId, { agent: "middle", title: "Middle", task: "Integrate data", outputSchema: { type: "object", required: ["integrated"] } });
+    const middleNodeId = middle.nodeId!;
+    const registry = server.kernel.registry;
+    if (!(registry instanceof FakeDriverRegistry)) throw new Error("Missing fake registry");
+    const middleDriver = registry.get("middle")!;
+    const leaf = () => children(server, run.id).find((delegation) => delegation.fromNodeId === middleNodeId);
+    const activity = () => server.store.events(run.id).find((event) => event.type === "node.updated" && event.nodeId === middleNodeId && event.patch.activity === "Waiting for 1 delegates");
+    if (scenario === "missing persistence") {
+      await until(() => !!leaf());
+      vi.spyOn(middleDriver.sessions[0]!, "persistence").mockReturnValue(null);
+      middleFinished.abort();
+    }
+    if (scenario === "undelivered") {
+      await until(() => !!leaf());
+      vi.spyOn(middleDriver.sessions[0]!, "steer").mockImplementation(async () => { steering.resolve(); await releaseSteer.promise; return "unsupported"; });
+      try {
+        childFinished.abort();
+        await steering.promise;
+        expect(leaf()).toMatchObject({ status: "completed" });
+        expect(leaf()?.deliveredAt).toBeUndefined();
+        middleFinished.abort();
+        await until(() => !!activity());
+      } finally { releaseSteer.resolve(); }
+    }
+    await until(() => !!activity());
+    if (scenario !== "undelivered") {
+      expect(server.store.node(middleNodeId)).toMatchObject({ status: "idle", activity: "Waiting for 1 delegates", turns: 1 });
+      expect(server.store.delegation(middle.delegationId)).toMatchObject({ status: "running" });
+      expect(server.store.delegation(middle.delegationId).result).toBeUndefined();
+      expect((await server.kernel.agents()).find((agent) => agent.id === "middle")?.load).toBe(0);
+      if (canClose) await vi.waitFor(() => expect(middleDriver.sessions[0]?.closed).toBe(true));
+      else {
+        await delay(idleTimeoutMs * 2);
+        expect(middleDriver.sessions[0]?.closed).toBe(false);
+      }
+      childFinished.abort();
+    }
+    await until(() => !!server.store.delegation(middle.delegationId).deliveredAt);
+    expect(server.store.delegation(middle.delegationId)).toMatchObject({ status: "completed", deliveredVia: "turn", result: { reported: true, summary: "Integrated leaf data", result: { integrated: true } } });
+    expect(server.store.snapshot(run.id).turns.filter((turn) => turn.nodeId === middleNodeId).map((turn) => turn.trigger)).toEqual(["delegation", "result"]);
+    expect(server.store.items(run.rootNodeId).some(({ item }) => item.type === "user_message" && item.text.includes("Integrated leaf data"))).toBe(true);
+    if (scenario === "running") expect(middleDriver.sessions[1]?.sessionId).toBe(middleDriver.sessions[0]?.sessionId);
+    if (!canClose) {
+      expect(middleDriver.sessions).toHaveLength(1);
+      expect(middleDriver.sessions[0]?.turns).toBe(2);
+    }
+  });
+});
 
 describe("kernel over real HTTP MCP", () => {
   it("allows a depth-3 chain, rejects depth 4, and projections equal event replay", async () => {

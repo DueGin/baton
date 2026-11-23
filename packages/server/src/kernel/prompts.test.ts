@@ -24,6 +24,25 @@ describe("systemPrompt", () => {
     expect(text).toContain("two or more files");
     expect(text).toContain("is NOT trivial: you must build a team");
   });
+  it("requires personal review of each result only for a non-solo lead when enabled", () => {
+    for (const mode of ["dynamic", "preset"] as const) {
+      const enabled = systemPrompt(root, { ...policy, mode, leadReview: true });
+      expect(enabled).toContain("inspect the diff");
+      expect(enabled).toContain("run the relevant builds and tests");
+      expect(enabled).toContain("use send to request fixes");
+      expect(enabled).toContain("State what you verified in your final answer");
+      expect(systemPrompt(root, { ...policy, mode, leadReview: false })).not.toContain("Lead review is enabled");
+    }
+    expect(systemPrompt(child, { ...policy, leadReview: true })).toBe(systemPrompt(child, policy));
+    expect(systemPrompt(root, { ...policy, mode: "solo", leadReview: true })).toBe(systemPrompt(root, { ...policy, mode: "solo" }));
+  });
+  it("discourages waiting in a loop and teaches delegates to yield without reporting", () => {
+    expect(systemPrompt(root, policy)).toContain("Do not call wait in a loop");
+    const guidance = "end your turn without calling report_result";
+    expect(systemPrompt(child, policy)).toContain(guidance);
+    expect(systemPrompt(root, policy)).not.toContain(guidance);
+    expect(systemPrompt({ ...child, depth: 3 }, policy)).not.toContain(guidance);
+  });
   it("supports solo and never gives members lead instructions", () => {
     expect(systemPrompt(root, { ...policy, mode: "solo" })).toContain("Work alone");
     const delegate = systemPrompt(child, policy);
@@ -77,7 +96,7 @@ describe("agent message tags", () => {
     );
   });
 
-  it.each(["team", "system"] as const)("keeps %s notices distinct from follow-ups", (kind) => {
+  it.each(["team", "system", "policy"] as const)("keeps %s notices distinct from follow-ups", (kind) => {
     expect(noticePrompt(kind, "First line\nSecond line")).toBe(`<baton-notice kind="${kind}">\nFirst line\nSecond line\n</baton-notice>`);
   });
 });

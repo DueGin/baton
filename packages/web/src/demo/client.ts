@@ -1,5 +1,8 @@
 import { applyEvent, emptyUsage, type CreateRunRequest, type DelegationRecord, type GetItemsResponse, type PatchRunRequest, type PermissionDecision, type RunEvent, type RunEventEnvelope, type RunSnapshot, type TimelineItem, type AddMemberRequest, type ReplaceMemberRequest, type ReassignRequest, type TeamPreset, type TeamPresetInput, type SaveTeamPresetRequest, type TeamRecord, type TeamMember, type TeamMemberSpec, type TeamChange, type TeamProposal, type ApproveTeamProposalRequest, type RejectTeamProposalRequest, type InboxItem, type AnswerQuestionRequest, type ResolveEscalationRequest, type PermissionRule, type CreatePermissionRuleRequest, type QuestionRecord, type EscalationRecord, type SendMessageResponse, type SettingsResponse, type UpdateSettingsRequest, type TestTitleModelRequest, type TestTitleModelResponse } from "@baton/protocol";
 import { idleScenario } from "./idle.js";
+import type { NodeRecord, UpdateNodeConfigRequest, UpdateNodeConfigResponse } from "@baton/protocol";
+import { activeTurn, conversationRows } from "../lib/conversation.js";
+import { compatibleThinking, findModel, thinkingOptions } from "../lib/models.js";
 import type { BackgroundProcess, CancelRunRequest, DismissBackgroundRequest, StopBackgroundRequest, ListBackgroundResponse } from "@baton/protocol";
 import { demoBackground } from "./background.js";
 import { backgroundActive } from "../lib/background.js";
@@ -470,6 +473,22 @@ export class DemoClient implements BatonClient {
     this.emit(data, { type: "run.updated", patch: { ...(request.title !== undefined ? { title: request.title, titleSource: "human" as const } : {}), policy: { ...data.snapshot.run.policy, ...request.policy }, updatedAt: new Date(this.now()).toISOString() } });
     if (request.policy?.autoApprove) for (const permission of data.snapshot.permissions.filter(entry => entry.status === "pending")) await this.resolve(permission.requestId, { response: { behavior: "allow" } }, "policy");
   }
+  async updateNodeConfig(nodeId: string, request: UpdateNodeConfigRequest): Promise<UpdateNodeConfigResponse> {
+    const data = this.forNode(nodeId);
+    const node = data.snapshot.nodes.find(entry => entry.id === nodeId)!;
+    if (["canceled", "replaced", "failed"].includes(node.status)) throw new HttpError(409, "该节点已结束，无法修改配置");
+    const agent = demoAgents.find(entry => entry.id === node.agentId);
+    const model = (request.model === undefined ? node.model : request.model) ?? agent?.models.find(entry => entry.isDefault)?.id;
+    if (request.model != null && !findModel(agent, request.model)) throw new HttpError(400, "未知模型");
+    if (request.modeId != null && !agent?.modes.some(mode => mode.id === request.modeId)) throw new HttpError(400, "未知权限模式");
+    if (request.thinking != null && !thinkingOptions(agent, model).some(level => level.id === request.thinking)) throw new HttpError(400, "当前模型不支持此思考级别");
+    const patch: Partial<NodeRecord> = { updatedAt: new Date(this.now()).toISOString() };
+    for (const key of ["model", "modeId", "thinking"] as const) if (request[key] !== undefined) patch[key] = request[key] ?? undefined;
+    if (request.model !== undefined && request.thinking === undefined && node.thinking && !compatibleThinking(agent, model, node.thinking)) patch.thinking = undefined;
+    const applied = activeTurn(data.snapshot, nodeId) ? "next_turn" : "now";
+    this.emit(data, { type: "node.updated", nodeId, patch });
+    return { node: { ...node, ...patch }, applied };
+  }
   async items(nodeId: string, after = 0): Promise<GetItemsResponse> {
     this.advance(); const data = this.forNode(nodeId);
     const rows = new Map<number, GetItemsResponse["items"][number]>();
@@ -508,9 +527,33 @@ export class DemoClient implements BatonClient {
     const delivery = active && mode === "steer" ? "steered" : "turn";
     if (delivery === "turn") this.startReply(data, nodeId, row.item.text);
     const turnId = data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running")?.id;
-    const { queuePosition: _position, ...item } = row.item;
-    this.emit(data, { type: "item", nodeId, itemSeq, turnId, itemTs: row.itemTs, item: { ...item, delivery, ...(interrupted ? { interrupted: true } : {}), ...(mode === "steer" ? { escalated: true } : {}) } });
+    const { queuePosition: _position, steeredAfterSeq: _previousAnchor, ...item } = row.item;
+    const anchor = delivery === "steered" ? this.prepareSteer(data, nodeId, turnId!) : undefined;
+    this.emit(data, { type: "item", nodeId, itemSeq, turnId, itemTs: row.itemTs, item: { ...item, delivery, ...(interrupted ? { interrupted: true } : {}), ...(anchor !== undefined ? { escalated: true, steeredAfterSeq: anchor } : {}) } });
+    if (delivery === "steered") this.appendSteerReply(data, nodeId, turnId!, item.text);
     return { accepted: true, delivery, itemSeq };
+  }
+  private prepareSteer(data: DemoRun, nodeId: string, turnId: string): number {
+    const rows = demoRows(data.log, nodeId);
+    const last = conversationRows(rows, [], nodeId).findLast(entry => !entry.row.rolledBack);
+    const continued = new Map<number, number>();
+    data.remaining = data.remaining.map(event => {
+      if (event.type !== "item" || event.nodeId !== nodeId || event.turnId !== turnId) return event;
+      const prior = rows.find(row => row.seq === event.itemSeq)?.item;
+      if (prior && prior.type !== "reasoning" && prior.type !== "assistant_message") return event;
+      const seq = continued.get(event.itemSeq) ?? this.nextItemSeq(data, nodeId);
+      continued.set(event.itemSeq, seq);
+      if ((event.item.type === "reasoning" || event.item.type === "assistant_message") && prior?.type === event.item.type && event.item.text.startsWith(prior.text)) {
+        const text = event.item.text.slice(prior.text.length).trimStart();
+        return { ...event, itemSeq: seq, item: { ...event.item, text } };
+      }
+      return { ...event, itemSeq: seq };
+    });
+    return last?.row.seq ?? 0;
+  }
+  private appendSteerReply(data: DemoRun, nodeId: string, turnId: string, text: string): void {
+    if (data.remaining.some(event => event.type === "item" && event.nodeId === nodeId && event.turnId === turnId && (event.item.type === "assistant_message" || event.item.type === "reasoning"))) return;
+    this.append(data, nodeId, { type: "assistant_message", text: `收到引导，我会按这条补充继续：${text}` });
   }
   async checkpoints(nodeId: string): Promise<ListCheckpointsResponse> {
     this.advance(); const data = this.forNode(nodeId);

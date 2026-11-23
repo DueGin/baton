@@ -1,5 +1,5 @@
 import type {
-  AgentEntry, CreateRunRequest, DelegationRecord, GetItemsResponse, PatchRunRequest,
+  AgentEntry, CreateRunRequest, DelegationRecord, GetItemsResponse, PatchRunRequest, UpdateNodeConfigRequest, UpdateNodeConfigResponse,
   PermissionDecision, RunEventEnvelope, RunRecord, RunSnapshot, RunSummary, AddMemberRequest, ReplaceMemberRequest,
   ReassignRequest, TeamPreset, TeamPresetInput, SaveTeamPresetRequest, ApproveTeamProposalRequest, RejectTeamProposalRequest,
   SettingsResponse, UpdateSettingsRequest, TestTitleModelRequest, TestTitleModelResponse,
@@ -25,6 +25,7 @@ export interface BatonClient {
   run(id: string): Promise<RunSnapshot>;
   createRun(request: CreateRunRequest): Promise<RunSnapshot>;
   patchRun(id: string, request: PatchRunRequest): Promise<void>;
+  updateNodeConfig(nodeId: string, request: UpdateNodeConfigRequest): Promise<UpdateNodeConfigResponse>;
   regenerateTitle(id: string): Promise<void>;
   settings(): Promise<SettingsResponse>;
   updateSettings(request: UpdateSettingsRequest): Promise<SettingsResponse>;
@@ -132,6 +133,7 @@ export class ApiClient implements BatonClient {
   run = (id: string) => this.request<RunSnapshot>(`/runs/${encodeURIComponent(id)}`);
   createRun = (body: CreateRunRequest) => this.request<RunSnapshot>("/runs", "POST", body);
   patchRun = (id: string, body: PatchRunRequest) => this.request<void>(`/runs/${encodeURIComponent(id)}`, "PATCH", body);
+  updateNodeConfig = (nodeId: string, body: UpdateNodeConfigRequest) => this.request<UpdateNodeConfigResponse>(`/nodes/${encodeURIComponent(nodeId)}`, "PATCH", body);
   regenerateTitle = (id: string) => this.request<void>(`/runs/${encodeURIComponent(id)}/title/regenerate`, "POST", {});
   settings = () => this.request<SettingsResponse>("/settings");
   updateSettings = (body: UpdateSettingsRequest) => this.request<SettingsResponse>("/settings", "PUT", body);

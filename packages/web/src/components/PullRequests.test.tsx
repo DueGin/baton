@@ -12,9 +12,9 @@ const now = Date.parse("2026-11-15T01:00:00Z");
 describe("PR surfaces", () => {
   it("exposes run-wide PRs beside background processes, in details and project groups", async () => {
     const client = new DemoClient(() => now); const snapshot = await client.run("run-pull-requests"); const store = new RunStore(client);
-    const transcript = renderToStaticMarkup(<Transcript snapshot={snapshot} store={store} items={{}} itemStatus={{}} nodeId={snapshot.run.rootNodeId} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} />);
+    const transcript = renderToStaticMarkup(<Transcript showTopology={() => undefined} snapshot={snapshot} store={store} items={{}} itemStatus={{}} nodeId={snapshot.run.rootNodeId} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} />);
     expect(transcript).toContain("pr-popover-anchor"); expect(transcript).toContain("PR 5");
-    const details = renderToStaticMarkup(<RunDetails snapshot={snapshot} client={client} now={now} connection="live" busy={false} close={() => undefined} autoApprove={() => undefined} cancel={() => undefined} openTeam={() => undefined} openPending={() => undefined} />);
+    const details = renderToStaticMarkup(<RunDetails leadReview={() => undefined} snapshot={snapshot} client={client} now={now} connection="live" busy={false} close={() => undefined} autoApprove={() => undefined} cancel={() => undefined} openTeam={() => undefined} openPending={() => undefined} />);
     expect(details).toContain("Pull Requests"); expect(details).toContain("关联 PR URL"); expect(details).toContain("提醒我处理");
     const groups = renderToStaticMarkup(<ProjectGroups pullRequests={snapshot.pullRequests} projects={await client.projects()} runs={await client.runs()} runId={snapshot.run.id} currentId="project-atlas" page="runs" reveal={null} choose={() => undefined} selectProject={() => undefined} newRun={() => undefined} add={() => undefined} canCreate mutate={async () => undefined} loading={false} />);
     expect(groups).toContain("project-pr-count pr-tone-red"); expect(groups).toContain("run-pr-count pr-tone-red"); expect(groups).toContain("5 个 open / draft PR");

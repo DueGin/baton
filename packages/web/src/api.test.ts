@@ -4,6 +4,13 @@ import type { RunEventEnvelope } from "@baton/protocol";
 
 afterEach(() => vi.unstubAllGlobals());
 describe("API transport", () => {
+  it("patches only the requested session settings, preserving explicit resets and encoded IDs", async () => {
+    const response = { node: { id: "node/1", modeId: "plan" }, applied: "next_turn" };
+    const fetchMock = vi.fn().mockResolvedValue(Response.json(response)); vi.stubGlobal("fetch", fetchMock);
+    const request = { modeId: "plan", thinking: null };
+    expect(await new ApiClient("token").updateNodeConfig("node/1", request)).toEqual(response);
+    expect(fetchMock).toHaveBeenCalledWith("/api/nodes/node%2F1", { method: "PATCH", headers: { Authorization: "Bearer token", "Content-Type": "application/json" }, body: JSON.stringify(request) });
+  });
   it("lists the catalog and redetects agents through the refresh endpoint", async () => {
     const fetchMock = vi.fn().mockImplementation(async () => Response.json([])); vi.stubGlobal("fetch", fetchMock); const client = new ApiClient("token");
     expect(await client.agents()).toEqual([]); expect(await client.agents(true)).toEqual([]);
