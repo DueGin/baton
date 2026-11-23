@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assetMatches, compareVersions, latestDownloadUrl, networkReason, parseChecksums, parseVersion, readRelease, releaseFromChecksums, responseSize, updateTarget } from "./update.js";
+import { assetMatches, compareVersions, latestDownloadUrl, networkReason, parseChecksums, parseVersion, readRelease, releaseFromChecksums, responseSize, staleUpdates, updateTarget } from "./update.js";
 
 const release = {
   tag_name: "v0.2.0",
@@ -84,5 +84,21 @@ describe("update helpers", () => {
     expect(networkReason(new Error("net::ERR_PROXY_CONNECTION_FAILED"))).toBe("连接被拒绝（检查代理设置）");
     expect(networkReason(new TypeError("fetch failed"))).toBe("无法连接 GitHub");
     expect(networkReason(new Error("something specific"))).toBe("something specific");
+  });
+  it("prunes old update downloads on startup, keeping the current, the newest and recent ones", () => {
+    const day = 24 * 60 * 60 * 1000, now = Date.parse("2026-11-23T12:00:00Z");
+    const entries = [
+      { name: "0.2.0", updatedAt: now - 5 * day },
+      { name: "0.2.1", updatedAt: now - 3 * day },
+      { name: "0.3.0", updatedAt: now - 2 * day },
+      { name: "0.3.1", updatedAt: now - day },                 // current version
+      { name: "0.3.2", updatedAt: now - 60_000 },              // just downloaded, waiting to install
+      { name: "0.1.0", updatedAt: now - 30 * day },
+    ];
+    expect(staleUpdates(entries, "0.3.1", day, now)).toEqual(["0.3.0", "0.2.1", "0.2.0", "0.1.0"]);
+    // A download paused within the day survives, even without being the newest.
+    expect(staleUpdates([{ name: "0.3.0", updatedAt: now - 2 * day }, { name: "0.3.1", updatedAt: now - day }, { name: "0.3.2", updatedAt: now - 2 * 60 * 60 * 1000 }], "0.3.1", day, now)).toEqual(["0.3.0"]);
+    expect(staleUpdates([], "0.3.1", day, now)).toEqual([]);
+    expect(staleUpdates([{ name: "0.3.1", updatedAt: now - 30 * day }], "0.3.1", day, now)).toEqual([]);
   });
 });
