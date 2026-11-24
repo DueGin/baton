@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ItemRecord, RunSnapshot } from "@baton/protocol";
 import { createScenario, replay } from "../demo/scenario.js";
-import { conversationPhase, conversationRows, deliveryLabel, inFlightMessage, messageActions, nodeIsLive, outgoingMatches, pruneOutgoing, quietSeconds, reconcileOutgoing, type OutgoingMessage } from "./conversation.js";
+import { conversationPhase, conversationRows, deliveryLabel, inFlightMessage, messageActions, nodeIsLive, outgoingMatches, pruneOutgoing, queuedRows, quietSeconds, reconcileOutgoing, type OutgoingMessage } from "./conversation.js";
 import { displayRunStatus, displayStatus } from "./derive.js";
 const base = Date.parse("2026-11-10T07:00:00Z");
 const ts = new Date(base).toISOString();
@@ -41,6 +41,16 @@ describe("message delivery", () => {
     expect(deliveryLabel("steered")).toBe("已插入当前回合");
     expect(deliveryLabel("turn")).toBe("已送达");
     expect(deliveryLabel("queued")).toBe("排队中");
+  });
+  it("keeps an idle send below an earlier turn with no output, including during acknowledgement", () => {
+    const older: ItemRecord = { ...row, turnId: "older", item: { type: "user_message", text: "prior", delivery: "turn" } };
+    const newSend: OutgoingMessage = { ...pending, delivery: "turn" };
+    const saved: ItemRecord = { ...row, turnId: "new", seq: 10, item: { type: "user_message", text: pending.text, clientId: pending.clientId, delivery: "turn" } };
+    for (const items of [[older], [older, saved]]) expect(conversationRows(items, [newSend], "n").map(({ row }) => row.item.type === "user_message" && row.item.text)).toEqual(["prior", pending.text]);
+  });
+  it("keeps the enqueue order of simultaneous optimistic sends before server positions arrive", () => {
+    const outgoing = ["first", "second"].map(clientId => ({ ...pending, clientId, delivery: "queued" as const }));
+    expect(queuedRows([], outgoing, "n").map(entry => entry.outgoing?.clientId)).toEqual(["first", "second"]);
   });
   it("only reveals interruption after steering, and labels all terminal delivery states", () => {
     expect(messageActions("queued")).toEqual(["steer", "edit"]);

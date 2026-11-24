@@ -504,9 +504,14 @@ export class DemoClient implements BatonClient {
     this.notice(data, proposal.nodeId, `名单已驳回，所有相关排队委派已取消。\n理由：${request.feedback}`);
   }
   async patchRun(id: string, request: PatchRunRequest): Promise<void> {
+    this.advance();
     const data = this.get(id);
+    if (request.archived !== undefined && typeof request.archived !== "boolean") throw new HttpError(400, "archived must be a boolean");
+    if (request.archived && data.snapshot.run.status === "active") throw new HttpError(409, "Cannot archive a run while agents are working; pause it or wait until it finishes");
     const previousReview = data.snapshot.run.policy.leadReview === true;
-    this.emit(data, { type: "run.updated", patch: { ...(request.title !== undefined ? { title: request.title, titleSource: "human" as const } : {}), policy: { ...data.snapshot.run.policy, ...request.policy }, updatedAt: new Date(this.now()).toISOString() } });
+    const updatedAt = new Date(this.now()).toISOString();
+    const archivePatch = request.archived === true ? { archived: true, archivedAt: updatedAt } : request.archived === false ? { archived: false } : {};
+    this.emit(data, { type: "run.updated", patch: { ...archivePatch, ...(request.title !== undefined ? { title: request.title, titleSource: "human" } : {}), ...(request.policy ? { policy: { ...data.snapshot.run.policy, ...request.policy } } : {}), updatedAt } });
     const review = data.snapshot.run.policy.leadReview === true;
     if (review !== previousReview && data.snapshot.run.policy.mode !== "solo") this.notice(data, data.snapshot.run.rootNodeId, review ? `已开启主导者验收。${demoReviewReminder}` : "已关闭主导者验收。", "policy");
     if (request.policy?.autoApprove) for (const permission of data.snapshot.permissions.filter(entry => entry.status === "pending")) await this.resolve(permission.requestId, { response: { behavior: "allow" } }, "policy");
@@ -542,6 +547,13 @@ export class DemoClient implements BatonClient {
     if (previous?.type === "item" && previous.item.type === "user_message") {
       if (previous.item.delivery === "retracted") throw new HttpError(409, "消息已撤回");
       return { accepted: true, delivery: previous.item.delivery ?? "turn", itemSeq: previous.itemSeq };
+    }
+    if (data.snapshot.run.status !== "paused" && !data.snapshot.turns.some(turn => turn.nodeId === nodeId && turn.status === "running")) {
+      const itemSeq = this.nextItemSeq(data, nodeId);
+      this.startReply(data, nodeId, text);
+      const turnId = data.snapshot.turns.findLast(turn => turn.nodeId === nodeId && turn.status === "running")?.id;
+      this.emit(data, { type: "item", nodeId, itemSeq, turnId, itemTs: new Date(this.now()).toISOString(), item: { type: "user_message", text, clientId, delivery: "turn" } });
+      return { accepted: true, delivery: "turn", itemSeq };
     }
     const positions = this.queuedMessages(data, nodeId).map(row => row.item.type === "user_message" ? row.item.queuePosition ?? 0 : 0);
     const itemSeq = this.append(data, nodeId, { type: "user_message", text, clientId, delivery: "queued", queuePosition: Math.max(0, ...positions) + 1 });

@@ -305,6 +305,13 @@ export interface RunRecord {
    * the run is paused instead of being left half-interrupted, so 继续 resumes every interrupted agent.
    */
   pauses?: Array<{ at: IsoTime; resumedAt?: IsoTime; by: "human" | "restart" }>;
+  /**
+   * Archived by the human (DESIGN §4.9): hidden from the sidebar's main list, nothing is deleted.
+   * Unarchiving sets `archived:false` (JSON drops undefined, so the flag is never just removed).
+   */
+  archived?: boolean;
+  /** When the run was last archived; kept after unarchiving. */
+  archivedAt?: IsoTime;
   createdAt: IsoTime;
   updatedAt: IsoTime;
   endedAt?: IsoTime;
@@ -743,6 +750,9 @@ export interface RunSummary {
   backgroundCount?: number;
   /** Pull requests of the run that are open or draft. */
   openPrCount?: number;
+  /** See RunRecord.archived (DESIGN §4.9). */
+  archived?: boolean;
+  archivedAt?: IsoTime;
   usage: UsageTotals;
   createdAt: IsoTime;
   updatedAt: IsoTime;

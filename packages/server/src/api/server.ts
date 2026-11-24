@@ -368,7 +368,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
     try { if (!(await stat(file)).isFile()) file = join(webDist, "index.html"); }
     catch { file = join(webDist, "index.html"); }
     try {
-      const contents = await readFile(file), types: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".json": "application/json" };
+      const contents = await readFile(file), types: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".json": "application/json", ".woff2": "font/woff2", ".woff": "font/woff" };
       const cacheControl = file.includes(`${sep}assets${sep}`) ? "public, max-age=31536000, immutable" : "no-cache";
       response.writeHead(200, { "content-type": types[extname(file)] ?? "application/octet-stream", "cache-control": cacheControl }).end(method === "HEAD" ? undefined : contents);
     } catch { json(response, 404, { error: { code: "WEB_NOT_BUILT", message: "Console not built. Build packages/web or use the REST API." } }); }

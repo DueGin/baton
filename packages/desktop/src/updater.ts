@@ -173,7 +173,7 @@ export class UpdateManager {
     const fallback = await this.checkWithoutApi();
     if (fallback.release) return this.decide(fallback.release, "github.com");
     this.log(`check failed: api ${apiDetail ?? api?.status}, github.com ${fallback.detail ?? fallback.problem}`);
-    if (api && (api.status === 401 || api.status === 404)) return this.set({ phase: "error", failedStep: "check", needsToken: true, error: "GitHub 找不到这个仓库的最新版本。如果仓库是私有的，需要一个有读取权限的令牌（填在下面）。" });
+    if (api && (api.status === 401 || api.status === 404)) return this.set({ phase: "error", failedStep: "check", needsToken: true, error: "GitHub 找不到这个仓库的最新版本。如果仓库是私有的，请在登录 shell 中将有读取权限的令牌设为 GITHUB_TOKEN 或 GH_TOKEN，然后重启 baton。" });
     const apiPart = apiProblem ?? (api?.status === 403 || api?.status === 429 ? "接口被限流（匿名每小时 60 次）" : `接口返回 ${api?.status}`);
     return this.set({ phase: "error", failedStep: "check", error: `检查更新失败：${apiPart}，备用地址也没有连上（${fallback.problem}）。请检查网络或代理后重试。` });
   }

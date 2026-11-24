@@ -70,7 +70,7 @@ export function graphEdges(snapshot: Pick<RunSnapshot, "nodes" | "delegations"> 
     const successor = snapshot.delegations.find(next => next.id === edge.replacedBy || next.replaces === edge.id);
     return successor && nodeIds.has(edge.toNodeId) && nodeIds.has(successor.toNodeId) ? [{
       id: `replacement-${edge.id}`, type: "smoothstep", source: edge.toNodeId, target: successor.toNodeId, label: "接手",
-      style: { stroke: "var(--text-dim)", strokeDasharray: "5 5", strokeWidth: 1.5 }, labelStyle: { fill: "var(--text-dim)", fontSize: 11 }, labelBgStyle: { fill: "var(--surface)" },
+      style: { stroke: "var(--text-dim)", strokeDasharray: "5 5", strokeWidth: 1.5 }, labelStyle: { fill: "var(--text-dim)", fontSize: "var(--text-2xs)" }, labelBgStyle: { fill: "var(--surface)" },
     }] : [];
   });
   return [...delegations, ...replacements];

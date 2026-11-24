@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import App from "./App.js";
 import { ApiClient, readToken } from "./api.js";
 import { DemoClient } from "./demo/client.js";
+import "./assets/fonts/geist.css";
 import "@xyflow/react/dist/style.css";
 import "./styles.css";
 import { highlightStyles } from "./highlight.js";

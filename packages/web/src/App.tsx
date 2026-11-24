@@ -24,7 +24,7 @@ import { AddProject, ProjectsEmpty } from "./components/Projects.js";
 import { liveProjectSummaries, readCurrentProject, saveCurrentProject } from "./lib/projects.js";
 import { agentReady } from "./lib/agents.js";
 import { ImageContext } from "./lib/images.js";
-import { NewRun } from "./components/NewRun.js";
+import { NewSession } from "./components/NewRun.js";
 import { desktopBridge, desktopRoute, windowChrome } from "./desktop.js";
 import { useColorTheme } from "./lib/theme.js";
 import { SessionNavProvider, type SessionNav } from "./lib/session-nav.js";
@@ -64,7 +64,7 @@ export default function App({ client }: { client: BatonClient }) {
   const projects = useMemo(() => liveProjectSummaries(projectRecords, runs), [projectRecords, runs]);
   const [currentProjectId, setCurrentProjectId] = useState(() => readCurrentProject(localStorage));
   const [projectReveal, setProjectReveal] = useState<{ id: string; serial: number } | null>(null);
-  const [addProject, setAddProject] = useState(false); const resumeNewRun = useRef(false);
+  const [addProject, setAddProject] = useState<"draft" | "sidebar" | null>(null);
   const rememberProject = useCallback((id: string) => { setCurrentProjectId(id); saveCurrentProject(localStorage, id); }, []);
   const selectProject = useCallback((id: string) => { rememberProject(id); setProjectReveal(current => ({ id, serial: (current?.serial ?? 0) + 1 })); }, [rememberProject]);
   const [agents, setAgents] = useState<AgentEntry[]>([]);
@@ -72,7 +72,15 @@ export default function App({ client }: { client: BatonClient }) {
   const [teamDialog, setTeamDialog] = useState<"add" | "save" | TeamMember | null>(null);
   const [reassignId, setReassignId] = useState<string | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
-  const [page, setPage] = useState<Page>("inbox");
+  const [page, setCurrentPage] = useState<Page>("inbox");
+  const [draft, setDraft] = useState<{ projectId: string } | null>(null);
+  const [draftKey, setDraftKey] = useState(0);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const pendingCreate = useRef<symbol | null>(null);
+  const setPage = useCallback((next: Page) => {
+    pendingCreate.current = null; setCreating(false); setCreateError(null); setDraft(null); setCurrentPage(next);
+  }, []);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>(() => readSettingsSection(localStorage));
   const chooseSettingsSection = (section: SettingsSection): void => { setSettingsSection(section); saveSettingsSection(localStorage, section); };
   const [tab, setTab] = useState<RunTab>("transcript");
@@ -82,7 +90,6 @@ export default function App({ client }: { client: BatonClient }) {
   const setInspected = useCallback((nodeId: string | null) => dispatchPanel({ type: "inspect", nodeId }), []);
   useEffect(() => { saveRunPanel(localStorage, panel.detailsOpen); }, [panel.detailsOpen]);
   const [conversation, setConversation] = useState("");
-  const [newRun, setNewRun] = useState(false);
   const [cancelingRun, setCancelingRun] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [busy, setBusy] = useState(false);
@@ -92,7 +99,7 @@ export default function App({ client }: { client: BatonClient }) {
   const [defaults, setDefaults] = useState(storedPolicy);
   const [theme, setTheme] = useState(() => localStorage.getItem("baton.theme") ?? "system");
   const [initialLoading, setInitialLoading] = useState(true);
-  const snapshot = state.snapshot;
+  const snapshot = state.snapshot?.run.id === runId ? state.snapshot : null;
 
   useEffect(() => {
     if (!desktopBridge()) return;
@@ -107,7 +114,12 @@ export default function App({ client }: { client: BatonClient }) {
 
   const refreshProjects = useCallback(async () => { setProjects(await client.projects(true)); }, [client]);
   useEffect(() => { if ((!currentProjectId || !projects.some(project => project.id === currentProjectId)) && projects.length) { const first = projects.find(project => !project.archived); if (first) rememberProject(first.id); } }, [currentProjectId, projects, rememberProject]);
-  const openNewRun = (id?: string) => { const project = projects.find(project => project.id === (id ?? currentProjectId) && !project.archived) ?? projects.find(project => !project.archived); setError(null); if (!project) { resumeNewRun.current = true; setAddProject(true); return; } rememberProject(project.id); setNewRun(true); };
+  const chooseDraftProject = (projectId: string) => { rememberProject(projectId); setDraft({ projectId }); setCreateError(null); };
+  const openNewRun = (id?: string) => {
+    const project = projects.find(entry => entry.id === (id ?? currentProjectId) && !entry.archived) ?? projects.find(entry => !entry.archived);
+    setPage("runs"); setError(null); setWarnings([]); setDraftKey(current => current + 1);
+    if (project) chooseDraftProject(project.id); else setAddProject("draft");
+  };
   const visiblePrs = useMemo(() => snapshot ? [...allPrs.filter(pr => pr.runId !== snapshot.run.id), ...(snapshot.pullRequests ?? [])] : allPrs, [allPrs, snapshot]);
   const activeProject = projects.find(project => project.id === snapshot?.run.projectId);
   useEffect(() => { inboxStore.start(); return () => inboxStore.stop(); }, [inboxStore]);
@@ -166,7 +178,7 @@ export default function App({ client }: { client: BatonClient }) {
     const current = selected ? entries.findIndex(entry => entry.id === selected.run.id) : -1;
     if (selected && current >= 0 && entries[current]!.updatedAt <= selected.run.updatedAt) entries[current] = summarize(selected);
     entries.sort((a, b) => b.createdAt.localeCompare(a.createdAt)); setRuns(entries);
-    setRunId(current => current ?? entries[0]?.id ?? null);
+    setRunId(current => current ?? entries.find(entry => !entry.archived)?.id ?? null);
   }, [client, store]);
   useEffect(() => {
     let active = true;
@@ -178,7 +190,7 @@ export default function App({ client }: { client: BatonClient }) {
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem("baton.theme", theme); }, [theme]);
   // Desktop: the native window controls and appearance follow the console's theme and what sits under the top-right corner.
-  const colorTheme = useColorTheme(); const hasRunBar = page === "runs" && Boolean(snapshot);
+  const colorTheme = useColorTheme(); const hasRunBar = page === "runs" && !draft && Boolean(snapshot);
   useEffect(() => {
     const bridge = desktopBridge(); if (!bridge?.setWindowChrome) return;
     const frame = requestAnimationFrame(() => { const chrome = windowChrome(theme); if (chrome) bridge.setWindowChrome?.(chrome); });
@@ -199,7 +211,15 @@ export default function App({ client }: { client: BatonClient }) {
   const openInboxItem = (id: string, nodeId?: string, proposal = false): void => { const projectId = runs.find(run => run.id === id)?.projectId; if (projectId) selectProject(projectId); pendingNavigation.current = { runId: id, nodeId }; setPage("runs"); setTab(proposal ? "team" : "topology"); if (id === runId) { setInspected(nodeId ?? null); pendingNavigation.current = null; } else setRunId(id); };
   const decide = (requestId: string, response: PermissionResponse): void => { void action(() => client.decide(requestId, { response })); };
   const create = async (request: CreateRunRequest): Promise<boolean> => {
-    return action(async () => { const created = await client.createRun(request); await refreshRuns(); await refreshProjects(); selectProject(request.projectId); setRunId(created.run.id); setPage("runs"); setTab("transcript"); setNewRun(false); });
+    if (pendingCreate.current) return false;
+    const token = Symbol(); pendingCreate.current = token; setCreating(true); setCreateError(null);
+    try {
+      const created = await client.createRun(request);
+      if (pendingCreate.current === token) { rememberProject(request.projectId); setRunId(created.run.id); setPage("runs"); setTab("transcript"); }
+      void Promise.all([refreshRuns(), refreshProjects(), inboxStore.refresh()]).catch((cause: unknown) => setError(errorText(cause)));
+      return true;
+    } catch (cause) { if (pendingCreate.current === token) setCreateError(errorText(cause)); return false; }
+    finally { if (pendingCreate.current === token) { pendingCreate.current = null; setCreating(false); } }
   };
   const refreshAgents = async (): Promise<void> => {
     setRefreshing(true); setError(null);
@@ -212,13 +232,16 @@ export default function App({ client }: { client: BatonClient }) {
   const sessionRefs = useMemo(() => new Map(Object.entries(inboxSnapshots).filter(([id]) => id !== snapshot?.run.id)), [inboxSnapshots, snapshot?.run.id]);
   const sessionNav = useMemo<SessionNav>(() => ({ open: (ref) => { openInboxItem(ref.run, ref.node); }, refs: () => sessionRefs, inspect: setInspected }), [inboxSnapshots, runs, runId]);
   return <SessionNavProvider value={sessionNav}><ImageContext value={images}><div className="app-shell">
-    {page === "settings" ? <SettingsSidebar section={settingsSection} select={chooseSettingsSection} back={() => setPage("runs")} /> : <Sidebar pullRequests={visiblePrs} projects={projects} currentProjectId={currentProjectId} reveal={projectReveal} selectProject={rememberProject} addProject={() => { resumeNewRun.current = false; setAddProject(true); }} mutateProject={async (id, request) => { await client.patchProject(id, request); await refreshProjects(); }} runs={runs} runId={runId} page={page} navigate={setPage} selectRun={id => { const projectId = runs.find(run => run.id === id)?.projectId; if (projectId) rememberProject(projectId); setRunId(id); setPage("runs"); }} newRun={openNewRun} canCreate={agents.some(agentReady)} pendingCount={inboxState.loaded ? inboxState.items.length : runs.reduce((sum, run) => sum + run.pendingTotal, 0)} presetCount={presets.length} theme={theme} toggleTheme={() => setTheme(current => current === "dark" ? "light" : "dark")} loading={initialLoading} />}
+    {page === "settings" ? <SettingsSidebar section={settingsSection} select={chooseSettingsSection} back={() => setPage("runs")} /> : <Sidebar pullRequests={visiblePrs} projects={projects} currentProjectId={currentProjectId} reveal={projectReveal} selectProject={rememberProject} addProject={() => setAddProject(draft ? "draft" : "sidebar")} mutateProject={async (id, request) => { await client.patchProject(id, request); await refreshProjects(); }}
+      runs={runs} runId={draft ? null : runId} draftProjectId={draft?.projectId ?? null} mutateRun={async (id, request) => { await client.patchRun(id, request); await refreshRuns(); }} page={page} navigate={setPage} selectRun={id => { const projectId = runs.find(run => run.id === id)?.projectId; if (projectId) rememberProject(projectId); setRunId(id); setPage("runs"); }} newRun={openNewRun} canCreate={agents.some(agentReady)} pendingCount={inboxState.loaded ? inboxState.items.length : runs.reduce((sum, run) => sum + run.pendingTotal, 0)} presetCount={presets.length} theme={theme} toggleTheme={() => setTheme(current => current === "dark" ? "light" : "dark")} loading={initialLoading} />}
     <main className="main-shell">
       <div className="window-titlebar" aria-hidden="true" />
       {client.demo && <div className="demo-banner"><span className="demo-tag">DEMO</span><span>浏览器内实时模拟 · 尝试处理授权、查看委派结果，或给任意节点发消息</span><span className="demo-local">无服务端连接</span></div>}
       {(error || state.error) && <div className={`global-error ${state.connection === "reconnecting" && !error ? "reconnect-warning" : ""}`} role="alert"><span>{error ?? state.error}</span><div>{state.connection === "offline" && runId && <button className="text-button" onClick={() => { void store.open(runId); }}>重试</button>}{error && <button className="icon-button" title="关闭提示" onClick={() => setError(null)}><Icon name="close" size={14} /></button>}</div></div>}
       {warnings.length > 0 && <div className="global-error reconnect-warning preset-warnings" role="status"><div><strong>预设已保存 · Agent 可用性提示</strong>{warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div><button className="icon-button" title="关闭提示" onClick={() => setWarnings([])}><Icon name="close" size={14} /></button></div>}
-      {page === "runs" && !initialLoading && !projects.length ? <ProjectsEmpty add={() => { resumeNewRun.current = false; setAddProject(true); }} /> : page === "inbox" ? <Inbox projects={projects} items={inboxState.items} snapshots={inboxSnapshots} busy={busy} loading={!inboxState.loaded} error={inboxState.error} refresh={() => { void inboxStore.refresh(); }} open={openInboxItem} decide={decideFull} approve={(id, proposalId) => { void action(() => client.approveTeam(id, proposalId, {})); }} answer={answer} decline={decline} resolve={resolve} /> : page === "teams" ? <TeamsPage presets={presets} agents={agents} busy={busy} error={error} save={(input, id) => action(async () => { const saved = id ? await client.updateTeam(id, input) : await client.createTeam(input); setWarnings(saved.warnings ?? []); setPresets(await client.teams()); })} remove={id => action(async () => { await client.deleteTeam(id); setPresets(await client.teams()); })} /> : page === "settings" ? <SettingsContent section={settingsSection} client={client} demo={client.demo} theme={theme} setTheme={setTheme} notifications={notifications} notificationPermission={notificationPermission} toggleNotifications={enabled => { void toggleNotifications(enabled); }} policy={defaults} setPolicy={saveDefaults} agents={agents} refreshing={refreshing} refreshAgents={() => { void refreshAgents(); }} runs={runs} rules={rules} busy={busy} createRule={input => action(async () => { await client.createPermissionRule(input); setRules(await client.permissionRules()); })} removeRule={id => { void action(async () => { await client.deletePermissionRule(id); setRules(await client.permissionRules()); }); }} /> : snapshot ? <>
+      {page === "runs" && !initialLoading && !projects.length ? <ProjectsEmpty add={() => setAddProject("draft")} /> : page === "runs" && draft ?
+        <NewSession key={draftKey} projects={projects} projectId={draft.projectId} selectProject={chooseDraftProject} addProject={() => setAddProject("draft")} agents={agents} presets={presets} defaults={defaults} create={create} busy={creating} client={client} error={createError} />
+        : page === "inbox" ? <Inbox projects={projects} items={inboxState.items} snapshots={inboxSnapshots} busy={busy} loading={!inboxState.loaded} error={inboxState.error} refresh={() => { void inboxStore.refresh(); }} open={openInboxItem} decide={decideFull} approve={(id, proposalId) => { void action(() => client.approveTeam(id, proposalId, {})); }} answer={answer} decline={decline} resolve={resolve} /> : page === "teams" ? <TeamsPage presets={presets} agents={agents} busy={busy} error={error} save={(input, id) => action(async () => { const saved = id ? await client.updateTeam(id, input) : await client.createTeam(input); setWarnings(saved.warnings ?? []); setPresets(await client.teams()); })} remove={id => action(async () => { await client.deleteTeam(id); setPresets(await client.teams()); })} /> : page === "settings" ? <SettingsContent section={settingsSection} client={client} demo={client.demo} theme={theme} setTheme={setTheme} notifications={notifications} notificationPermission={notificationPermission} toggleNotifications={enabled => { void toggleNotifications(enabled); }} policy={defaults} setPolicy={saveDefaults} agents={agents} refreshing={refreshing} refreshAgents={() => { void refreshAgents(); }} runs={runs} rules={rules} busy={busy} createRule={input => action(async () => { await client.createPermissionRule(input); setRules(await client.permissionRules()); })} removeRule={id => { void action(async () => { await client.deletePermissionRule(id); setRules(await client.permissionRules()); }); }} /> : snapshot ? <>
         <RunBar busy={busy} pause={() => { void action(async () => { await client.pauseRun(snapshot.run.id); }); }} resume={() => { void action(async () => { await client.resumeRun(snapshot.run.id); }); }} project={activeProject} openProject={() => { if (activeProject) selectProject(activeProject.id); }} key={snapshot.run.id} rename={title => action(() => client.patchRun(snapshot.run.id, { title }))} regenerate={() => action(() => client.regenerateTitle(snapshot.run.id))} snapshot={snapshot} tab={tab} setTab={setTab} detailsOpen={rightPanel === "details"} toggleDetails={() => dispatchPanel({ type: "toggle_details" })} />
         <div className="workspace-body"><section id="run-view" className="view-panel" role="tabpanel" aria-labelledby={`run-tab-${tab}`} aria-label={tab === "topology" ? "拓扑图" : tab === "timeline" ? "时间线" : tab === "team" ? "团队" : "会话"}>{(tab === "topology" || tab === "team") && proposals.map(proposal => <ProposalCard key={proposal.id} proposal={proposal} snapshot={snapshot} agents={agents} busy={busy} error={error} approve={request => { void action(() => client.approveTeam(snapshot.run.id, proposal.id, request)); }} reject={feedback => { void action(() => client.rejectTeam(snapshot.run.id, proposal.id, { feedback })); }} />)}<Suspense fallback={<Empty><div className="loading-orbit" />正在加载视图…</Empty>}>{tab === "topology" ? <Topology answer={answer} decline={decline} resolve={resolve} snapshot={snapshot} selected={inspected} now={now} inspect={setInspected} decide={decide} busy={busy} reassign={id => { setError(null); setReassignId(id); }} openTeam={() => setTab("team")} /> : tab === "timeline" ? <Timeline key={snapshot.run.id} snapshot={snapshot} inspect={setInspected} /> : tab === "team" ? <RunTeam snapshot={snapshot} busy={busy} add={() => { setError(null); setTeamDialog("add"); }} replace={member => { setError(null); setTeamDialog(member); }} remove={member => { void action(() => client.removeMember(snapshot.run.id, member.id)); }} save={() => { setError(null); setTeamDialog("save"); }} inspect={setInspected} /> : <Transcript refs={sessionRefs} showTopology={id => { setTab("topology"); setInspected(id); }} agents={agents} stopRun={() => { void action(async () => { await client.pauseRun(snapshot.run.id); }); }} resumeRun={() => { void action(async () => { await client.resumeRun(snapshot.run.id); }); }} answer={answer} decline={decline} busy={busy} projectName={activeProject?.name} snapshot={snapshot} store={store} items={state.items} itemStatus={state.itemStatus} nodeId={conversation || snapshot.run.rootNodeId} setNodeId={setConversation} now={now} inspect={setInspected} />}</Suspense></section>
           {rightPanel && <button className="right-panel-backdrop" aria-label="关闭侧栏" onClick={() => dispatchPanel({ type: "close" })} />}
@@ -230,8 +253,7 @@ export default function App({ client }: { client: BatonClient }) {
     {snapshot && teamDialog && (teamDialog === "save" ? <SavePresetDialog close={() => setTeamDialog(null)} busy={busy} error={error} submit={(name, description) => { void action(async () => { const saved = await client.saveTeam(snapshot.run.id, { name, description }); setWarnings(saved.warnings ?? []); setPresets(await client.teams()); setTeamDialog(null); }); }} /> : <MemberDialog agents={agents} member={teamDialog === "add" ? undefined : teamDialog} snapshot={snapshot} close={() => setTeamDialog(null)} busy={busy} error={error} submit={request => { void action(async () => { if (teamDialog === "add") { if (!("role" in request)) return; await client.addMember(snapshot.run.id, request); } else await client.replaceMember(snapshot.run.id, teamDialog.id, request); setTeamDialog(null); }); }} />)}
     {snapshot && reassignId && <ReassignDialog key={reassignId} agents={agents} snapshot={snapshot} delegationId={reassignId} busy={busy} error={error} close={() => setReassignId(null)} submit={request => { void action(async () => { await client.reassign(reassignId, request); setReassignId(null); }); }} />}
     {snapshot && cancelingRun && <CancelRunDialog snapshot={snapshot} busy={busy} error={error} close={() => { if (!busy) setCancelingRun(false); }} submit={request => { void action(async () => { await client.cancelRun(snapshot.run.id, request); setCancelingRun(false); }); }} />}
-    {addProject && <AddProject client={client} close={() => setAddProject(false)} added={async project => { await refreshProjects(); setNewRun(false); selectProject(project.id); setAddProject(false); if (resumeNewRun.current) { setNewRun(true); resumeNewRun.current = false; } }} />}
-    {newRun && <NewRun projects={projects} initialProjectId={currentProjectId} selectProject={rememberProject} addProject={() => { resumeNewRun.current = true; setAddProject(true); }} agents={agents} presets={presets} defaults={defaults} close={() => setNewRun(false)} create={create} busy={busy} client={client} error={error} />}
+    {addProject && <AddProject client={client} close={() => setAddProject(null)} added={async project => { await refreshProjects(); if (addProject === "draft") chooseDraftProject(project.id); else selectProject(project.id); setAddProject(null); }} />}
   </div></ImageContext></SessionNavProvider>;
 }
 

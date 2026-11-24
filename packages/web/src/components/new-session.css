@@ -1,0 +1,57 @@
+.new-session {
+  display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0;
+  background: var(--bg); font-family: var(--font-sans, inherit); container-type: inline-size;
+}
+.new-session-header { flex: none; display: flex; align-items: center; gap: 10px; padding: 12px 24px; border-bottom: 1px solid var(--border); color: var(--text-secondary); background: var(--surface); }
+.new-session-header h1 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-md, 14px); font-weight: 600; color: var(--text); }
+.new-session-header > span { flex: none; padding: 1px 6px; border: 1px solid var(--border); border-radius: 4px; font-size: var(--text-2xs, 11px); color: var(--text-dim); }
+.new-session-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; padding: 24px; }
+.new-session-config { flex: none; width: 100%; max-width: 650px; min-width: 0; margin: auto; padding: 0; border: none; }
+.new-session-intro h2 { margin: 0; font-size: clamp(20px, 3cqi, 26px); font-weight: 600; letter-spacing: -.035em; }
+.new-session-intro p { margin: 4px 0 18px; color: var(--text-secondary); font-size: var(--text-sm, 13px); }
+.new-session-project { display: flex; gap: 12px; align-items: flex-end; }
+.new-session-project .form-field { flex: 1; max-width: 310px; min-width: 0; margin: 0; }
+.new-session-project .text-button { display: inline-flex; align-items: center; gap: 4px; min-height: 34px; color: var(--text-secondary); font-size: var(--text-xs, 12px); }
+.new-session-modes { min-width: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 16px 0; border: none; padding: 0; }
+.new-session-modes legend { padding: 0 0 6px; font-weight: 500; }
+.new-session-modes button { min-width: 0; padding: 10px 12px; text-align: left; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface); }
+.new-session-modes button:hover { background: var(--surface-hover); }
+.new-session-modes button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.new-session-modes button > span { display: flex; align-items: center; gap: 6px; font-size: var(--text-sm, 13px); }
+.new-session-modes strong + svg { margin-left: auto; }
+.new-session-modes small { display: block; margin-top: 4px; color: var(--text-secondary); font-size: var(--text-2xs, 11px); }
+.new-session-config :is(.form-field, legend, h3, summary, .toggle-label) { color: var(--text-secondary); font-size: var(--text-xs, 12px); }
+.new-session-lead h3 { margin: 0; font-weight: 600; }
+.new-session-lead .agent-fields { margin: 6px 0 14px; }
+.new-session-lead .form-field { margin-bottom: 10px; }
+.new-session-config > details { margin: 0; padding: 0; border: none; border-top: 1px solid var(--border); }
+.new-session-config > details > summary { padding: 8px 0; cursor: pointer; font-weight: 500; overflow-wrap: anywhere; }
+.new-session-config > details > summary::marker { color: var(--text-dim); }
+.new-session-config > details > summary span { margin-left: 8px; font-size: var(--text-2xs, 11px); font-weight: 400; color: var(--text-dim); }
+.new-session-config > details[open] { padding-bottom: 12px; }
+.new-session-config > details > .muted { margin: 2px 0 10px; }
+.new-session-config > details.advanced-project-dir label { margin: 0; }
+.new-session-toggles { display: flex; flex-wrap: wrap; gap: 10px 24px; padding: 12px 0; border-top: 1px solid var(--border); }
+.new-session-toggles > div { flex: 1 1 210px; }
+.new-session-toggles p { margin: 3px 0 0; color: var(--text-dim); font-size: var(--text-2xs, 11px); }
+.new-session-config :is(.field-hint, .candidate-index, .tag, .seed-members p, .policy-row p, .new-run-lead-summary code, .new-run-lead-summary > div > span, .new-run-candidates li code) { font-size: var(--text-2xs, 11px); }
+.new-session-dock .form-errors { margin: 0; max-height: 15dvh; overflow: auto; color: var(--red); font-size: var(--text-xs, 12px); }
+.new-session-dock .composer textarea { display: block; width: 100%; padding: 2px 0; min-height: 44px; max-height: 18dvh; resize: none; field-sizing: content; border: 0; border-radius: 0; background: transparent; outline: none; font-size: var(--text-sm, 13px); }
+.new-session-dock .composer textarea::placeholder { color: var(--text-dim); }
+.new-session-dock .composer-footer { color: var(--text-secondary); font-size: var(--text-2xs, 11px); }
+.new-session-dock .composer-actions { gap: 10px; }
+@container (max-width: 560px) {
+  .new-session-scroll { padding: 18px 14px; }
+  .new-session-header { padding: 10px 14px; }
+  .new-session-modes { gap: 5px; }
+  .new-session-modes button { padding: 8px; }
+  .new-session-modes button > span { gap: 4px; }
+  .new-session-modes button > span > svg:first-child { display: none; }
+  .new-session-config .agent-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .new-session-config .advanced-policy-fields { grid-template-columns: 1fr; }
+  .new-session-config .new-run-candidates li { flex-wrap: wrap; }
+}
+@container (max-width: 390px) {
+  .new-session-input-hint span { display: none; }
+  .new-session-modes small { display: none; }
+}

@@ -31,6 +31,8 @@ export interface CreateRunRequest {
 
 export interface PatchRunRequest {
   title?: string;
+  /** true = archive, false = unarchive (DESIGN §4.9). Archiving a run whose status is "active" returns 409. */
+  archived?: boolean;
   policy?: Partial<Pick<RunPolicy, "autoApprove" | "maxDepth" | "maxActiveChildren" | "budget" | "teamApproval" | "maxTeamSize" | "stallMinutes" | "maxRoundsPerDelegation" | "leadReview">>;
 }
 

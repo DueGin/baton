@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { applyEvent, type GetItemsResponse, type RunEventEnvelope } from "@baton/protocol";
+import { applyEvent, type GetItemsResponse, type RunEventEnvelope, type SendMessageResponse } from "@baton/protocol";
 import { DemoClient } from "./demo/client.js";
 import { createScenario, replay } from "./demo/scenario.js";
-import { conversationRows, deliveryLabel } from "./lib/conversation.js";
+import { conversationRows } from "./lib/conversation.js";
 import { mergeItems, RunStore } from "./store.js";
 import { HttpError } from "./api.js";
 import { messageActionKey } from "./lib/conversation.js";
@@ -174,20 +174,29 @@ describe("optimistic sending", () => {
     expect(store.getSnapshot().outgoing[0]).toMatchObject({ state: "accepted", itemSeq: 20, delivery: "turn" });
     expect(send.mock.calls[0]![2]).toBe(send.mock.calls[1]![2]); store.close();
   });
-  it("does not mistake the server's transient queued record for an actual queued delivery", async () => {
+  it.each(["idle", "busy", "paused"] as const)("places a send to a %s node once, before and after HTTP/SSE reconciliation", async status => {
     const client = new DemoClient(() => base);
-    let accept: (value: { accepted: true; delivery: "turn"; itemSeq: number }) => void = () => undefined;
-    vi.spyOn(client, "send").mockImplementation(() => new Promise(resolve => { accept = resolve; }));
-    const store = new RunStore(client); await store.open("run-conversation");
-    const snapshot = store.getSnapshot().snapshot!; const nodeId = snapshot.run.rootNodeId;
-    const sending = store.sendMessage(nodeId, "start a new turn");
-    const clientId = store.getSnapshot().outgoing[0]!.clientId;
-    const event: RunEventEnvelope = { type: "item", runId: snapshot.run.id, seq: snapshot.lastSeq + 1, nodeId, itemSeq: 10, ts: new Date(base).toISOString(), itemTs: new Date(base).toISOString(), item: { type: "user_message", text: "start a new turn", delivery: "queued", clientId } };
-    store.apply(event);
-    store.apply({ ...event, seq: event.seq + 1, item: { type: "user_message", text: "start a new turn", delivery: "turn", clientId } });
-    accept({ accepted: true, delivery: "turn", itemSeq: 10 }); await sending;
-    const message = store.getSnapshot().outgoing[0]!;
-    expect(deliveryLabel(message.delivery, message.interrupted)).toBe("已送达"); store.close();
+    const reply = Promise.withResolvers<SendMessageResponse>(); vi.spyOn(client, "send").mockReturnValue(reply.promise);
+    const snapshot = await client.run("run-conversation"), nodeId = snapshot.run.rootNodeId;
+    if (status !== "busy") snapshot.turns = [];
+    if (status === "paused") snapshot.run.status = "paused";
+    vi.spyOn(client, "run").mockResolvedValue(snapshot);
+    const store = new RunStore(client); await store.open(snapshot.run.id); await store.loadItems(nodeId);
+    const text = "follow up", sending = store.sendMessage(nodeId, text), clientId = store.getSnapshot().outgoing[0]!.clientId;
+    const delivery = status === "idle" ? "turn" : "queued";
+    const locations = (): number[] => {
+      const { items, outgoing } = store.getSnapshot();
+      return [conversationRows, queuedRows].map(select => select(items[nodeId] ?? [], outgoing, nodeId).filter(({ row }) => row.item.type === "user_message" && row.item.clientId === clientId).length);
+    };
+    const expected = status === "idle" ? [1, 0] : [0, 1];
+    expect(locations()).toEqual(expected);
+    const ts = new Date(base).toISOString();
+    const event: RunEventEnvelope = { type: "item", nodeId, runId: snapshot.run.id, seq: store.getSnapshot().snapshot!.lastSeq + 1, itemSeq: 999, ts, itemTs: ts, turnId: delivery === "turn" ? "new-turn" : undefined, item: { type: "user_message", text, clientId, delivery } };
+    if (status !== "busy") { store.apply(event); expect(locations()).toEqual(expected); }
+    reply.resolve({ accepted: true, delivery, itemSeq: 999 }); await sending; expect(locations()).toEqual(expected);
+    if (status === "busy") { store.apply(event); expect(locations()).toEqual(expected); }
+    expect(store.getSnapshot().outgoing[0]).toMatchObject({ clientId, state: "accepted", acknowledged: true, delivery, itemSeq: 999 });
+    store.close();
   });
 
 });

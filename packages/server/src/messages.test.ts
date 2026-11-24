@@ -55,11 +55,27 @@ describe("human message delivery", () => {
     await until(() => server.store.node(root).status === "idle");
     const result = await server.kernel.message(root, "continue", "idle-client");
     expect(result.delivery).toBe("turn");
+    const deliveries = server.store.events(run.run.id).flatMap(event => event.type === "item" && event.nodeId === root && event.itemSeq === result.itemSeq && event.item.type === "user_message" ? [event.item.delivery] : []);
+    expect(deliveries).toEqual(["turn"]);
     const row = rows().find((r) => r.seq === result.itemSeq)!;
     expect(row.item).toEqual({ type: "user_message", text: "continue", clientId: "idle-client", delivery: "turn" });
     expect(row.turnId).toBe(server.store.snapshot(run.run.id).turns[1]!.id);
     expect(driver.sessions[0]!.prompts).toEqual(["start", "continue"]);
     expect(rows().filter((r) => r.item.type === "user_message" && r.item.text === "continue")).toHaveLength(1);
+  });
+
+  it("starts the first of two concurrent idle sends, queues the second, and drains in arrival order", async () => {
+    const hold = gate();
+    const { server, driver, root, run } = await setup({ script: async context => { if (context.turn === 2) await hold.wait(context); } });
+    await until(() => server.store.node(root).status === "idle");
+    const first = server.kernel.message(root, "first", "a"), second = server.kernel.message(root, "second", "b");
+    const [started, queued] = await Promise.all([first, second]);
+    expect(started.delivery).toBe("turn"); expect(queued.delivery).toBe("queued"); expect(started.itemSeq).toBeLessThan(queued.itemSeq);
+    const records = () => server.store.events(run.run.id).flatMap(event => event.type === "item" && event.item.type === "user_message" && event.item.clientId ? [[event.itemSeq, event.item.clientId, event.item.delivery]] : []);
+    expect(records()).toEqual([[started.itemSeq, "a", "turn"], [queued.itemSeq, "b", "queued"]]);
+    hold.release(); await until(() => server.store.node(root).turns === 3 && server.store.node(root).status === "idle");
+    expect(records().at(-1)).toEqual([queued.itemSeq, "b", "turn"]);
+    expect(driver.sessions[0]!.prompts).toEqual(["start", "first", "second"]);
   });
 
   it("records a message steered into a running turn", async () => {
