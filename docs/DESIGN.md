@@ -134,7 +134,8 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
    - Run 级开关 `autoApprove`：开启后，内核按策略自动批准，记为 `by: policy`。
    - 由父 agent 代为审批的功能放到 P2（工具 `respond_permission`）。
 7. **只读委派**：`readonly: true` 时，优先选该 provider 的只读或计划模式（Claude 用 `plan`，Codex 选只读沙箱的模式），并在任务书里写明"不准改文件"。
-8. **结束**：子节点交付后保持会话，以便追问。Run 结束或空闲超时（默认 30 分钟）后再 close。
+8. **结束**：子节点交付后保持会话，以便追问。Run 结束或空闲超时（默认 30 分钟）后再 close。会话里还有后台任务在跑（`DriverSession.hasBackgroundWork()` 为真，例如 Claude 的 `run_in_background`）时不 close，到时重新计时，因为 close 会杀掉后台任务、它结束时的唤醒也就没了。
+9. **agent 自发回合**：agent 可能在 baton 没发提示的情况下自己开始一轮，例如 Claude Code 的后台任务结束后自动唤醒。provider 发 `turn_started { origin: "agent" }`，内核把它收为一轮 `trigger: "agent"` 的回合：节点转 `running`，这一轮的思考、工具调用、回复照常落库和展示，结束时和普通回合一样收尾（采集结果、通知人、送达排队消息）。委派已经交付的节点，这一轮按旁路回合处理，不重开委派、不改结果。内核正要开新一轮时恰好撞上 agent 自发回合的，人或内核的提示改为排队，不报错。
 
 ### 4.4 根节点和人工介入
 
@@ -263,6 +264,8 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
 - `PATCH {archived:false}`：发 `run.updated`，`patch:{archived:false}`（保留 `archivedAt`），任何状态都可以。
 - 归档只影响展示：不删除、不停止任何东西，归档的 Run 仍可打开、发消息。`GET /api/runs` 照常返回归档的 Run（`RunSummary.archived`），由控制台决定怎么显示。
 - 控制台：项目下的会话列表默认不显示归档的 Run；项目末尾有一个折叠的「已归档会话 N」，展开后可以打开或取消归档。
+- 会话列表每行的成员一栏（参考 magpie 的路由组样式）：用一排**互相叠压的圆形图标**显示这个会话里所有 agent 用的模型（`RunSummary.models`，按模型的厂商图标，未知厂商退回 agent 图标），根节点在最前，**最多 4 个**，多出的用一个「+N」圆收尾；悬停显示完整的「agent · 模型」列表。后面仍写节点数（「N agents」）。
+- Run 顶栏左侧的项目链接：项目名和 git 分支都单行显示，放不下用省略号截断，不换行；悬停显示完整的项目名、路径和分支。
 
 ### 4.8 后台进程登记
 

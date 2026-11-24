@@ -15,7 +15,12 @@ export function createScenario(base = Date.now() - 86000, id = "run-demo"): Demo
   const items: Record<string, ItemRecord[]> = {};
   const itemCounters: Record<string, number> = {};
   const delegations = new Map<string, DelegationRecord>();
-  const memberFor: Record<string, TeamMember> = Object.fromEntries(([['api', 'backend', 'codex', '搜索 API、中文索引与测试'], ['ui', 'frontend', 'claude', 'Command Palette 和键盘交互'], ['review', 'reviewer', 'pi', '安全审查与边界验证'], ['index', 'indexing', 'pi', '索引环境验证']] as const).map(([key, role, agentId, responsibilities]) => [key, { id: `${id}:m-${key}`, role, agentId, model: demoAgents.find(agent => agent.id === agentId)?.models[0]?.id, responsibilities, status: "active", addedBy: "lead", addedAt: at(6), reason: `按 ${role} 职责选择合适的 agent` }]));
+  const memberFor: Record<string, TeamMember> = Object.fromEntries(([
+    ["api", "backend", "codex", "搜索 API、中文索引与测试", "gpt-5.3-codex"],
+    ["ui", "frontend", "claude", "Command Palette 和键盘交互", "claude-haiku-4-5"],
+    ["review", "reviewer", "pi", "安全审查与边界验证", "gemini-2.5-pro"],
+    ["index", "indexing", "pi", "索引环境验证", "qwen3-max"],
+  ] as const).map(([key, role, agentId, responsibilities, model]) => [key, { id: `${id}:m-${key}`, role, agentId, model, responsibilities, status: "active", addedBy: "lead", addedAt: at(6), reason: `按 ${role} 职责选择合适的 agent` }]));
   const rationale = "把 API、界面和独立审查分开并行推进；索引环境单独验证，避免影响主线。";
   const team: TeamRecord = { source: "dynamic", rationale, members: Object.values(memberFor), proposals: [], changes: [{ kind: "formed", by: "lead", at: at(6), reason: rationale }], updatedAt: at(6) };
   function emit(offset: number, event: RunEvent): void { events.push({ ...event, runId: id, seq: events.length + 1, ts: at(offset) }); }
@@ -28,7 +33,7 @@ export function createScenario(base = Date.now() - 86000, id = "run-demo"): Demo
   }
   function node(offset: number, key: string, title: string, agentId: string, parent: string | null): void {
     const member = memberFor[key];
-    const record: NodeRecord = { id: nid(key), runId: id, parentNodeId: parent ? nid(parent) : null, delegationId: parent ? `d-${nid(key)}` : null, depth: parent === "api" ? 2 : parent ? 1 : 0, agentId, role: member?.role, memberId: member?.id, model: demoAgents.find(agent => agent.id === agentId)?.models[0]?.id, modeId: key === "review" ? "plan" : "default", title, cwd: run.cwd, status: "running", activity: "思考中…", createdAt: at(offset), updatedAt: at(offset), usage: emptyUsage(), turns: 1 };
+    const record: NodeRecord = { id: nid(key), runId: id, parentNodeId: parent ? nid(parent) : null, delegationId: parent ? `d-${nid(key)}` : null, depth: parent === "api" ? 2 : parent ? 1 : 0, agentId, role: member?.role, memberId: member?.id, model: member?.model ?? demoAgents.find(agent => agent.id === agentId)?.models[0]?.id, modeId: key === "review" ? "plan" : "default", title, cwd: run.cwd, status: "running", activity: "思考中…", createdAt: at(offset), updatedAt: at(offset), usage: emptyUsage(), turns: 1 };
     emit(offset, { type: "node.created", node: record });
     if (parent) {
       const delegation: DelegationRecord = { id: `d-${nid(key)}`, runId: id, kind: "delegate", fromNodeId: nid(parent), toNodeId: nid(key), brief: { title, task: key === "api" ? "实现 /api/search 接口与 SQLite FTS5 索引，补充单元测试。" : key === "ui" ? "实现全局搜索 Command Palette，支持键盘操作与搜索结果分组。" : key === "review" ? "独立审查搜索输入校验、SQL 注入和访问范围。" : "检查 FTS5 tokenizer 行为，提供中文搜索的可行方案。", context: "项目使用 React 19 + Node.js；保持现有 API 兼容。", acceptance: ["现有测试通过", "提供变更清单和验证结果"], readonly: key === "review" || key === "index", outputSchema: { type: "object", properties: { summary: { type: "string" } } } }, status: "running", round: 1, createdAt: at(offset), startedAt: at(offset), subtreeUsage: emptyUsage() };

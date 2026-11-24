@@ -49,7 +49,11 @@ export type PromptInput = string | PromptPart[];
 
 export type DriverEvent =
   | { type: "session"; sessionId: string }
-  | { type: "turn_started"; turnId: string }
+  /**
+   * `origin: "agent"`: the agent began this turn itself, without startTurn (e.g. Claude Code woke up
+   * because a background task finished). The kernel adopts it as a turn with trigger "agent".
+   */
+  | { type: "turn_started"; turnId: string; origin?: "agent" }
   | { type: "turn_completed"; turnId: string; usage?: Usage }
   | { type: "turn_failed"; turnId: string; error: string; diagnostic?: string }
   | { type: "turn_canceled"; turnId: string; reason: string }
@@ -112,6 +116,11 @@ export interface DriverSession {
    * expanded by the driver before it reaches the agent.
    */
   listCommands?(): Promise<AgentCommand[]>;
+  /**
+   * True while the agent has background work that will wake it later (an agent-origin turn will
+   * follow). The kernel must not close such a session on idle. Optional; omitted = false.
+   */
+  hasBackgroundWork?(): boolean;
 }
 
 export interface AgentDriver {

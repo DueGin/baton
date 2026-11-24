@@ -54,8 +54,9 @@ export function AgentIcon({ agent, size = 18 }: { agent: string; size?: number }
   const initial = (agent.replace(/^[^a-z0-9]+/i, "")[0] ?? "?").toUpperCase();
   return <span className="agent-vendor-icon agent-monogram" data-agent-vendor="generic" aria-hidden="true" style={{ width: size, height: size, fontSize: `max(var(--text-2xs), ${Math.round(size * 0.62)}px)` }}>{initial}</span>;
 }
-/** Vendor mark for a model, or nothing when the vendor is unknown. */
-export function ModelIcon({ model, size = 12 }: { model?: string; size?: number }) {
+/** Vendor mark for a model, with an optional agent mark when the model icon is unavailable. */
+export function ModelIcon({ model, size = 12, fallbackAgent }: { model?: string; size?: number; fallbackAgent?: string }) {
   const vendor = model ? modelVendor(model) : undefined; const svg = vendor ? vendorSvg[vendor] : undefined;
-  return svg && vendor ? <span className="model-icon" title={model}><Inline svg={svg} size={size} vendor={vendor} /></span> : null;
+  if (svg && vendor) return <span className="model-icon" title={model}><Inline svg={svg} size={size} vendor={vendor} /></span>;
+  return fallbackAgent !== undefined ? <AgentIcon agent={fallbackAgent} size={size} /> : null;
 }

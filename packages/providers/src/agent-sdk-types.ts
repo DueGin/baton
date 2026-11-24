@@ -267,6 +267,8 @@ export type AgentStreamEvent = {
 } | {
     type: "turn_started";
     turnId: string;
+    /** baton: "agent" when the agent began this turn itself (no startTurn call), e.g. a background task finished. */
+    origin?: "agent";
 } | {
     type: "turn_completed";
     turnId: string;
@@ -336,6 +338,11 @@ export interface AgentSession {
     }>;
     /** baton: commands accepted as `/name args` prompt text (same shape as @baton/protocol AgentCommand). */
     listCommands?(): Promise<AgentSlashCommand[]>;
+    /**
+     * baton: true while the agent has background work that will wake it up later (e.g. Claude Code
+     * `run_in_background` tasks). Closing the session would kill that work and the wake-up.
+     */
+    hasBackgroundWork?(): boolean;
     close(): Promise<void>;
 }
 /** baton: one slash command / skill / prompt. `name` has no leading "/". */

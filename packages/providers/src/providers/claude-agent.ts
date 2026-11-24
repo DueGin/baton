@@ -126,6 +126,7 @@ class ClaudeSession extends ProviderSession {
     private closing?: Promise<void>;
     private queue = new PromptQueue();
     private abort = new AbortController();
+    private backgroundWork = false;
     private canceling = false;
     private unstartedMessages = new Set<string>();
     private sawText = false;
@@ -165,6 +166,7 @@ class ClaudeSession extends ProviderSession {
                     if (headers !== undefined) env[key] = headers;
                 }
                 const child = spawnProcess(options.command.length > 1 ? options.command[0]! : spawnOptions.command, options.command.length > 1 ? [...options.command.slice(1), ...spawnOptions.args] : spawnOptions.args, { cwd: spawnOptions.cwd, env, signal: spawnOptions.signal });
+                this.backgroundWork = false;
                 this.child = child;
                 return child;
             },
@@ -178,6 +180,7 @@ class ClaudeSession extends ProviderSession {
         this.query = (options.queryFactory ?? query)({ prompt: this.queue, options: sdkOptions });
         void this.pump();
     }
+    hasBackgroundWork(): boolean { return !this.closed && this.backgroundWork; }
     async listCommands(): Promise<AgentSlashCommand[]> {
         return commandDeadline(async () => normalizeCommands((await this.query.supportedCommands()).map(command => ({ ...command, kind: "command" }))), []);
     }
@@ -210,7 +213,17 @@ class ClaudeSession extends ProviderSession {
         // The host closes this session and resumes the fork (or opens a fresh one) for the next message.
         this.sessionId = sessionId; this.lastAssistant = target.forkAt;
     }
-    protected async launchTurn(prompt: AgentPromptInput): Promise<void> { this.turnPoint = await this.pointBeforePrompt(); const content = typeof prompt === "string" ? prompt : await claudePromptContent(prompt); this.canceling = false; this.sawText = false; this.streamedBlocks.clear(); this.unstartedMessages.add(this.queue.push(content)); }
+    private resetTurnState(): void {
+        this.canceling = false;
+        this.sawText = false;
+        this.streamedBlocks.clear();
+    }
+    protected async launchTurn(prompt: AgentPromptInput): Promise<void> {
+        this.turnPoint = await this.pointBeforePrompt();
+        const content = typeof prompt === "string" ? prompt : await claudePromptContent(prompt);
+        this.resetTurnState();
+        this.unstartedMessages.add(this.queue.push(content));
+    }
     async steerActiveTurn(prompt: AgentPromptInput): Promise<boolean> { if (!this.activeTurn)
         return false; if (this.canceling) return false; const content = typeof prompt === "string" ? prompt : await claudePromptContent(prompt); if (!this.activeTurn || this.canceling || this.closed) return false; this.unstartedMessages.add(this.queue.push(content, "next")); this.timeline({ type: "user_message", text: promptText(prompt) }); return true; }
     private async pump(): Promise<void> {
@@ -248,8 +261,28 @@ class ClaudeSession extends ProviderSession {
             }
             return;
         }
-        if (!this.activeTurn)
+        if (message.type === "system" && message.subtype === "background_tasks_changed") {
+            if (Array.isArray(message.tasks)) this.backgroundWork = message.tasks.length > 0;
             return;
+        }
+        const taskNotification = message.type === "system" && message.subtype === "task_notification";
+        const userContent = message.type === "user" ? record(message.message).content : undefined;
+        if (!this.activeTurn) {
+            const isLiveAssistant = message.type === "assistant" && message.aborted !== true;
+            const hasToolResults = message.isReplay !== true && Array.isArray(userContent) && userContent.some(block => record(block).type === "tool_result");
+            if (!taskNotification && message.type !== "stream_event" && !isLiveAssistant && !hasToolResults)
+                return;
+            this.resetTurnState();
+            this.turnPoint = null;
+            if (!this.beginAgentTurn()) return;
+        }
+        if (taskNotification) {
+            if (message.skip_transcript !== true) {
+                const title = message.status === "failed" ? "后台任务失败" : message.status === "stopped" ? "后台任务已停止" : "后台任务完成";
+                this.timeline({ type: "notification", level: message.status === "failed" ? "warning" : "info", message: `${title}：${text(message.summary)}` });
+            }
+            return;
+        }
         if (message.type === "stream_event") {
             const event = record(message.event), delta = record(event.delta);
             if (event.type === "message_start")
@@ -285,9 +318,8 @@ class ClaudeSession extends ProviderSession {
             this.streamedBlocks.clear();
         }
         if (message.type === "user") {
-            const content = record(message.message).content;
-            if (Array.isArray(content)) {
-                const results = content.map(record).filter(block => block.type === "tool_result" && this.tools.has(text(block.tool_use_id)));
+            if (Array.isArray(userContent)) {
+                const results = userContent.map(record).filter(block => block.type === "tool_result" && this.tools.has(text(block.tool_use_id)));
                 const images = this.options.saveImage ? results.map(block => toolResultImages(block, message.tool_use_result)) : [];
                 if (images.some(list => list.length))
                     return (async () => {
@@ -345,7 +377,8 @@ class ClaudeSession extends ProviderSession {
         this.tools.delete(id);
     }
     async interrupt(): Promise<void> {
-        if (!this.activeTurn)
+        const turnId = this.activeTurn;
+        if (!turnId)
             return;
         this.canceling = true;
         this.clearPermissions();
@@ -364,8 +397,9 @@ class ClaudeSession extends ProviderSession {
             // Close before interrupt if recall is unavailable: the CLI could otherwise
             // dequeue a surviving steer between its result and our close call.
             if (!safe) { await this.close(); return; }
+            if (this.activeTurn !== turnId) return;
             await this.query.interrupt();
-            await this.waitForTurn();
+            if (this.activeTurn === turnId) await this.waitForTurn();
         }
         catch {
             await this.close();
@@ -375,6 +409,7 @@ class ClaudeSession extends ProviderSession {
         if (this.closing)
             return this.closing;
         this.closed = true;
+        this.backgroundWork = false;
         this.finish("canceled");
         this.queue.close();
         this.abort.abort();

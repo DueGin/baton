@@ -18,4 +18,12 @@ describe("session timeline rendering", () => {
     expect(html.match(/data-pause-band="normal"/g)).toHaveLength(2); expect(html.match(/data-pause-band="compressed"/g)).toHaveLength(1);
     expect(html).toContain("已暂停"); expect(html).toContain("resume"); expect(html).toContain('patternTransform="rotate(40)"');
   });
+  it("renders the agent wake-up turn and its legend in a distinct color", () => {
+    const snapshot = idleScenario(Date.parse("2026-11-10T07:00:00Z"));
+    const html = renderToStaticMarkup(<Timeline snapshot={snapshot} inspect={() => undefined} />);
+    const swatch = html.match(/<i style="background:([^"]+)"><\/i>agent/)?.[1];
+    expect(swatch).toBeDefined();
+    expect(html.match(/<rect data-turn-trigger="agent"[^>]+>/)?.[0]).toContain(`fill="${swatch}"`);
+    expect(html.match(new RegExp(`<i style="background:${swatch}"`, "g"))).toHaveLength(1);
+  });
 });
