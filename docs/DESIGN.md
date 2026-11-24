@@ -180,6 +180,7 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
 - **提示词**：
   - 主导者：先组队再派活，团队越小越好。只有简单问题或单个小文件的修改才由它自己做（也就是不组队）。有成员失败、太慢或不合适时，主导者主动换人或改派。
   - 成员：写明它的角色、职责，以及团队里其他人分别负责什么，避免撞文件。
+  - **原生 subagent**：所有被委派的 agent（非根节点，任何协作方式、任何深度，包括已到最大委派深度的）的系统提示都明确写上：可以自由使用自己 CLI 自带的 subagent（Claude Code 的 Agent/Task、codex 的子 agent 等）做调研、检索或并行，这不算 baton 委派，不占委派深度和并发名额，也不受团队角色 / 预设"委派必须带角色"规则的限制；但交付结果、文件归属和验收仍由它自己负责。到达最大深度时的"自己完成"也要说明原生 subagent 不受影响。
 
 ### 4.6 人在回路：收件箱、提问、升级、审批规则
 
@@ -256,6 +257,12 @@ interrupted：daemon 重启时，正在运行的节点会被标成这个状态�
 - **项目汇总**（`ProjectSummary`）：Run 数、活跃 Run 数、待处理数、后台进程数、最近一次 Run 的时间、git 分支、目录是否还存在。git 分支用 `git -C <path> branch --show-current` 查，超时 1 秒，结果缓存 10 秒。
 - **目录浏览**：`GET /api/fs/dirs?path=…`，给"添加项目"用。只列目录，不读任何文件内容，默认不列隐藏目录。每一项标明是不是 git 仓库、是不是已经登记的项目。和其他 API 一样要 token 鉴权。
 - **归档**：`PATCH archived:true`。有活跃 Run 的项目不能归档，返回 409。不提供硬删除。
+
+**Run 归档**（左栏会话右键菜单 → 归档 / 取消归档）：
+- `PATCH /api/runs/:id {archived:true}`：发 `run.updated`，`patch:{archived:true, archivedAt:now}`。Run 状态为 `active`（有 agent 正在跑）时返回 409，提示先暂停或等它结束。
+- `PATCH {archived:false}`：发 `run.updated`，`patch:{archived:false}`（保留 `archivedAt`），任何状态都可以。
+- 归档只影响展示：不删除、不停止任何东西，归档的 Run 仍可打开、发消息。`GET /api/runs` 照常返回归档的 Run（`RunSummary.archived`），由控制台决定怎么显示。
+- 控制台：项目下的会话列表默认不显示归档的 Run；项目末尾有一个折叠的「已归档会话 N」，展开后可以打开或取消归档。
 
 ### 4.8 后台进程登记
 
@@ -449,7 +456,7 @@ interface BatonDesktopBridge {
 
 **网络**：所有请求走 Electron 的 `net.fetch`（Chromium 网络栈，会用系统代理）；Node 的 `fetch` 不认系统代理，只开了系统代理、没开 TUN 的用户会直连 GitHub 而失败。
 
-**检查**：先问 API `GET https://api.github.com/repos/DueGin/baton/releases/latest`（有更新说明和文件大小）。API 不可用时——被限流（匿名按出口 IP 每小时 60 次，共享代理出口很容易用光）、连不上、5xx——改用 `https://github.com/DueGin/baton/releases/latest/download/SHA256SUMS.txt`：这是最新 Release 自己的校验文件，不经过 API、不占额度。文件里本机对应的安装包名（`baton-<版本>-mac-arm64.zip`）给出版本号，它的哈希就是期望值，下载地址按 `releases/download/v<版本>/<文件名>` 拼出来；这种情况下没有更新说明和大小。两条路都失败时，错误里分别说明 API 和备用地址的原因。仓库是公开的，匿名即可；令牌是可选的（可以放宽 API 限流，私有仓库则必须要）。设置页「更新」里填的令牌写进 `<userData>/desktop-settings.json`（0600），也可以不填，改用登录 shell 里的 `GITHUB_TOKEN` / `GH_TOKEN`。令牌只在主进程使用，不会回到页面；接口返回 401/404 时状态里带 `needsToken`，界面提示填写。
+**检查**：先问 API `GET https://api.github.com/repos/DueGin/baton/releases/latest`（有更新说明和文件大小）。API 不可用时——被限流（匿名按出口 IP 每小时 60 次，共享代理出口很容易用光）、连不上、5xx——改用 `https://github.com/DueGin/baton/releases/latest/download/SHA256SUMS.txt`：这是最新 Release 自己的校验文件，不经过 API、不占额度。文件里本机对应的安装包名（`baton-<版本>-mac-arm64.zip`）给出版本号，它的哈希就是期望值，下载地址按 `releases/download/v<版本>/<文件名>` 拼出来；这种情况下没有更新说明和大小。两条路都失败时，错误里分别说明 API 和备用地址的原因。仓库是公开的，匿名即可；令牌是可选的（可以放宽 API 限流，私有仓库则必须要）。设置页「更新」不再提供令牌输入；需要时在登录 shell 里设置 `GITHUB_TOKEN` / `GH_TOKEN`（以前保存在 `<userData>/desktop-settings.json` 的令牌仍会读取）。令牌只在主进程使用，不会回到页面；接口返回 401/404 时状态里带 `needsToken`，界面提示在登录 shell 里设置 `GITHUB_TOKEN` / `GH_TOKEN`。
 
 **状态机**（`UpdateStatus`，主进程持有，每次变化通过 `baton:update-status` 推给页面，页面同时可以在挂载时拉一次当前状态）：
 
@@ -496,7 +503,7 @@ interface BatonDesktopBridge {
 | `baton:update-token` | 保存或清除令牌 |
 | `baton:update-reveal` | 在 Finder / 资源管理器中显示已下载的安装包 |
 
-页面（设置 → 更新）展示当前版本、检查、更新说明、下载进度、安装并重启，以及令牌输入。浏览器里没有这个桥，显示一行说明：浏览器版随守护进程一起更新。
+页面（设置 → 更新）展示当前版本、检查、更新说明、下载进度、安装并重启（不含令牌输入）。浏览器里没有这个桥，显示一行说明：浏览器版随守护进程一起更新。
 
 
 ### 4.16 会话之间通信（Agent ID）
@@ -605,6 +612,10 @@ interface BatonDesktopBridge {
 ## 8. 控制台（web）
 
 左栏是 Run 列表，加一个"新建 Run"按钮。主区是当前 Run，有三个视图标签，右侧是可开关的节点详情抽屉。
+
+- **新建 Run = 空白会话**：点"新建 Run"（或项目行的 ＋）不再弹窗，而是在主区打开一个空白会话（草稿，还没有 Run）。左栏在该项目下显示一条选中的"新会话"临时行。空白会话中间是配置区：项目、协作方式（动态组队 / 预设团队 / 独立）、Lead 或预设、候选成员、组队确认、自动批准、子目录与高级策略；底部是和普通会话一样的输入框。发送第一条消息才调用 `POST /api/runs` 创建 Run，然后切到这个 Run 的会话标签。切到别的会话或页面即丢弃草稿。
+- **会话右键菜单**：左栏每条会话可以右键（或键盘 Shift+F10 / 菜单键）打开菜单：重命名、复制会话 ID、归档 / 取消归档（§4.9）。
+- **字体**：界面用 Geist（随应用打包，OFL），中文回落到 PingFang SC / Microsoft YaHei；等宽用 "SF Mono", SFMono-Regular, ui-monospace, Menlo…。正文 13–14px，任何可读文字不小于 11px。
 
 1. **拓扑图**（`@xyflow/react` + `@dagrejs/dagre`，自上而下的树形布局）：
    - 节点卡片显示：provider 色标和名称、标题、模型、状态徽章（运行中有呼吸动画）、当前活动（最近一个运行中的工具或"思考中"）、已用时长、token 和费用、子节点数。

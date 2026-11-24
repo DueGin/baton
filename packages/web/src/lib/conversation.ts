@@ -88,7 +88,8 @@ export function conversationRows(rows: ItemRecord[], outgoing: OutgoingMessage[]
   }
   for (const [id, group] of starting) if (!emitted.has(id)) result.push(...group);
   for (const group of steered.values()) result.push(...group);
-  return placeSteered(result, anchored);
+  const provisional = (entry: ConversationEntry) => entry.outgoing !== undefined && !entry.outgoing.acknowledged && !entry.row.turnId;
+  return [...placeSteered(result.filter(entry => !provisional(entry)), anchored), ...result.filter(provisional)];
 }
 
 function placeSteered(base: ConversationEntry[], anchored: Array<{ entry: ConversationEntry; after: number }>): ConversationEntry[] {
@@ -124,7 +125,7 @@ function queuePosition(row: ItemRecord): number { return row.item.type === "user
 export function queuedRows(rows: ItemRecord[], outgoing: OutgoingMessage[], nodeId: string, order?: number[]): ConversationEntry[] {
   const rank = new Map(order?.map((seq, index) => [seq, index]));
   return messageRows(rows, outgoing, nodeId).filter(({ row }) => row.item.type === "user_message" && row.item.delivery === "queued")
-    .sort((a, b) => (rank.get(a.row.seq) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.row.seq) ?? Number.MAX_SAFE_INTEGER) || queuePosition(a.row) - queuePosition(b.row) || Date.parse(a.row.ts) - Date.parse(b.row.ts) || a.row.seq - b.row.seq);
+    .sort((a, b) => (rank.get(a.row.seq) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.row.seq) ?? Number.MAX_SAFE_INTEGER) || queuePosition(a.row) - queuePosition(b.row) || Date.parse(a.row.ts) - Date.parse(b.row.ts) || (a.row.seq > 0 && b.row.seq > 0 ? a.row.seq - b.row.seq : 0));
 }
 
 /** Move to a slot in the original list (0 = before first, length = after last). */

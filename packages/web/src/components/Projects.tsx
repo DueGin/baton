@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { prTone } from "../lib/pull-requests.js";
-import type { PullRequestRecord, ListDirsResponse, ProjectRecord, ProjectSummary, RunSummary } from "@baton/protocol";
+import type { PatchRunRequest, PullRequestRecord, ListDirsResponse, ProjectRecord, ProjectSummary, RunSummary } from "@baton/protocol";
 import type { BatonClient } from "../api.js";
 import { groupProjects, pathBasename, readCollapsedProjects, saveCollapsedProjects } from "../lib/projects.js";
 import { errorText } from "../store.js";
 import { agentColors, cost, statusLabels } from "../lib/derive.js";
 import { CopyButton } from "./CopyButton.js";
+import { ContextMenu, type ContextMenuEntry } from "./ContextMenu.js";
 import { Empty, Icon } from "./common.js";
 import { Modal } from "./TeamForms.js";
 import { desktopBridge } from "../desktop.js";
@@ -45,22 +46,103 @@ export interface ProjectGroupsProps {
   projects: ProjectSummary[]; runs: RunSummary[]; runId: string | null; currentId: string | null; page: string; reveal: { id: string; serial: number } | null;
   choose: (id: string) => void; selectProject: (id: string) => void; newRun: (projectId?: string) => void; add: () => void; canCreate: boolean;
   mutate: (id: string, request: { name?: string; archived?: boolean }) => Promise<void>; loading: boolean;
+  mutateRun?: (id: string, request: PatchRunRequest) => Promise<void>;
+  draftProjectId?: string | null;
 }
-export function ProjectGroups({ pullRequests = [], projects, runs, runId, currentId, page, reveal, choose, selectProject, newRun, add, canCreate, mutate, loading }: ProjectGroupsProps) {
+function ArchivedRuns({ runs, renderRun }: { runs: RunSummary[]; renderRun: (run: RunSummary) => React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  if (!runs.length) return null;
+  return <div className="project-archived-runs">
+    <button type="button" className="project-archived-runs-toggle" aria-expanded={open} onClick={() => setOpen(value => !value)}><span aria-hidden="true">{open ? "▾" : "▸"}</span>已归档会话 {runs.length}</button>
+    {open && runs.map(renderRun)}
+  </div>;
+}
+export function ProjectGroups({ pullRequests = [], projects, runs, runId, currentId, page, reveal, choose, selectProject, newRun, add, canCreate, mutate, loading, mutateRun, draftProjectId }: ProjectGroupsProps) {
   const collapsed = useSyncExternalStore(subscribeCollapsed, collapsedSnapshot, collapsedSnapshot); const setCollapsed = setCollapsedState; const [archivedOpen, setArchivedOpen] = useState(false);
   const [editing, setEditing] = useState<string>(); const [name, setName] = useState(""); const [archiving, setArchiving] = useState<ProjectSummary>(); const [working, setWorking] = useState(false); const [error, setError] = useState<string>();
+  const [runMenu, setRunMenu] = useState<{ id: string; x: number; y: number; trigger: HTMLButtonElement }>();
+  const [runEdit, setRunEdit] = useState<{ id: string; title: string }>();
+  const [runSaving, setRunSaving] = useState(false);
+  const restoreRunFocus = useRef<string>(undefined);
   const groups = groupProjects(projects, runs);
   useEffect(() => { if (!reveal) return; setCollapsed(current => { const next = new Set(current); next.delete(reveal.id); return next; }); if (projects.some(project => project.id === reveal.id && project.archived)) setArchivedOpen(true); }, [reveal]);
-  const toggle = (id: string) => { selectProject(id); setCollapsed(current => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; }); };
+  const toggle = (id: string) => { selectProject(id); if (id === draftProjectId) return; setCollapsed(current => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; }); };
   const update = async (id: string, request: { name?: string; archived?: boolean }): Promise<boolean> => { setWorking(true); setError(undefined); try { await mutate(id, request); return true; } catch (cause) { setError(errorText(cause)); return false; } finally { setWorking(false); } };
-  const runRow = (run: RunSummary) => <button key={run.id} title={run.title} className={`run-list-item ${runId === run.id && page === "runs" ? "selected" : ""}`} onClick={() => choose(run.id)}><div className="run-list-heading">{run.status === "paused" ? <span className="run-paused-icon" title="已暂停"><Icon name="pause" size={11} /></span> : <i className={`run-dot status-${run.status}`} />}<span>{run.title}</span>{run.titleSource === "generated" && <span className="generated-title-mark" title="由标题模型命名">✦</span>}{run.pendingTotal > 0 && <span className="permission-count">{run.pendingTotal}</span>}</div><div className="run-list-meta"><span className="run-agent-dots">{run.agents.map(agent => <i key={agent} style={{ background: agentColors[agent] ?? "#758799" }} title={agent} />)}{run.nodeCount} agents</span><span>{cost(run.usage.costUsd)}</span></div><div className="run-list-bottom">{(run.backgroundCount ?? 0) > 0 && <span className="run-background-count" title={`${run.backgroundCount} 个后台进程`}><Icon name="server" size={11} />{run.backgroundCount}</span>}{(run.openPrCount ?? 0) > 0 && <span className={`run-pr-count pr-tone-${prTone(pullRequests.filter(pr => pr.runId === run.id))}`} title="Open / Draft PR">⑂ {run.openPrCount} PR</span>}<span>{statusLabels[run.status]}</span><span>{new Date(run.updatedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</span></div></button>;
-  const group = ({ project, runs: children }: ReturnType<typeof groupProjects>[number]) => <section key={project.id} data-project-id={project.id} className={`project-group${project.id === currentId ? " is-current" : ""}`}><div className="project-group-header">
-    {editing === project.id ? <form onSubmit={event => { event.preventDefault(); if (name.trim()) void update(project.id, { name: name.trim() }).then(ok => { if (ok) setEditing(undefined); }); }}><input autoFocus aria-label="重命名项目" value={name} disabled={working} onChange={event => setName(event.target.value)} onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); setEditing(undefined); } }} /><button className="icon-button" disabled={working || !name.trim()} aria-label="保存项目名称"><Icon name="check" size={12} /></button></form> : <button className="project-group-title" title={`${project.name}\n${project.path}`} aria-expanded={!collapsed.has(project.id)} onClick={() => toggle(project.id)}><span>{collapsed.has(project.id) ? "▸" : "▾"}</span><Icon name="folder" size={13} /><strong>{project.name}</strong></button>}
+  const updateRun = async (id: string, request: PatchRunRequest): Promise<boolean> => {
+    if (!mutateRun) return false;
+    setError(undefined);
+    try { await mutateRun(id, request); return true; }
+    catch (cause) { setError(errorText(cause)); return false; }
+  };
+  const endRename = (id: string) => { restoreRunFocus.current = id; setRunEdit(undefined); };
+  const renameRun = async (id: string, title: string) => {
+    setRunSaving(true);
+    try { if (await updateRun(id, { title })) endRename(id); }
+    finally { setRunSaving(false); }
+  };
+  const copyRun = async (id: string) => {
+    setError(undefined);
+    try { await navigator.clipboard.writeText(id); }
+    catch (cause) { setError(`复制会话 ID 失败：${errorText(cause)}`); }
+  };
+  const runRow = (run: RunSummary) => {
+    const selected = !draftProjectId && runId === run.id && page === "runs";
+    const className = `run-list-item${selected ? " selected" : ""}${run.archived ? " is-archived" : ""}`;
+    if (mutateRun && runEdit?.id === run.id) return <form key={run.id} className={`${className} run-rename-form`} onSubmit={event => {
+      event.preventDefault();
+      if (!runSaving && runEdit.title.trim()) void renameRun(run.id, runEdit.title.trim());
+    }}><div className="run-list-heading"><input autoFocus aria-label="重命名会话" value={runEdit.title} readOnly={runSaving} onFocus={event => event.currentTarget.select()}
+      onChange={event => setRunEdit({ id: run.id, title: event.target.value })}
+      onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); if (!runSaving) endRename(run.id); } }} /></div></form>;
+    return <button key={run.id} type="button" title={run.title} className={className} aria-current={selected ? true : undefined} aria-haspopup="menu" aria-expanded={runMenu?.id === run.id} onClick={() => choose(run.id)}
+      ref={element => { if (element && restoreRunFocus.current === run.id) { restoreRunFocus.current = undefined; element.focus({ preventScroll: true }); } }}
+      onContextMenu={event => { event.preventDefault(); setRunMenu({ id: run.id, x: event.clientX, y: event.clientY, trigger: event.currentTarget }); }}
+      onKeyDown={event => {
+        if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+        event.preventDefault();
+        const { left, bottom } = event.currentTarget.getBoundingClientRect();
+        setRunMenu({ id: run.id, x: left, y: bottom, trigger: event.currentTarget });
+      }}>
+      <div className="run-list-heading">{run.status === "paused" ? <span className="run-paused-icon" title="已暂停"><Icon name="pause" size={11} /></span> : <i className={`run-dot status-${run.status}`} />}<span>{run.title}</span>{run.titleSource === "generated" && <span className="generated-title-mark" title="由标题模型命名">✦</span>}{run.pendingTotal > 0 && <span className="permission-count">{run.pendingTotal}</span>}</div>
+      <div className="run-list-meta"><span className="run-agent-dots">{run.agents.map(agent => <i key={agent} style={{ background: agentColors[agent] ?? "#758799" }} title={agent} />)}{run.nodeCount} agents</span><span>{cost(run.usage.costUsd)}</span></div>
+      <div className="run-list-bottom">{(run.backgroundCount ?? 0) > 0 && <span className="run-background-count" title={`${run.backgroundCount} 个后台进程`}><Icon name="server" size={11} />{run.backgroundCount}</span>}{(run.openPrCount ?? 0) > 0 && <span className={`run-pr-count pr-tone-${prTone(pullRequests.filter(pr => pr.runId === run.id))}`} title="Open / Draft PR">⑂ {run.openPrCount} PR</span>}<span>{statusLabels[run.status]}</span><span>{new Date(run.updatedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</span></div>
+    </button>;
+  };
+  const menuRun = runMenu && runs.find(run => run.id === runMenu.id);
+  const runMenuEntries = (run: RunSummary): ContextMenuEntry[] => {
+    const entries: ContextMenuEntry[] = [{ label: "复制会话 ID", action: () => void copyRun(run.id) }];
+    if (mutateRun) {
+      if (!runSaving) entries.unshift({ label: "重命名", action: () => { setError(undefined); setRunEdit({ id: run.id, title: run.title }); } });
+      entries.push({ separator: true }, { label: run.archived ? "取消归档" : "归档", danger: !run.archived, action: () => void updateRun(run.id, { archived: !run.archived }) });
+    }
+    return entries;
+  };
+  const group = ({ project, runs: children }: ReturnType<typeof groupProjects>[number]) => {
+    const hasDraft = draftProjectId === project.id;
+    const expanded = hasDraft || !collapsed.has(project.id);
+    const visible = children.filter(run => !run.archived);
+    return <section key={project.id} data-project-id={project.id} className={`project-group${project.id === currentId ? " is-current" : ""}`}><div className="project-group-header">
+    {editing === project.id ? <form onSubmit={event => { event.preventDefault(); if (name.trim()) void update(project.id, { name: name.trim() }).then(ok => { if (ok) setEditing(undefined); }); }}><input autoFocus aria-label="重命名项目" value={name} disabled={working} onChange={event => setName(event.target.value)} onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); setEditing(undefined); } }} /><button className="icon-button" disabled={working || !name.trim()} aria-label="保存项目名称"><Icon name="check" size={12} /></button></form> : <button className="project-group-title" title={`${project.name}\n${project.path}`} aria-expanded={expanded} onClick={() => toggle(project.id)}><span>{expanded ? "▾" : "▸"}</span><Icon name="folder" size={13} /><strong>{project.name}</strong></button>}
     {!project.archived && <button type="button" className="icon-button" disabled={!canCreate || !project.exists} aria-label={`在 ${project.name} 新建 Run`} title="新建 Run" onClick={() => newRun(project.id)}><Icon name="plus" size={14} /></button>}{project.archived && <button type="button" className="project-restore text-button" disabled={working} onClick={() => { void update(project.id, { archived: false }); }}>恢复</button>}
     <details className="project-menu" data-menu><summary aria-label={`${project.name} 菜单`}>⋯</summary><div><button type="button" onClick={event => { setEditing(project.id); setName(project.name); event.currentTarget.closest("details")?.removeAttribute("open"); }}>重命名</button><CopyButton text={project.path} label="复制路径" />{desktopBridge() && <button type="button" onClick={() => { void desktopBridge()?.showItemInFolder(project.path).catch((cause: unknown) => setError(errorText(cause))); }}>{desktopBridge()?.platform === "darwin" ? "在 Finder 中显示" : "在资源管理器中显示"}</button>}{project.archived ? <button type="button" disabled={working} onClick={() => { void update(project.id, { archived: false }); }}>恢复</button> : <button type="button" onClick={event => { setError(undefined); setArchiving(project); event.currentTarget.closest("details")?.removeAttribute("open"); }}>归档</button>}</div></details></div>
     <div className="project-group-meta" title={project.path}>{project.gitBranch && <span className="git-badge">⑂ {project.gitBranch}</span>}<span>{project.activeRunCount} 活跃</span>{project.pendingTotal > 0 && <span className="project-pending">{project.pendingTotal} 待处理</span>}{project.backgroundCount > 0 && <span className="run-background-count"><Icon name="server" size={10} />{project.backgroundCount}</span>}{(project.openPrCount ?? 0) > 0 && <span className={`project-pr-count pr-tone-${prTone(pullRequests.filter(pr => pr.projectId === project.id))}`} title={`${project.openPrCount} 个 open / draft PR`}>⑂ {project.openPrCount} PR</span>}{!project.exists && <span className="error-text">目录不存在</span>}</div>
-    {!collapsed.has(project.id) && <div className="project-runs">{children.map(runRow)}{!children.length && <button type="button" className="project-no-runs" disabled={Boolean(project.archived) || !canCreate || !project.exists} onClick={() => newRun(project.id)}>{project.archived ? "没有会话" : "＋ 开始第一个会话"}</button>}</div>}
-  </section>;
+    {expanded && <div className="project-runs">
+      {hasDraft && <div className="run-list-item selected run-draft" aria-current="page"><div className="run-list-heading"><i className="run-dot" /><span>新会话</span><span className="run-draft-hint">草稿</span></div></div>}
+      {visible.map(runRow)}
+      {!hasDraft && !visible.length && (children.length === 0 || !project.archived) && <button type="button" className="project-no-runs" disabled={Boolean(project.archived) || !canCreate || !project.exists} onClick={() => newRun(project.id)}>{project.archived ? "没有会话" : "＋ 开始第一个会话"}</button>}
+      <ArchivedRuns runs={children.filter(run => run.archived)} renderRun={runRow} />
+    </div>}
+    </section>;
+  };
   const unassigned = runs.filter(run => !run.projectId || !projects.some(project => project.id === run.projectId)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  return <nav className="runs-list project-groups" aria-label="项目与会话"><button type="button" className="add-project-button" onClick={add}><Icon name="plus" size={13} />添加项目</button>{groups.filter(entry => !entry.project.archived).map(group)}{unassigned.length > 0 && <section className="project-group unassigned-project"><div className="project-group-meta">未归属 <span>{unassigned.length} 个旧会话</span></div><div className="project-runs">{unassigned.map(runRow)}</div></section>}{groups.some(entry => entry.project.archived) && <div className="archived-projects"><button className="archived-projects-toggle" type="button" aria-expanded={archivedOpen} onClick={() => setArchivedOpen(value => !value)}>{archivedOpen ? "▾" : "▸"} 已归档项目 <span>{groups.filter(entry => entry.project.archived).length}</span></button>{archivedOpen && groups.filter(entry => entry.project.archived).map(group)}</div>}{loading && <div className="sidebar-loading">正在连接…</div>}{!loading && !projects.length && <div className="sidebar-loading">添加工作目录后开始会话</div>}{error && !archiving && <div className="error-panel" role="alert">{error}</div>}{archiving && <Modal title="归档项目" close={() => { if (!working) setArchiving(undefined); }}><p>归档「{archiving.name}」？会话会保留，可从“已归档项目”中查看或恢复。</p><code>{archiving.path}</code>{error && <div className="error-panel" role="alert">{error}</div>}<div className="dialog-footer"><button className="button" type="button" disabled={working} onClick={() => setArchiving(undefined)}>返回</button><button className="button danger" type="button" disabled={working} onClick={() => { void update(archiving.id, { archived: true }).then(ok => { if (ok) setArchiving(undefined); }); }}>{working ? "归档中…" : "确认归档"}</button></div></Modal>}</nav>;
+  const archivedProjects = groups.filter(entry => entry.project.archived);
+  const showArchivedProjects = archivedOpen || archivedProjects.some(({ project }) => project.id === draftProjectId);
+  return <nav className="runs-list project-groups" aria-label="项目与会话">
+    {error && !archiving && <div className="error-panel sidebar-project-error" role="alert">{error}</div>}
+    <button type="button" className="add-project-button" onClick={add}><Icon name="plus" size={13} />添加项目</button>{groups.filter(entry => !entry.project.archived).map(group)}
+    {unassigned.length > 0 && <section className="project-group unassigned-project"><div className="project-group-meta">未归属 <span>{unassigned.length} 个旧会话</span></div><div className="project-runs">{unassigned.filter(run => !run.archived).map(runRow)}<ArchivedRuns runs={unassigned.filter(run => run.archived)} renderRun={runRow} /></div></section>}
+    {archivedProjects.length > 0 && <div className="archived-projects"><button className="archived-projects-toggle" type="button" aria-expanded={showArchivedProjects} onClick={() => setArchivedOpen(value => !value)}>{showArchivedProjects ? "▾" : "▸"} 已归档项目 <span>{archivedProjects.length}</span></button>{showArchivedProjects && archivedProjects.map(group)}</div>}
+    {loading && <div className="sidebar-loading">正在连接…</div>}{!loading && !projects.length && <div className="sidebar-loading">添加工作目录后开始会话</div>}{archiving && <Modal title="归档项目" close={() => { if (!working) setArchiving(undefined); }}><p>归档「{archiving.name}」？会话会保留，可从“已归档项目”中查看或恢复。</p><code>{archiving.path}</code>{error && <div className="error-panel" role="alert">{error}</div>}<div className="dialog-footer"><button className="button" type="button" disabled={working} onClick={() => setArchiving(undefined)}>返回</button><button className="button danger" type="button" disabled={working} onClick={() => { void update(archiving.id, { archived: true }).then(ok => { if (ok) setArchiving(undefined); }); }}>{working ? "归档中…" : "确认归档"}</button></div></Modal>}
+    {runMenu && menuRun && <ContextMenu key={menuRun.id} x={runMenu.x} y={runMenu.y} label="会话操作" trigger={runMenu.trigger} close={() => setRunMenu(undefined)} entries={runMenuEntries(menuRun)} />}
+  </nav>;
 }

@@ -94,10 +94,30 @@ describe("systemPrompt", () => {
     const dynamic = systemPrompt(root, policy, [], { ...team, source: "dynamic" });
     expect(dynamic).not.toContain("Preset candidates"); expect(dynamic).toContain("Candidates the human picked for this run"); expect(dynamic).toContain("- c1: codex");
   });
-  it("tells agents at the depth limit to do the work themselves", () => {
-    const text = systemPrompt({ ...child, depth: 3 }, policy);
-    expect(text).toContain("maximum delegation depth (3)");
-    expect(text).not.toContain("Delegate when part of your work");
+  it.each(["dynamic", "preset"] as const)("allows native subagents for %s delegates at any depth", (mode) => {
+    for (const depth of [1, policy.maxDepth]) {
+      const text = systemPrompt({ ...child, depth }, { ...policy, mode });
+      expect(text).toContain("freely use your CLI's native subagents");
+      expect(text).toContain("Claude Code Agent/Task or Codex sub-agents");
+      expect(text).toContain("research, search, or parallel work");
+      expect(text).toContain("This is not baton delegation");
+      expect(text).toContain("does not count toward baton delegation depth or active-delegate limits or require team roles");
+      expect(text).toContain("you remain responsible for the deliverable, file ownership, and verification");
+      if (mode === "preset") expect(text).toContain("Preset rule: all baton delegation at every depth requires a team role");
+      if (depth === policy.maxDepth) {
+        expect(text).toContain(`maximum delegation depth (${policy.maxDepth}): do the work yourself; native subagents are fine.`);
+        expect(text).not.toContain("Delegate when part of your work");
+      }
+    }
+  });
+  it("keeps native subagent guidance out of root and solo prompts", () => {
+    for (const mode of ["dynamic", "preset", "solo"] as const) {
+      expect(systemPrompt(root, { ...policy, mode })).not.toContain("native subagents");
+      expect(systemPrompt(root, { ...policy, mode, maxDepth: 0 })).not.toContain("native subagents");
+    }
+    expect(systemPrompt(root, { ...policy, mode: "preset" })).toContain("Preset rule: all delegation at every depth requires a team role.");
+    expect(systemPrompt(root, { ...policy, maxDepth: 0 })).toContain("maximum delegation depth (0): do the work yourself.");
+    expect(systemPrompt(child, { ...policy, mode: "solo" })).not.toContain("native subagents");
   });
 });
 

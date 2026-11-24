@@ -75,6 +75,7 @@ interface Runtime {
   interrupting?: string;
   interruptReason?: string;
   starting?: Promise<{ turnId: string }>;
+  preparingHuman?: Promise<void>;
   /**
    * Set while a turn answers only messages from other sessions on a delegate whose assignment is
    * already finished: the turn must not reopen or overwrite the delegation. Holds the node status
@@ -334,11 +335,16 @@ export class Kernel {
   }
   patchRun(id: string, input: PatchRunRequest): RunSnapshot {
     const s = this.store.snapshot(id);
+    if (input.archived !== undefined && typeof input.archived !== "boolean") throw new Error("archived must be a boolean");
+    if (input.archived && s.run.status === "active") throw new MessageError("Cannot archive a run while agents are working; pause it or wait until it finishes");
     if (input.title !== undefined && (typeof input.title !== "string" || !input.title.trim())) throw new Error("Invalid title");
     if (input.policy?.maxTeamSize !== undefined && input.policy.maxTeamSize < (s.run.team?.members.filter((m) => m.status === "active").length ?? 0)) throw new Error("maxTeamSize cannot be smaller than the active roster");
-    const policy = this.validatePolicy({ ...s.run.policy, ...input.policy, mode: s.run.policy.mode, teamApproval: input.policy?.teamApproval ?? s.run.policy.teamApproval });
-    this.emit(id, { type: "run.updated", patch: { ...(input.title ? { title: input.title, titleSource: "human" } : {}), policy, updatedAt: now() } });
-    if (policy.mode !== "solo" && (policy.leadReview ?? false) !== (s.run.policy.leadReview ?? false)) this.enqueue(s.run.rootNodeId, leadReviewNotice(policy.leadReview === true));
+    const archiveOnly = input.archived !== undefined && input.title === undefined && input.policy === undefined;
+    const policy = archiveOnly ? undefined : this.validatePolicy({ ...s.run.policy, ...input.policy, mode: s.run.policy.mode, teamApproval: input.policy?.teamApproval ?? s.run.policy.teamApproval });
+    const updatedAt = now();
+    const archivePatch = input.archived === true ? { archived: true, archivedAt: updatedAt } : input.archived === false ? { archived: false } : {};
+    this.emit(id, { type: "run.updated", patch: { ...archivePatch, ...(input.title ? { title: input.title, titleSource: "human" } : {}), ...(policy ? { policy } : {}), updatedAt } });
+    if (policy && policy.mode !== "solo" && (policy.leadReview ?? false) !== (s.run.policy.leadReview ?? false)) this.enqueue(s.run.rootNodeId, leadReviewNotice(policy.leadReview === true));
     if (input.policy?.stallMinutes !== undefined) for (const n of s.nodes) if (this.runtimes.get(n.id)?.turnId) this.armStall(n.id);
     if (input.policy?.autoApprove) for (const p of s.permissions) if (p.status === "pending") void this.respondPermission(p.id, { behavior: "allow" }, "policy").catch((e: unknown) => this.log(id, e));
     return this.store.snapshot(id);
@@ -429,16 +435,20 @@ export class Kernel {
     if (rt.turnId || rt.interrupting || this.paused(node.runId)) this.queuePrompts(id, [{ text, trigger: "followup" }]);
     else await this.startTurn(id, text, "followup");
   }
-  private async startPrompts(id: string, prompts: QueuedPrompt[], interrupt = false): Promise<MessageDelivery["delivery"]> {
+  private async startPrompts(id: string, prompts: QueuedPrompt[], interrupt = false, incoming?: (delivery: "queued" | "turn") => ItemRecord): Promise<MessageDelivery["delivery"]> {
     if (this.stopped) return "queued";
     const rt = this.runtime(id), n = this.store.node(id);
     // A cancel/close can abandon a message while session startup or steer is awaiting the driver.
     prompts = prompts.filter((p) => !p.humanItem || rt.pendingMessages.has(p.humanItem.seq));
     if (!prompts.length) return "queued";
-    if (rt.turnId || this.paused(n.runId) || (rt.interrupting && !interrupt) || this.rollbacks.active(n.runId)) { this.queuePrompts(id, prompts); return "queued"; }
+    const hold = (): "queued" => {
+      if (incoming) prompts[0]!.humanItem = incoming("queued");
+      this.queuePrompts(id, prompts); return "queued";
+    };
+    if (rt.turnId || this.paused(n.runId) || (rt.interrupting && !interrupt) || this.rollbacks.active(n.runId)) return hold();
     if (["canceled", "replaced"].includes(n.status) || this.canceling.has(id)) throw new Error("Node is canceled");
     // A human message's turn gets a rollback checkpoint: snapshot the cwd while the session opens.
-    const snapshot = prompts.some((p) => p.humanItem || p.initial) ? this.options.checkpoints?.snapshot(n.cwd) : undefined;
+    const snapshot = incoming || prompts.some((p) => p.humanItem || p.initial) ? this.options.checkpoints?.snapshot(n.cwd) : undefined;
     let session = await this.session(id);
     const files = await snapshot;
     while (rt.closing || session !== rt.session) {
@@ -447,9 +457,9 @@ export class Kernel {
     }
     prompts = prompts.filter((p) => !p.humanItem || rt.pendingMessages.has(p.humanItem.seq));
     if (!prompts.length) return "queued";
-    if (rt.turnId || this.paused(n.runId) || (rt.interrupting && !interrupt) || this.rollbacks.active(n.runId)) { this.queuePrompts(id, prompts); return "queued"; }
     const current = this.store.node(id);
     if (["canceled", "replaced"].includes(current.status) || this.canceling.has(id) || this.stopped) throw new Error("Node has been canceled or daemon stopped");
+    if (rt.turnId || this.paused(n.runId) || (rt.interrupting && !interrupt) || this.rollbacks.active(n.runId)) return hold();
     if (!active(current.status)) this.checkGlobalLimit();
     // Read positions after session startup: a reorder may have arrived while this drain
     // was awaiting it. Reorder human slots only; kernel prompts retain their positions.
@@ -472,10 +482,11 @@ export class Kernel {
     this.patchNode(id, { status: "running", activity: "Thinking…", turns: n.turns + 1, error: undefined, endedAt: undefined });
     let deliveryOrder = 0;
     for (const prompt of prompts) if (prompt.humanItem) this.deliverMessage(id, prompt.humanItem, "turn", turnId, humans.length >= 2 ? ++deliveryOrder : undefined);
+    if (incoming) prompts[0]!.humanItem = incoming("turn");
     // Human rows already exist. Only kernel prompts need a new transcript row for this batch.
     const kernelText = prompts.filter((p) => !p.humanItem).map((p) => p.text).join("\n\n");
     const kernelRow = kernelText ? this.addItem(id, { type: "user_message", text: kernelText }) : undefined;
-    const checkpointSeq = humans[0]?.humanItem?.seq ?? (prompts.some((p) => p.initial) ? kernelRow?.seq : undefined);
+    const checkpointSeq = prompts.find(prompt => prompt.humanItem)?.humanItem?.seq ?? (prompts.some((p) => p.initial) ? kernelRow?.seq : undefined);
     const checkpoint = files && checkpointSeq !== undefined ? this.options.checkpoints!.create({ runId: n.runId, nodeId: id, itemSeq: checkpointSeq, createdAt: checkpointAt, ...("ref" in files ? { files: { cwd: n.cwd, ref: files.ref } } : {}), conversation: session.rewindConversation ? "native" : "replay" }, turnId) : undefined;
     // A rollback's replayed transcript or file notice rides ahead of the next prompt.
     const preamble = this.options.checkpoints?.preamble(id);
@@ -500,13 +511,32 @@ export class Kernel {
     if (typeof text !== "string" || !text.trim()) throw new Error("Nonempty text is required");
     if (clientId !== undefined && typeof clientId !== "string") throw new Error("clientId must be a string");
     if (!["queue", "steer", "interrupt"].includes(mode)) throw new Error("Invalid send mode");
-    const n = this.store.node(id), rt = this.runtime(id);
+    const rt = this.runtime(id);
+    while (rt.preparingHuman) await rt.preparingHuman;
+    const n = this.store.node(id);
     if (this.stopped) throw new Error("Daemon is shutting down");
     if (["canceled", "replaced"].includes(n.status) || this.canceling.has(id)) throw new Error("Node is canceled");
     this.resetMessageChains(id);
-    const queuePosition = Math.max(0, ...this.queuedHumanMessages(id).map((r) => r.item.queuePosition ?? r.seq)) + 1;
-    const row = this.addItem(id, { type: "user_message", text, delivery: "queued", queuePosition, ...(clientId !== undefined ? { clientId } : {}) });
-    rt.pendingMessages.set(row.seq, row);
+    const record = (delivery: "queued" | "turn"): ItemRecord => {
+      const position = delivery === "queued" ? { queuePosition: Math.max(0, ...this.queuedHumanMessages(id).map(row => row.item.queuePosition ?? row.seq)) + 1 } : {};
+      const row = this.addItem(id, { type: "user_message", text, delivery, ...position, ...(clientId !== undefined ? { clientId } : {}) });
+      if (delivery === "queued") rt.pendingMessages.set(row.seq, row);
+      return row;
+    };
+    if (!rt.turnId) {
+      let release!: () => void;
+      const preparing = new Promise<void>(resolve => { release = resolve; }); rt.preparingHuman = preparing;
+      const ready = () => { if (rt.preparingHuman === preparing) rt.preparingHuman = undefined; release(); };
+      let itemSeq: number | undefined;
+      try {
+        const delivery = await this.startPrompts(id, [{ text, trigger: "user" }], false, disposition => {
+          const row = record(disposition); itemSeq = row.seq; ready(); return row;
+        });
+        if (itemSeq === undefined) throw new Error("Message was not delivered");
+        return { delivery, itemSeq };
+      } finally { ready(); }
+    }
+    const row = record("queued");
     const key = `${id}:${row.seq}`; this.messageActions.add(key);
     try {
       return await this.sendHumanMessage(id, row, mode, false);

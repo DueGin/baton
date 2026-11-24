@@ -52,7 +52,7 @@ export function AgentIcon({ agent, size = 18 }: { agent: string; size?: number }
   const vendor = agentVendor(agent); const svg = vendorSvg[vendor];
   if (svg) return <Inline svg={svg} size={size} vendor={vendor} />;
   const initial = (agent.replace(/^[^a-z0-9]+/i, "")[0] ?? "?").toUpperCase();
-  return <span className="agent-vendor-icon agent-monogram" data-agent-vendor="generic" aria-hidden="true" style={{ width: size, height: size, fontSize: Math.round(size * 0.62) }}>{initial}</span>;
+  return <span className="agent-vendor-icon agent-monogram" data-agent-vendor="generic" aria-hidden="true" style={{ width: size, height: size, fontSize: `max(var(--text-2xs), ${Math.round(size * 0.62)}px)` }}>{initial}</span>;
 }
 /** Vendor mark for a model, or nothing when the vendor is unknown. */
 export function ModelIcon({ model, size = 12 }: { model?: string; size?: number }) {

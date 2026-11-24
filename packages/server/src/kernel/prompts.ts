@@ -82,7 +82,7 @@ export function systemPrompt(
     "",
     canDelegate
       ? `Your delegation depth is ${node.depth}; delegation is allowed down to depth ${policy.maxDepth}, with at most ${policy.maxActiveChildren} active delegates per agent.`
-      : `You are at the maximum delegation depth (${policy.maxDepth}): do the work yourself.`,
+      : `You are at the maximum delegation depth (${policy.maxDepth}): do the work yourself${isRoot ? "." : "; native subagents are fine."}`,
     "You may only operate on delegations you created. Never give two delegates the same files, and never delegate the same task twice (check status first).",
   );
   if (isRoot && canDelegate) {
@@ -116,7 +116,7 @@ export function systemPrompt(
     ...candidates.map((c) => describeCandidate(c, agents)),
     'Choose a candidate by matching the task to its model and description. To hire, call delegate with candidate: "<id>" and role: "<a new role name>" plus the usual title/task; it joins the team under that role and gets the task. Send later tasks to that role by role alone. A candidate can be hired into several roles; hires count toward the team size limit. get_team shows candidates and who was hired.',
   );
-  if (mode === "preset") lines.push("Preset rule: all delegation at every depth requires a team role. Use get_team for the current roster.");
+  if (mode === "preset") lines.push(`Preset rule: all ${isRoot ? "" : "baton "}delegation at every depth requires a team role. Use get_team for the current roster.`);
   if (!isRoot && node.role) lines.push("", `Your team role: ${node.role}.`, `Your responsibilities: ${team?.members.find((m) => m.id === node.memberId)?.responsibilities ?? "Follow your assignment."}`, "Other roles own the files and responsibilities in the roster above; avoid file clashes.");
   if (isRoot) {
     lines.push("", "You are the root agent: answer the human directly. Do not call report_result.");
@@ -125,6 +125,7 @@ export function systemPrompt(
     lines.push(
       "",
       "You are a delegate. Your assignment arrives in a <baton-assignment> message. Stay within its scope and the files it gives you.",
+      "You may freely use your CLI's native subagents (such as Claude Code Agent/Task or Codex sub-agents) for research, search, or parallel work. This is not baton delegation: it does not count toward baton delegation depth or active-delegate limits or require team roles, but you remain responsible for the deliverable, file ownership, and verification.",
       "A <baton-followup> message comes from the agent that delegated to you and contains its follow-up instructions or answers.",
       ...(canDelegate ? ["After delegating, if you have nothing else to do, end your turn without calling report_result. Your delegates' <baton-results> will wake you. Report only when your whole assignment is done."] : []),
       "When done, call report_result exactly once (status success / partial / failed, a plain-text summary of what you did, what you found and what is left, plus `result` and `artifacts` when useful), then end your turn.",

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
@@ -12,7 +12,7 @@ import { FakeDriver, FakeDriverRegistry, type FakeScript, type FakeDriverOptions
 import { exportRun } from "./telemetry/index.js";
 const servers: BatonServer[] = [], homes: string[] = [];
 afterEach(async () => { for (const server of servers.splice(0)) await server.close(); for (const home of homes.splice(0)) await rm(home, { recursive: true, force: true }); });
-async function setup(scripts: Record<string, FakeScript | FakeDriverOptions>, options: { deliveryDebounceMs?: number; maxActiveNodes?: number; home?: string; idleTimeoutMs?: number } = {}): Promise<BatonServer> {
+async function setup(scripts: Record<string, FakeScript | FakeDriverOptions>, options: { deliveryDebounceMs?: number; maxActiveNodes?: number; home?: string; idleTimeoutMs?: number; webDist?: string } = {}): Promise<BatonServer> {
   const home = options.home ?? await mkdtemp(join(tmpdir(), "baton-test-")); if (!homes.includes(home)) homes.push(home);
   const server = await startServer({ home, port: 0, registry: new FakeDriverRegistry(scripts), deliveryDebounceMs: 20, ...options }); servers.push(server); return server;
 }
@@ -372,7 +372,75 @@ describe("lifecycle and demo", () => {
   }, 12000);
 });
 
+describe("run archiving", () => {
+  const conflict = "Cannot archive a run while agents are working; pause it or wait until it finishes";
+
+  it("only updates archive metadata, even for a run with an invalid legacy policy", async () => {
+    const server = await setup({ root: idle });
+    const { run } = await create(server);
+    await until(() => server.store.snapshot(run.id).run.status === "idle");
+    const policy = { ...run.policy, maxActiveChildren: 0 };
+    server.store.append(run.id, { type: "run.updated", patch: { policy } });
+    const before = server.store.snapshot(run.id);
+    const archived = server.kernel.patchRun(run.id, { archived: true });
+    expect(archived.run).toMatchObject({ archived: true, archivedAt: archived.run.updatedAt, status: "idle", policy });
+    expect(archived.nodes).toEqual(before.nodes);
+    expect(archived.turns).toEqual(before.turns);
+    expect(server.store.notices(run.rootNodeId)).toEqual([]);
+    const archivedAt = archived.run.archivedAt;
+    expect(server.store.list(run.projectId)).toEqual([expect.objectContaining({ id: run.id, archived: true, archivedAt })]);
+
+    const restored = server.kernel.patchRun(run.id, { archived: false });
+    expect(restored.run).toMatchObject({ archived: false, archivedAt, policy });
+    expect(server.store.events(run.id, before.lastSeq).map(event => event.type === "run.updated" && event.patch)).toEqual([
+      { archived: true, archivedAt, updatedAt: archived.run.updatedAt },
+      { archived: false, updatedAt: restored.run.updatedAt },
+    ]);
+  });
+
+  it("validates PATCH input, returns 409 while active, and allows unarchiving while active", async () => {
+    const server = await setup({ root: async context => { await context.sleep(60_000); } });
+    const { run } = await create(server);
+    const headers = { authorization: `Bearer ${server.token}`, "content-type": "application/json" };
+    const patch = (body: unknown) => fetch(`${server.url}/api/runs/${run.id}`, { method: "PATCH", headers, body: JSON.stringify(body) });
+    expect(server.store.snapshot(run.id).run.status).toBe("active");
+    for (const invalid of ["true", null]) expect((await patch({ archived: invalid })).status).toBe(400);
+    expect(() => server.kernel.patchRun(run.id, { archived: true })).toThrow(conflict);
+    const rejected = await patch({ archived: true, title: "Must not change" });
+    expect(rejected.status).toBe(409);
+    expect(await rejected.json()).toEqual({ error: { code: "HTTP_409", message: conflict } });
+    expect(server.store.snapshot(run.id).run).toMatchObject({ title: run.title, status: "active" });
+
+    await server.kernel.pauseRun(run.id);
+    const response = await patch({ archived: true, title: "Archived session" });
+    expect(response.status).toBe(200);
+    const { run: archived } = await response.json() as RunSnapshot;
+    expect(archived).toMatchObject({ archived: true, archivedAt: archived.updatedAt, title: "Archived session", status: "paused" });
+    const list = await fetch(`${server.url}/api/runs`, { headers });
+    expect(await list.json()).toEqual([expect.objectContaining({ id: run.id, archived: true, archivedAt: archived.archivedAt })]);
+
+    await server.kernel.resumeRun(run.id);
+    const restored = await patch({ archived: false });
+    expect(restored.status).toBe(200);
+    expect(await restored.json()).toMatchObject({ run: { archived: false, archivedAt: archived.archivedAt, status: "active" } });
+  });
+});
+
 describe("HTTP and exports", () => {
+  it("serves WOFF and WOFF2 web assets with their font MIME types", async () => {
+    const home = await mkdtemp(join(tmpdir(), "baton-test-")); homes.push(home);
+    const webDist = join(home, "web");
+    const assets = join(webDist, "assets");
+    await mkdir(assets, { recursive: true });
+    const server = await setup({}, { home, webDist });
+    for (const extension of ["woff2", "woff"]) {
+      await writeFile(join(assets, `test.${extension}`), "fake font data");
+      const response = await fetch(`${server.url}/assets/test.${extension}`);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("fake font data");
+      expect(response.headers.get("content-type")).toBe(`font/${extension}`);
+    }
+  });
   it("accepts body-less POSTs the console sends (no Content-Type) and still rejects non-JSON bodies", async () => {
     const server = await setup({ root: async () => {} });
     const post = (path: string, init: RequestInit = {}) => fetch(server.url + path, { method: "POST", ...init, headers: { authorization: `Bearer ${server.token}`, ...(init.headers ?? {}) } });

@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ApiClient } from "../api.js";
+import { ApiClient, HttpError } from "../api.js";
 import { DemoClient } from "../demo/client.js";
-import { AddProject, DirectoryBrowser, ProjectGroups, ProjectLink, ProjectsEmpty } from "./Projects.js";
-import { NewRun } from "./NewRun.js";
+import { AddProject, DirectoryBrowser, ProjectGroups, ProjectLink, ProjectsEmpty, type ProjectGroupsProps } from "./Projects.js";
+import { NewSession } from "./NewRun.js";
 import { projectRunPayload } from "../lib/projects.js";
 const now = Date.parse("2026-11-15T01:00:00Z");
 afterEach(() => vi.unstubAllGlobals());
@@ -26,11 +26,48 @@ describe("project screens", () => {
     expect(legacy).toContain("未归属"); expect(legacy).toContain("Legacy run");
     const link = renderToStaticMarkup(<ProjectLink project={projects[0]!} open={() => undefined} details />); expect(link).toContain(projects[0]!.path); expect(link).toContain(projects[0]!.name);
   });
+  it("hides archived runs in each group and shows the new-session draft first", async () => {
+    const client = new DemoClient(() => now); const projects = await client.projects(true);
+    const run = (await client.runs())[0]!;
+    const runs = [
+      { ...run, id: "archived-project-run", title: "Hidden under Atlas", projectId: "project-atlas", archived: true },
+      { ...run, id: "archived-legacy-run", title: "Hidden under unassigned", projectId: undefined, archived: true },
+      { ...run, id: "legacy-run", title: "Visible legacy run", projectId: undefined },
+    ];
+    const noop = () => undefined;
+    const props: ProjectGroupsProps = { projects, runs, runId: null, currentId: "project-atlas", page: "runs", reveal: null, choose: noop, selectProject: noop, newRun: noop, add: noop, canCreate: true, mutate: async () => {}, loading: false };
+    const atlasGroup = (markup: string) => markup.match(/data-project-id="project-atlas".*?<\/section>/s)?.[0] ?? "";
+    const html = renderToStaticMarkup(<ProjectGroups {...props} draftProjectId="project-atlas" />);
+    expect(html.match(/aria-expanded="false"><span aria-hidden="true">▸<\/span>已归档会话 1/g)).toHaveLength(2);
+    expect(html).not.toContain("Hidden under");
+    expect(html).toContain("Visible legacy run");
+    expect(html).toContain('aria-haspopup="menu"');
+    const atlas = atlasGroup(html);
+    expect(atlas).toMatch(/<div class="run-list-item selected run-draft" aria-current="page">.*新会话.*草稿.*已归档会话 1/s);
+    expect(atlas).not.toContain("＋ 开始第一个会话");
+    const withoutDraft = atlasGroup(renderToStaticMarkup(<ProjectGroups {...props} />));
+    expect(withoutDraft).toContain("＋ 开始第一个会话");
+  });
+  it("models run archive conflicts and preserves timestamps on unarchive in demo mode", async () => {
+    const client = new DemoClient(() => now);
+    const runs = await client.runs();
+    const active = runs.find(run => run.status === "active")!;
+    const inactive = runs.find(run => run.status !== "active")!;
+    const original = (await client.run(inactive.id)).run;
+    const conflict = await client.patchRun(active.id, { archived: true }).catch((cause: unknown) => cause);
+    expect(conflict).toBeInstanceOf(HttpError);
+    expect(conflict).toMatchObject({ status: 409 });
+    expect((await client.run(active.id)).run.archived).toBeUndefined();
+    await client.patchRun(inactive.id, { archived: true });
+    expect((await client.runs()).find(run => run.id === inactive.id)).toMatchObject({ archived: true, archivedAt: new Date(now).toISOString() });
+    await client.patchRun(inactive.id, { archived: false });
+    expect((await client.run(inactive.id)).run).toMatchObject({ archived: false, archivedAt: new Date(now).toISOString(), status: original.status, policy: original.policy });
+  });
   it("requires a project picker and retains payload defaults in New Run", async () => {
     const storage = { getItem: () => null, setItem: () => undefined }; vi.stubGlobal("localStorage", storage);
     const client = new DemoClient(() => now); const projects = await client.projects(true);
-    const html = renderToStaticMarkup(<NewRun agents={await client.agents()} presets={await client.teams()} projects={projects} initialProjectId="project-atlas" defaults={{ mode: "solo", maxDepth: 3, maxActiveChildren: 6, autoApprove: false }} close={() => undefined} create={async () => true} busy={false} client={client} error={null} selectProject={() => undefined} addProject={() => undefined} />);
-    for (const text of ["搜索项目", "选择项目", "项目（工作目录）", "Atlas", "/workspace/atlas", "添加项目…", "项目内子目录"]) expect(html).toContain(text);
+    const html = renderToStaticMarkup(<NewSession agents={await client.agents()} presets={await client.teams()} projects={projects} projectId="project-atlas" defaults={{ mode: "solo", maxDepth: 3, maxActiveChildren: 6, autoApprove: false }} create={async () => true} busy={false} client={client} error={null} selectProject={() => undefined} addProject={() => undefined} />);
+    for (const text of ["选择项目", "项目（工作目录）", "Atlas", "/workspace/atlas", "添加项目…", "项目内子目录"]) expect(html).toContain(text);
     expect(html).not.toContain("旧版原型"); expect(html).not.toContain('pattern="/.*"');
   });
   it("follows the mocked directory/add/archive/restore/create API flow", async () => {
