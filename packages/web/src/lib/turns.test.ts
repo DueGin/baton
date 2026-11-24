@@ -23,6 +23,7 @@ describe("turn annotations", () => {
     expect(turnFooter({ ...turn, status: "canceled", error: "paused by human" }).label).toBe("已暂停");
     expect(turnFooter({ ...turn, status: "interrupted" }).label).toBe("已中断"); expect(turnFooter({ ...turn, status: "canceled" }).label).toBe("已取消");
     for (const trigger of ["result", "resume", "followup", "delegation", "correction"] as const) expect(turnFooter({ ...turn, trigger }).trigger).not.toBe("");
+    expect(turnFooter({ ...turn, trigger: "agent" }).trigger).toBe("自主唤醒");
     expect(turnFooter({ ...turn, usage: undefined }).tokens).toBeUndefined();
   });
   it("anchors each footer after its last visible row or question and keeps later turns below", () => {

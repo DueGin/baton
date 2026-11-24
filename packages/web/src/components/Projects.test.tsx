@@ -26,6 +26,39 @@ describe("project screens", () => {
     expect(legacy).toContain("未归属"); expect(legacy).toContain("Legacy run");
     const link = renderToStaticMarkup(<ProjectLink project={projects[0]!} open={() => undefined} details />); expect(link).toContain(projects[0]!.path); expect(link).toContain(projects[0]!.name);
   });
+  it("renders independent project name and branch labels with a full tooltip", async () => {
+    const client = new DemoClient(() => now);
+    const project = { ...(await client.project("project-atlas")), name: "Atlas workspace with a long name", gitBranch: "fix/agent-initiated-turns" };
+    const link = renderToStaticMarkup(<ProjectLink project={project} open={() => undefined} />);
+    expect(link).toContain(`title="${project.name}\n${project.path}\n${project.gitBranch}"`);
+    expect(link).toContain(`<span class="project-link-name">${project.name}</span><code class="project-link-branch">${project.gitBranch}</code>`);
+    expect(renderToStaticMarkup(<ProjectLink project={project} open={() => undefined} details />)).toContain(`<small>${project.path}</small>`);
+    expect(renderToStaticMarkup(<ProjectLink project={{ ...project, gitBranch: undefined }} open={() => undefined} />)).not.toContain("project-link-branch");
+  });
+  it("shows four model marks and an overflow chip, with agent fallbacks and a full tooltip", async () => {
+    const client = new DemoClient(() => now);
+    const base = (await client.runs()).find(run => run.id === "run-demo")!;
+    const noop = () => undefined;
+    const props: ProjectGroupsProps = { projects: [], runs: [], runId: null, currentId: null, page: "runs", reveal: null, choose: noop, selectProject: noop, newRun: noop, add: noop, canCreate: true, mutate: async () => {}, loading: false };
+    const models = [
+      { agentId: "pi", model: "gemini-2.5-pro" },
+      { agentId: "codex", model: "local-custom" },
+      { agentId: "claude" },
+      { agentId: "pi", model: "qwen3-max" },
+      { agentId: "pi", model: "deepseek-v4" },
+      { agentId: "codex", model: "gpt-5.2" },
+    ];
+    const html = renderToStaticMarkup(<ProjectGroups {...props} runs={[{ ...base, models, nodeCount: 9 }]} />);
+    expect(html.match(/data-agent-vendor="[^"]+"/g)).toEqual(["google", "codex", "claude", "qwen"].map(vendor => `data-agent-vendor="${vendor}"`));
+    expect(html).toContain('<span class="run-model-chip run-model-overflow">+2</span>');
+    expect(html).toContain("title=\"pi · gemini-2.5-pro\ncodex · local-custom\nclaude · 未知模型\npi · qwen3-max\npi · deepseek-v4\ncodex · gpt-5.2\"");
+    expect(html).toContain("<span>9 agents</span>");
+
+    const legacy = renderToStaticMarkup(<ProjectGroups {...props} runs={[{ ...base, models: undefined, agents: ["pi", "codex"], rootAgentId: "codex" }]} />);
+    expect(legacy.match(/data-agent-vendor="[^"]+"/g)).toEqual(['data-agent-vendor="codex"', 'data-agent-vendor="pi"']);
+    expect(legacy).toContain('title="codex · 未知模型\npi · 未知模型"');
+    expect(legacy).not.toContain("run-model-overflow");
+  });
   it("hides archived runs in each group and shows the new-session draft first", async () => {
     const client = new DemoClient(() => now); const projects = await client.projects(true);
     const run = (await client.runs())[0]!;

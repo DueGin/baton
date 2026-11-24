@@ -28,7 +28,7 @@ describe("Paseo driver registry", () => {
             sessionId: "live", getPersistence: () => null, startTurn: async () => ({ turnId: "turn" }),
             interrupt: async () => {}, respondToPermission: async () => {}, pendingPermissions: () => [],
             subscribe: () => () => {}, runtimeInfo: async () => ({}), close: async () => {},
-            ...(supported ? { listCommands: live } : {}),
+            ...(supported ? { listCommands: live, hasBackgroundWork: () => true } : {}),
         };
         const client: AgentClient = {
             provider: "codex", capabilities: { steer: true, resume: true, reasoning: true, mcp: true, images: true },
@@ -43,6 +43,7 @@ describe("Paseo driver registry", () => {
             expect(await driver.listCommands?.(home)).toEqual(supported ? [{ name: "scan", description: home }] : undefined);
             expect(client.createSession).not.toHaveBeenCalled();
             const wrapped = await driver.open({ cwd: home, mcpServers: {} });
+            expect(wrapped.hasBackgroundWork?.()).toBe(supported);
             expect(await wrapped.listCommands?.()).toEqual(supported ? [{ name: "live", argumentHint: "<file>" }] : undefined);
         } finally { vi.restoreAllMocks(); }
     });
@@ -94,6 +95,7 @@ describe("Paseo driver registry", () => {
         await expect(codex.startTurn("closed")).rejects.toThrow("closed");
     });
     it("maps notices and drops worktree rows without changing the contract", () => {
+        expect(mapProviderEvent({ type: "turn_started", turnId: "wake", origin: "agent" })).toEqual({ type: "turn_started", turnId: "wake", origin: "agent" });
         expect(mapProviderEvent({ type: "timeline", timestamp: "now", item: { type: "notification", level: "warning", message: "hello" } })).toMatchObject({ type: "item", item: { type: "notice", message: "hello" } });
         expect(mapProviderEvent({ type: "timeline", timestamp: "now", item: { type: "tool_call", callId: "x", name: "worktree", status: "completed", error: null, detail: { type: "worktree_setup", worktreePath: home, branchName: "x", log: "", commands: [] } } })).toBeNull();
     });

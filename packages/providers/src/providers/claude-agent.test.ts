@@ -87,6 +87,121 @@ describe("Claude slash commands", () => {
 });
 function result(cost = 0.01, failed = false): unknown { return { type: "result", subtype: failed ? "error_during_execution" : "success", is_error: failed, session_id: "claude-session", total_cost_usd: cost, usage: { input_tokens: 10, cache_read_input_tokens: 2, output_tokens: 4 }, modelUsage: { fake: { inputTokens: cost * 1000, cacheReadInputTokens: cost * 200, outputTokens: cost * 400, contextWindow: 10000 } }, errors: failed ? ["aborted"] : undefined }; }
 async function wait(events: AgentStreamEvent[], type: AgentStreamEvent["type"]): Promise<void> { await expect.poll(() => events.some(event => event.type === type), { interval: 5 }).toBe(true); }
+describe("Claude agent-initiated turns", () => {
+    async function open() {
+        const fake = setup(undefined, { env: { CLAUDE_CONFIG_DIR: home } });
+        const live = session = await fake.client.createSession({ cwd: home });
+        const events: AgentStreamEvent[] = [];
+        live.subscribe(event => events.push(event));
+        return { ...fake, live, events };
+    }
+
+    it("records a background task wake-up, reasoning, tool use, reply and usage as one agent turn", async () => {
+        const { live, messages, events } = await open();
+        await live.startTurn("launch a task");
+        messages.push(result(0.01));
+        await wait(events, "turn_completed");
+        events.length = 0;
+
+        messages.push({ type: "system", subtype: "task_notification", status: "completed", summary: "Checks passed" });
+        await wait(events, "turn_started");
+        await expect(live.startTurn("overlap")).rejects.toThrow("A turn is already active");
+        messages.push({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "thinking_delta", thinking: "Review the checks" } } });
+        messages.push({ type: "assistant", message: { content: [{ type: "tool_use", id: "read-1", name: "Read", input: { file_path: "report.txt" } }] } });
+        messages.push({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "read-1", content: "OK" }] } });
+        messages.push({ type: "assistant", message: { content: [{ type: "text", text: "Checks confirmed." }] } });
+        messages.push(result(0.025));
+        await wait(events, "turn_completed");
+
+        expect(events.map(event => event.type)).toEqual(["turn_started", "timeline", "timeline", "timeline", "timeline", "timeline", "turn_completed"]);
+        expect(events[0]).toMatchObject({ type: "turn_started", origin: "agent" });
+        const started = events.find(event => event.type === "turn_started");
+        const items = events.filter(event => event.type === "timeline");
+        expect(items.every(event => event.turnId === started?.turnId)).toBe(true);
+        expect(items.map(event => event.item)).toMatchObject([
+            { type: "notification", level: "info", message: "后台任务完成：Checks passed" },
+            { type: "reasoning", text: "Review the checks" },
+            { type: "tool_call", callId: "read-1", status: "running" },
+            { type: "tool_call", callId: "read-1", status: "completed" },
+            { type: "assistant_message", text: "Checks confirmed." },
+        ]);
+        const completion = events.find(event => event.type === "turn_completed");
+        expect(completion).toMatchObject({ turnId: started?.turnId, usage: { inputTokens: 15, cachedInputTokens: 3, outputTokens: 6 } });
+        expect(completion?.usage?.totalCostUsd).toBeCloseTo(0.015);
+    });
+
+    it("ignores idle metadata, subagent content, replayed inputs and stray results", async () => {
+        const { messages, events } = await open();
+        for (const subtype of ["init", "session_state_changed", "background_tasks_changed", "task_started", "task_progress", "task_updated", "commands_changed", "status", "hook_started", "api_retry"]) {
+            messages.push({ type: "system", subtype });
+        }
+        messages.push({ type: "rate_limit_event" });
+        messages.push({ type: "assistant", parent_tool_use_id: "subagent", message: { content: [{ type: "text", text: "Ignore" }] } });
+        messages.push({ type: "user", message: { content: "User echo" } });
+        messages.push({ type: "user", isReplay: true, message: { content: [{ type: "tool_result", tool_use_id: "historical-tool" }] } });
+        messages.push({ ...result(), result: "Stray result" });
+        messages.push({ type: "system", subtype: "init", model: "after-idle-events" });
+        await wait(events, "model_changed");
+        expect(events).toEqual([{ type: "thread_started", sessionId: "claude-session" }, { type: "model_changed", model: "after-idle-events" }]);
+    });
+
+    it.each([
+        { status: "failed", level: "warning", title: "后台任务失败" },
+        { status: "stopped", level: "info", title: "后台任务已停止" },
+        { status: "completed", level: "info", title: "后台任务完成", skipTranscript: true },
+    ])("maps $status task notifications, honoring skip_transcript=$skipTranscript", async ({ status, level, title, skipTranscript }) => {
+        const { messages, events } = await open();
+        messages.push({ type: "system", subtype: "task_notification", status, summary: "Example", skip_transcript: skipTranscript });
+        messages.push(result());
+        await wait(events, "turn_completed");
+        const items = events.filter(event => event.type === "timeline");
+        expect(items.map(event => event.item)).toEqual(skipTranscript ? [] : [{ type: "notification", level, message: `${title}：Example` }]);
+    });
+
+    it("does not turn a canceled turn's tail into an agent turn, but captures the next live reply", async () => {
+        const { live, messages, query, events } = await open();
+        const { turnId } = await live.startTurn("cancel me");
+        vi.mocked(query.interrupt).mockImplementationOnce(async () => {
+            messages.push({ type: "assistant", aborted: true, message: { content: [{ type: "text", text: "Partial reply" }] } });
+            messages.push(result(0, true));
+            messages.push({ type: "system", subtype: "session_state_changed", state: "idle" });
+            messages.push(result(0, true));
+            messages.push({ type: "assistant", aborted: true, message: { content: [{ type: "text", text: "Late aborted reply" }] } });
+        });
+        await live.interrupt();
+        messages.push({ type: "system", subtype: "init", model: "after-cancel" });
+        await wait(events, "model_changed");
+        expect(events.filter(event => event.type === "turn_started")).toEqual([{ type: "turn_started", turnId }]);
+        expect(events.find(event => event.type === "turn_canceled")).toMatchObject({ turnId });
+
+        messages.push({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "New reply" } } });
+        messages.push(result());
+        await wait(events, "turn_completed");
+        const started = events.filter(event => event.type === "turn_started").at(-1);
+        expect(started).toMatchObject({ origin: "agent" });
+        expect(events).toContainEqual(expect.objectContaining({ type: "timeline", turnId: started?.turnId, item: { type: "assistant_message", text: "New reply" } }));
+    });
+
+    it("replaces its background-work snapshot while idle and clears it on close", async () => {
+        const { live, messages, events } = await open();
+        const firstTask = { task_id: "first", task_type: "local_bash", description: "First" };
+        const secondTask = { task_id: "second", task_type: "local_bash", description: "Second" };
+        expect(live.hasBackgroundWork()).toBe(false);
+        messages.push({ type: "system", subtype: "background_tasks_changed", tasks: [firstTask] });
+        await expect.poll(() => live.hasBackgroundWork()).toBe(true);
+        messages.push({ type: "system", subtype: "background_tasks_changed", tasks: [secondTask] });
+        messages.push({ type: "system", subtype: "init", model: "next-turn" });
+        await wait(events, "model_changed");
+        expect(live.hasBackgroundWork()).toBe(true);
+        messages.push({ type: "system", subtype: "background_tasks_changed", tasks: [] });
+        await expect.poll(() => live.hasBackgroundWork()).toBe(false);
+        messages.push({ type: "system", subtype: "background_tasks_changed", tasks: [secondTask] });
+        await expect.poll(() => live.hasBackgroundWork()).toBe(true);
+        expect(events.some(event => event.type === "turn_started")).toBe(false);
+        await live.close();
+        expect(live.hasBackgroundWork()).toBe(false);
+    });
+});
 describe("Claude request headers", () => {
     const version = "2.1.322 (Claude Code)";
     const ua = "User-Agent: claude-cli/2.1.322 (external, cli)";

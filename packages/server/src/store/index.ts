@@ -99,7 +99,16 @@ export class Store {
     const rows = projectId === undefined ? this.db.prepare("SELECT id FROM runs ORDER BY rowid DESC").all() : this.db.prepare("SELECT id FROM runs WHERE json_extract(data, '$.projectId')=? ORDER BY rowid DESC").all(projectId);
     return rows.map((r) => {
       const s = this.snapshot(String(r.id));
-      return { ...s.run, ...(s.lastEventAt ? { lastEventAt: s.lastEventAt } : {}), rootAgentId: s.nodes.find((n) => n.id === s.run.rootNodeId)?.agentId ?? "", agents: [...new Set(s.nodes.map((n) => n.agentId))], nodeCount: s.nodes.length, activeNodeCount: s.run.status === "paused" ? 0 : s.nodes.filter((n) => ["starting", "running", "waiting_permission"].includes(n.status)).length, pendingPermissions: s.permissions.filter((p) => p.status === "pending").length, pendingTotal: this.inboxFor(s).length, backgroundCount: backgroundCount(s.backgroundProcesses), openPrCount: (s.pullRequests ?? []).filter((p) => !p.unlinkedAt && ["open", "draft"].includes(p.state)).length };
+      const root = s.nodes.find(node => node.id === s.run.rootNodeId);
+      const ordered = root ? [root, ...s.nodes.filter(node => node !== root)] : s.nodes;
+      const models: NonNullable<RunSummary["models"]> = [], seen = new Set<string>();
+      for (const { agentId, model } of ordered) {
+        const key = JSON.stringify([agentId, model]);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        models.push(model === undefined ? { agentId } : { agentId, model });
+      }
+      return { ...s.run, ...(s.lastEventAt ? { lastEventAt: s.lastEventAt } : {}), rootAgentId: root?.agentId ?? "", models, agents: [...new Set(s.nodes.map((n) => n.agentId))], nodeCount: s.nodes.length, activeNodeCount: s.run.status === "paused" ? 0 : s.nodes.filter((n) => ["starting", "running", "waiting_permission"].includes(n.status)).length, pendingPermissions: s.permissions.filter((p) => p.status === "pending").length, pendingTotal: this.inboxFor(s).length, backgroundCount: backgroundCount(s.backgroundProcesses), openPrCount: (s.pullRequests ?? []).filter((p) => !p.unlinkedAt && ["open", "draft"].includes(p.state)).length };
     });
   }
   private inboxFor(s: RunSnapshot): InboxItem[] {

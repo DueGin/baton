@@ -63,6 +63,8 @@ export class FakeDriver implements AgentDriver {
   }
 }
 export class FakeSession implements DriverSession {
+  backgroundWork = false;
+  hasBackgroundWork(): boolean { return this.backgroundWork; }
   supportsLongToolCalls(): boolean { return true; }
   sessionId: string = randomUUID(); turns = 0; closed = false;
   readonly prompts: string[] = []; readonly steered: string[] = [];
@@ -115,10 +117,17 @@ export class FakeSession implements DriverSession {
   private emit(event: DriverEvent): void { for (const listener of this.listeners) { try { listener(event); } catch { /* driver contract: never throw from listeners */ } } }
   async runtimeInfo(): Promise<{ model: string; modeId: string }> { return { model: this.spec.model ?? "fake-model", modeId: this.spec.modeId ?? "default" }; }
   async startTurn(input: PromptInput): Promise<{ turnId: string }> {
+    return this.runTurn(input);
+  }
+  async agentTurn(script: FakeScript): Promise<{ turnId: string }> {
+    return this.runTurn("", script);
+  }
+  private runTurn(input: PromptInput, agentScript?: FakeScript): { turnId: string } {
     if (this.closed) throw new Error("Fake session is closed");
-    if (this.active) throw new Error("Fake session already has an active turn");
+    if (this.active) throw new Error("A turn is already active");
     const prompt = fakePromptText(input), images = typeof input === "string" ? [] : input.filter((part): part is ImagePart => part.type === "image");
-    const id = randomUUID(), controller = new AbortController(); this.turns++; this.prompts.push(prompt); this.inputs.push(input);
+    const id = randomUUID(), controller = new AbortController(); this.turns++;
+    if (!agentScript) { this.prompts.push(prompt); this.inputs.push(input); }
     const item = (value: TimelineItem): void => { controller.signal.throwIfAborted(); this.emit({ type: "item", turnId: id, item: value, timestamp: new Date().toISOString() }); };
     const context: FakeContext = {
       prompt, input, images, turn: this.turns, spec: this.spec, signal: controller.signal,
@@ -155,9 +164,9 @@ export class FakeSession implements DriverSession {
         this.permissions.set(request.id, { request, resolve }); this.emit({ type: "permission_requested", turnId: id, request });
       }),
     };
-    const script = this.driver.options.scripts?.[this.turns - 1] ?? this.driver.options.script ?? demoScript;
+    const script = agentScript ?? this.driver.options.scripts?.[this.turns - 1] ?? this.driver.options.script ?? demoScript;
     const promise = new Promise<void>((resolve) => setImmediate(resolve)).then(async () => {
-      this.emit({ type: "session", sessionId: this.sessionId }); this.emit({ type: "turn_started", turnId: id });
+      this.emit({ type: "session", sessionId: this.sessionId }); this.emit({ type: "turn_started", turnId: id, ...(agentScript ? { origin: "agent" } : {}) });
       try {
         controller.signal.throwIfAborted(); await script(context); controller.signal.throwIfAborted();
         this.active = undefined; this.emit({ type: "turn_completed", turnId: id, usage: { inputTokens: 200, outputTokens: 100, totalCostUsd: 0.002 } });

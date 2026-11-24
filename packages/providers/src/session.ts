@@ -33,6 +33,16 @@ export abstract class ProviderSession implements AgentSession {
     protected identify(id: string): void { if (this.sessionId === id)
         return; this.sessionId = id; this.emit({ type: "thread_started", sessionId: id }); }
     protected timeline(item: AgentTimelineItem): void { this.emit({ type: "timeline", item, timestamp: new Date().toISOString(), ...(this.activeTurn ? { turnId: this.activeTurn } : {}) }); }
+    private beginTurn(origin?: "agent"): string {
+        const turnId = randomUUID();
+        this.activeTurn = turnId;
+        this.turnDone = new Promise(resolve => { this.resolveDone = resolve; });
+        this.emit({ type: "turn_started", turnId, ...(origin ? { origin } : {}) });
+        return turnId;
+    }
+    protected beginAgentTurn(): string | null {
+        return this.closed || this.activeTurn ? null : this.beginTurn("agent");
+    }
     async startTurn(prompt: AgentPromptInput): Promise<{
         turnId: string;
     }> {
@@ -40,10 +50,7 @@ export abstract class ProviderSession implements AgentSession {
             throw new Error("Session is closed");
         if (this.activeTurn)
             throw new Error("A turn is already active");
-        const turnId = randomUUID();
-        this.activeTurn = turnId;
-        this.turnDone = new Promise(resolve => { this.resolveDone = resolve; });
-        this.emit({ type: "turn_started", turnId });
+        const turnId = this.beginTurn();
         this.timeline({ type: "user_message", text: promptText(prompt) });
         try {
             await this.launchTurn(prompt);

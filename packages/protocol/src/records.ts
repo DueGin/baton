@@ -430,8 +430,12 @@ export interface DelegationRecord {
   subtreeUsage: UsageTotals;
 }
 
-/** `message`: a <baton-message> from another agent session (send_message). */
-export type TurnTrigger = "user" | "delegation" | "result" | "followup" | "correction" | "resume" | "message";
+/**
+ * `message`: a <baton-message> from another agent session (send_message).
+ * `agent`: the agent started the turn itself, without a prompt from baton — e.g. Claude Code waking
+ * up when a background task (`run_in_background`) finishes (DESIGN §4.1 "agent 自发回合").
+ */
+export type TurnTrigger = "user" | "delegation" | "result" | "followup" | "correction" | "resume" | "message" | "agent";
 export type TurnStatus = "running" | "completed" | "failed" | "canceled" | "interrupted";
 
 export interface TurnRecord {
@@ -741,6 +745,12 @@ export interface RunSummary {
   cwd: string;
   rootAgentId: string;
   agents: string[];
+  /**
+   * Distinct (agent, model) pairs of the run's nodes: root first, then by node creation order; a
+   * node without a known model contributes `{ agentId }`. The sidebar shows the first few as a
+   * stack of model icons (DESIGN §8 "会话列表"). Optional for older servers.
+   */
+  models?: Array<{ agentId: string; model?: string }>;
   nodeCount: number;
   activeNodeCount: number;
   pendingPermissions: number;

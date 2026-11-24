@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState, type MouseEvent } from "react";
-import type { RunSnapshot } from "@baton/protocol";
+import type { RunSnapshot, TurnTrigger } from "@baton/protocol";
 import { agentColors, duration, treeOrder } from "../lib/derive.js";
 import { coordinateTime, fitSession, followSession, niceTicks, panSession, pauseBands, sessionTimeline, splitAcrossGaps, timelineScale, waitingIntervals, workClock, workTicks, workTimeAt, zoomSession, type TimeViewport } from "../lib/timeline.js";
 import { escalationLabels } from "../lib/inbox.js";
@@ -7,7 +7,7 @@ import { actorLabels, changeLabels } from "../lib/teams.js";
 import { Toggle } from "./common.js";
 
 const ROW = 44; const HEADER = 40;
-const triggerColors: Record<string, string> = { user: "#5b8fce", delegation: "#8b7acb", result: "#37a28d", followup: "#c79852", correction: "#cf7a64", resume: "#78959b", message: "#b06fb0" };
+const triggerColors: Record<TurnTrigger, string> = { user: "#5b8fce", delegation: "#8b7acb", result: "#37a28d", followup: "#c79852", correction: "#cf7a64", resume: "#78959b", message: "#b06fb0", agent: "#8a9c49" };
 const toolColors: Record<string, string> = { shell: "#cf9b41", read: "#4c9bd4", edit: "#ae79d3", write: "#df80ad", search: "#35b2a7", fetch: "#7184df", baton: "#d57759", plan: "#9aaf4a", sub_agent: "#a08ce0", plain_text: "#8398a6" };
 const wallClock = (time: number) => new Date(time).toLocaleString("zh-CN", { hour12: false });
 
@@ -63,7 +63,7 @@ export function Timeline({ snapshot, inspect }: { snapshot: RunSnapshot; inspect
         <g clipPath={`url(#${pattern}-clip)`}>
           {segments(node.createdAt, nodeEnd).map((band, i) => <rect key={`life-${i}`} {...band} y={y + 5} height="33" rx="4" fill={node.status === "replaced" ? "var(--text-dim)" : agentColors[node.agentId] ?? "#758799"} opacity="0.09" onMouseMove={event => hover(event, nodeTooltip, node.createdAt, nodeEnd)} />)}
           {waitingIntervals(snapshot, node.id, end).flatMap(([start, finish], i) => segments(start, finish).map((band, j) => <rect key={`wait-${i}-${j}`} {...band} y={y + 39} height="3" rx="1" fill="none" stroke="var(--text-dim)" strokeDasharray="2 4" onMouseMove={event => hover(event, "等待子节点", start, finish)} />))}
-          {data.turns.flatMap(turn => segments(turn.startedAt, turn.status === "running" ? end : turn.endedAt ?? nodeEnd).map((band, i) => <rect key={`${turn.id}-${i}`} {...band} y={y + 8} height="11" rx="2" fill={triggerColors[turn.trigger]} opacity="0.85" onMouseMove={event => hover(event, `${turn.trigger} turn · ${turn.status}`, turn.startedAt, turn.status === "running" ? end : turn.endedAt ?? nodeEnd)} />))}
+          {data.turns.flatMap(turn => segments(turn.startedAt, turn.status === "running" ? end : turn.endedAt ?? nodeEnd).map((band, i) => <rect key={`${turn.id}-${i}`} data-turn-trigger={turn.trigger} {...band} y={y + 8} height="11" rx="2" fill={triggerColors[turn.trigger]} opacity="0.85" onMouseMove={event => hover(event, `${turn.trigger} turn · ${turn.status}`, turn.startedAt, turn.status === "running" ? end : turn.endedAt ?? nodeEnd)} />))}
           {data.permissions.flatMap(permission => segments(permission.requestedAt, permission.resolvedAt ?? nodeEnd).map((band, i) => <rect key={`${permission.id}-${i}`} {...band} y={y + 6} height="15" rx="2" fill={`url(#${pattern}-hatch)`} onMouseMove={event => hover(event, `${permission.request.title ?? "权限请求"} · ${permission.status}`, permission.requestedAt, permission.resolvedAt ?? nodeEnd)} />))}
           {data.tools.flatMap((span, i) => segments(span.startedAt, span.endedAt ?? nodeEnd).map((band, j) => <rect key={`${span.id}-${j}`} data-tool-kind={span.kind} {...band} y={y + 24 + i % 2 * 7} height="5" rx="1" fill={toolColors[span.kind] ?? "#8794a4"} stroke={span.status === "failed" ? "var(--red)" : "none"} strokeWidth="1" onMouseMove={event => hover(event, `工具 · ${span.kind} / ${span.name}\n${span.summary ?? ""}\n${span.status}`, span.startedAt, span.endedAt ?? nodeEnd)}><title>{`${span.kind}: ${span.summary ?? span.name}`}</title></rect>))}
           {data.questions.flatMap(question => segments(question.askedAt, question.answeredAt ?? nodeEnd).map((band, i) => <rect key={`${question.id}-${i}`} {...band} y={y + 20} height="3" fill="var(--blue)" onMouseMove={event => hover(event, `提问 · ${question.blocking ? "等你回答" : "不阻塞"} · ${question.status}\n${question.question}\n${question.answer ?? "尚未回答"}`, question.askedAt, question.answeredAt ?? nodeEnd)} />))}

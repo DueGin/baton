@@ -107,7 +107,17 @@ export class DemoClient implements BatonClient {
     this.data.set(backgroundRun.snapshot.run.id, backgroundRun);
     this.emit(backgroundRun, { type: "run.updated", patch: { title: "后台服务 · Vite 与 Python", projectId: "project-atlas", titleSource: "human" } });
     demoBackground(backgroundRun.snapshot, now()).forEach(process => this.emit(backgroundRun, { type: "background", process }));
-    const idle = idleScenario(now() - 9_000_000); idle.run.projectId = "project-notes"; idle.run.cwd = "/workspace/notes"; this.data.set(idle.run.id, { snapshot: idle, log: [], remaining: [] });
+    const idle = idleScenario(now() - 9_000_000); idle.run.projectId = "project-notes"; idle.run.cwd = "/workspace/notes";
+    const wakeup = idle.turns.find(turn => turn.trigger === "agent")!;
+    const wakeupRows: TimelineItem[] = [
+      { type: "notice", level: "info", message: "后台任务完成：npm run build" },
+      { type: "assistant_message", text: "构建已通过，产物已更新。" },
+    ];
+    const idleLog: RunEventEnvelope[] = wakeupRows.map((item, index) => {
+      const ts = index === 0 ? wakeup.startedAt : wakeup.endedAt!;
+      return { type: "item", runId: idle.run.id, nodeId: wakeup.nodeId, turnId: wakeup.id, seq: index + 1, itemSeq: index + 1, ts, itemTs: ts, item };
+    });
+    this.data.set(idle.run.id, { snapshot: idleLog.reduce(applyEvent, idle), log: idleLog, remaining: [] });
     const prDemo = pullRequestDemo(now()); const prData: DemoRun = { snapshot: prDemo.snapshot, log: [], remaining: [] }; this.data.set(prDemo.snapshot.run.id, prData);
     prDemo.items.forEach(row => this.emit(prData, { type: "item", nodeId: row.nodeId, itemSeq: row.seq, itemTs: row.ts, item: row.item }));
     prDemo.prs.forEach(pr => this.emit(prData, { type: "pr", pr }));

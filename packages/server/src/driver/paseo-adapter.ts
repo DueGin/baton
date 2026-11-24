@@ -72,6 +72,7 @@ function parsePersistence(value: JsonValue, expectedProvider: string): AgentPers
     return { provider: expectedProvider as AgentPersistenceHandle["provider"], sessionId: value.sessionId, ...(typeof value.sessionFile === "string" ? { sessionFile: value.sessionFile } : {}) };
 }
 export class PaseoDriverSession implements DriverSession {
+    hasBackgroundWork(): boolean { return this.session.hasBackgroundWork?.() ?? false; }
     listCommands?: DriverSession["listCommands"];
     supportsLongToolCalls(): boolean { return this.session.supportsLongToolCalls?.() ?? false; }
     /** Present only when the provider session can rewind natively (DESIGN §4.13); else the kernel replays. */
@@ -145,6 +146,7 @@ export class PaseoDriverSession implements DriverSession {
 }
 export function mapProviderEvent(event: AgentStreamEvent): DriverEvent | null {
     switch (event.type) {
+        case "turn_started": return event;
         case "thread_started": return { type: "session", sessionId: event.sessionId };
         case "timeline": {
             const item = mapTimelineItem(event.item);

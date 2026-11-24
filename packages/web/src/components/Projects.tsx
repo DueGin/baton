@@ -4,7 +4,8 @@ import type { PatchRunRequest, PullRequestRecord, ListDirsResponse, ProjectRecor
 import type { BatonClient } from "../api.js";
 import { groupProjects, pathBasename, readCollapsedProjects, saveCollapsedProjects } from "../lib/projects.js";
 import { errorText } from "../store.js";
-import { agentColors, cost, statusLabels } from "../lib/derive.js";
+import { cost, statusLabels } from "../lib/derive.js";
+import { ModelIcon } from "./AgentIcon.js";
 import { CopyButton } from "./CopyButton.js";
 import { ContextMenu, type ContextMenuEntry } from "./ContextMenu.js";
 import { Empty, Icon } from "./common.js";
@@ -13,7 +14,9 @@ import { desktopBridge } from "../desktop.js";
 import { DesktopAddProject } from "./DesktopAddProject.js";
 
 export function ProjectLink({ project, open, details = false }: { project: ProjectSummary; open: () => void; details?: boolean }) {
-  return <button type="button" className={`project-link${details ? " project-link-detail" : ""}`} onClick={open} title={`${project.name}\n${project.path}${project.gitBranch ? `\n${project.gitBranch}` : ""}`}><Icon name="folder" size={13} /><span>{project.name}</span>{project.gitBranch && <code>{project.gitBranch}</code>}{details && <small>{project.path}</small>}</button>;
+  return <button type="button" className={`project-link${details ? " project-link-detail" : ""}`} onClick={open} title={`${project.name}\n${project.path}${project.gitBranch ? `\n${project.gitBranch}` : ""}`}>
+    <Icon name="folder" size={13} /><span className="project-link-name">{project.name}</span>{project.gitBranch && <code className="project-link-branch">{project.gitBranch}</code>}{details && <small>{project.path}</small>}
+  </button>;
 }
 export function ProjectsEmpty({ add }: { add: () => void }) { return <Empty><Icon name="folder" size={42} /><h1>添加项目（工作目录）后才能开始会话</h1><p>将工作目录登记为项目，在项目中创建和管理会话。</p><button type="button" className="button primary" onClick={add}><Icon name="plus" size={15} />添加项目</button></Empty>; }
 export function DirectoryBrowser({ value, loading, browse, select }: { value?: ListDirsResponse; loading: boolean; browse: (path: string) => void; select: (path: string) => void }) {
@@ -56,6 +59,19 @@ function ArchivedRuns({ runs, renderRun }: { runs: RunSummary[]; renderRun: (run
     <button type="button" className="project-archived-runs-toggle" aria-expanded={open} onClick={() => setOpen(value => !value)}><span aria-hidden="true">{open ? "▾" : "▸"}</span>已归档会话 {runs.length}</button>
     {open && runs.map(renderRun)}
   </div>;
+}
+function RunModelStack({ run }: { run: RunSummary }) {
+  const models: NonNullable<RunSummary["models"]> = run.models ?? [
+    ...run.agents.filter(agentId => agentId === run.rootAgentId),
+    ...run.agents.filter(agentId => agentId !== run.rootAgentId),
+  ].map(agentId => ({ agentId }));
+  if (!models.length) return null;
+  const label = models.map(({ agentId, model }) => `${agentId} · ${model ?? "未知模型"}`).join("\n");
+  const overflow = models.length - 4;
+  return <span className="run-model-stack" title={label} aria-label={label} role="img">
+    {models.slice(0, 4).map(({ agentId, model }) => <span className="run-model-chip" key={JSON.stringify([agentId, model])}><ModelIcon model={model} fallbackAgent={agentId} size={11} /></span>)}
+    {overflow > 0 && <span className="run-model-chip run-model-overflow">+{overflow}</span>}
+  </span>;
 }
 export function ProjectGroups({ pullRequests = [], projects, runs, runId, currentId, page, reveal, choose, selectProject, newRun, add, canCreate, mutate, loading, mutateRun, draftProjectId }: ProjectGroupsProps) {
   const collapsed = useSyncExternalStore(subscribeCollapsed, collapsedSnapshot, collapsedSnapshot); const setCollapsed = setCollapsedState; const [archivedOpen, setArchivedOpen] = useState(false);
@@ -104,7 +120,7 @@ export function ProjectGroups({ pullRequests = [], projects, runs, runId, curren
         setRunMenu({ id: run.id, x: left, y: bottom, trigger: event.currentTarget });
       }}>
       <div className="run-list-heading">{run.status === "paused" ? <span className="run-paused-icon" title="已暂停"><Icon name="pause" size={11} /></span> : <i className={`run-dot status-${run.status}`} />}<span>{run.title}</span>{run.titleSource === "generated" && <span className="generated-title-mark" title="由标题模型命名">✦</span>}{run.pendingTotal > 0 && <span className="permission-count">{run.pendingTotal}</span>}</div>
-      <div className="run-list-meta"><span className="run-agent-dots">{run.agents.map(agent => <i key={agent} style={{ background: agentColors[agent] ?? "#758799" }} title={agent} />)}{run.nodeCount} agents</span><span>{cost(run.usage.costUsd)}</span></div>
+      <div className="run-list-meta"><span className="run-agents"><RunModelStack run={run} /><span>{run.nodeCount} agents</span></span><span>{cost(run.usage.costUsd)}</span></div>
       <div className="run-list-bottom">{(run.backgroundCount ?? 0) > 0 && <span className="run-background-count" title={`${run.backgroundCount} 个后台进程`}><Icon name="server" size={11} />{run.backgroundCount}</span>}{(run.openPrCount ?? 0) > 0 && <span className={`run-pr-count pr-tone-${prTone(pullRequests.filter(pr => pr.runId === run.id))}`} title="Open / Draft PR">⑂ {run.openPrCount} PR</span>}<span>{statusLabels[run.status]}</span><span>{new Date(run.updatedAt).toLocaleDateString("zh-CN", { month: "short", day: "numeric" })}</span></div>
     </button>;
   };

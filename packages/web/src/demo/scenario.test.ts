@@ -7,6 +7,17 @@ import { parseBatonMessage } from "../lib/baton-messages.js";
 const base = Date.parse("2026-11-10T07:00:00Z");
 
 describe("deterministic demo protocol stream", () => {
+  it("lists mixed-vendor model pairs for a demo run with model-stack overflow", async () => {
+    const client = new DemoClient(() => base + 86000);
+    const runs = await client.runs();
+    expect(runs.find(run => run.id === "run-demo")?.models).toEqual([
+      { agentId: "claude", model: "claude-sonnet-4-6" },
+      { agentId: "codex", model: "gpt-5.3-codex" },
+      { agentId: "claude", model: "claude-haiku-4-5" },
+      { agentId: "pi", model: "gemini-2.5-pro" },
+      { agentId: "pi", model: "qwen3-max" },
+    ]);
+  });
   it("only updates existing records and produces valid timestamps, relationships and item replacements", () => {
     const scenario = createScenario(base); let snapshot: RunSnapshot = scenario.initial;
     const rowSeqs = new Map<string, Set<number>>(); let replacements = 0;

@@ -45,6 +45,17 @@ describe("transcript scrolling", () => {
 });
 
 describe("safe agent content rendering", () => {
+  it("renders the demo wake-up notice before the assistant reply and labels the turn footer", async () => {
+    const now = Date.parse("2026-11-10T07:00:00Z");
+    const client = new DemoClient(() => now);
+    const snapshot = await client.run("run-idle-gaps"); const nodeId = snapshot.run.rootNodeId;
+    const turn = snapshot.turns.find(turn => turn.nodeId === nodeId && turn.trigger === "agent");
+    expect(turn?.status).toBe("completed");
+    const { items } = await client.items(nodeId);
+    expect(items.filter(row => row.turnId === turn?.id).map(row => row.item.type)).toEqual(["notice", "assistant_message"]);
+    const html = renderToStaticMarkup(<Transcript showTopology={() => undefined} snapshot={snapshot} store={new RunStore(client)} items={{ [nodeId]: items }} itemStatus={{ [nodeId]: "ready" }} nodeId={nodeId} setNodeId={() => undefined} now={now} inspect={() => undefined} answer={() => undefined} busy={false} />);
+    expect(html).toMatch(/class="notice-row info"[^>]*>.*后台任务完成：npm run build.*构建已通过.*自主唤醒/s);
+  });
   it("renders the anchored question between the agent introduction and same-turn continuation", async () => {
     const now = Date.parse("2026-11-10T07:00:00Z"); const client = new DemoClient(() => now); const store = new RunStore(client);
     const snapshot = await client.run("run-questions"); const question = snapshot.questions[0]!;
