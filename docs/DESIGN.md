@@ -531,6 +531,23 @@ interface BatonDesktopBridge {
 **控制台**：收到的消息渲染成「收到会话消息」卡片，带上发送者的 agent、角色、状态和来源（项目 · Run 标题），点发送者跳到那个会话（跨 Run 也能跳）；发出的 `send_message` 渲染成「发送消息给」卡片；时间线里这一轮标为「会话消息」。
 
 
+### 4.17 任务（收集 → 一键开始 → 实时跟进）
+
+**任务**（`TaskRecord`，协议见 `records.ts` / `api.ts`）是一条还没变成 Run 的工作：标题、提示词（可空，空时把标题当第一条消息）、所属项目，以及可选的 agent / 模型 / 预设团队。任务存在 daemon 的 SQLite `tasks` 表里（`id TEXT PRIMARY KEY, data TEXT`），跨客户端可见。
+
+- **收集**：`POST /api/tasks` 新建；`PATCH /api/tasks/:id` 修改（`null` 清空可选字段）；`DELETE /api/tasks/:id` 删除（已开始的任务只删任务本身，不动它的 Run）。标题 1–200 字；项目必须存在、未归档。
+- **开始**：`POST /api/tasks/:id/start`（`StartTaskRequest` 可覆盖 agent、模型、模式、思考、预设、策略）调用和 `POST /api/runs` 相同的 `createRun`，`title` = 任务标题，成功后写入 `runId`、`startedAt`，清掉 `error`。已开始 → 409；建 Run 失败 → 400，并把错误写进 `task.error`（任务仍是 todo，可以改了再开始）。同一个任务并发开始只会建一个 Run。
+- **一键开始**：`POST /api/tasks/start {ids, start?}` 按顺序逐个开始，跳过非 todo 的，单个失败不影响其余，返回 `StartTasksResponse`。
+- **状态**：`TaskSummary.status` 未开始是 `todo`，开始后就是关联 Run 的状态（Run 不存在了记 `canceled`）；`run` 带关联 Run 的 `RunSummary`（活跃节点数、待处理数、费用、最近活动）。`GET /api/tasks?projectId=` 返回 `TaskSummary[]`：todo 在前按创建时间正序，已开始的按 `startedAt` 倒序。
+- **实时**：`GET /api/tasks/events`（SSE，和 `/api/inbox/events` 一样）在任务增删改、或任一关联 Run 有新事件时推送 `event: changed`（合并 ≤250ms），客户端收到后重新拉 `GET /api/tasks`。
+- **控制台**：左侧导航栏顶部（「新建 Run」下面）有「任务」入口，角标是进行中（`active`）的任务数。任务页是**看板**：顶部快速添加（标题 + 可展开的提示词、项目、agent / 模型 / 预设），下面四列横向排列（窄屏横向滚动），每列标题带数量：
+  - 「待开始」：`todo`。卡片可勾选、编辑、删除、「开始」；列头有「开始所选 (N)」「全部开始」（一键开始）。启动失败的错误显示在卡片上。
+  - 「进行中」：`active`。
+  - 「待你处理」：已开始、还没结束（不是 completed / failed / canceled）且 `run.pendingTotal > 0`，或者 Run 已暂停（`paused`）。
+  - 「已结束」：其余的 `idle`、`completed`、`failed`、`canceled`。
+  - 已开始的卡片显示 Run 状态徽章（运行中有呼吸动画）、活跃 agent 数、待处理数、费用、最近活动时间，点卡片跳到那个 Run 的会话。把「待开始」的卡片**拖到**「进行中」列就开始这个任务（和点「开始」一样）；其他拖放不做。
+  - 任务没设 agent 也没设预设时，开始时用这个项目上次用的 agent（`baton.projectAgent.<id>`），没有就用第一个可用的 agent；卡片上写成「默认 Agent（实际名称）」。
+
 ## 5. Driver 接口（server 和 providers 之间的边界）
 
 契约文件是 `packages/server/src/driver/types.ts`。内核只依赖这个接口：
@@ -609,6 +626,10 @@ interface BatonDesktopBridge {
 | POST | `/api/runs/:runId/team/save-preset` | `SaveTeamPresetRequest`，当前名单另存为预设 |
 | GET/POST | `/api/teams` | 列出 / 新建预设团队（`TeamPresetInput`） |
 | PUT/DELETE | `/api/teams/:id` | 修改 / 删除预设团队 |
+| GET/POST | `/api/tasks?projectId=` | `TaskSummary[]` / `CreateTaskRequest` → `TaskSummary`（§4.17） |
+| PATCH/DELETE | `/api/tasks/:id` | `PatchTaskRequest` → `TaskSummary` / 删除任务 |
+| POST | `/api/tasks/:id/start` · `/api/tasks/start` | `StartTaskRequest` → `TaskSummary` · `StartTasksRequest` → `StartTasksResponse`（一键开始） |
+| GET | `/api/tasks/events` | 任务变化推送（SSE，`event: changed`） |
 | GET | `/api/runs/:runId/export?format=json｜otlp｜md` | 导出 |
 | ALL | `/mcp/n/:nodeToken` | MCP Streamable HTTP，**不走** Bearer 鉴权，凭 token 识别节点 |
 
@@ -846,6 +867,10 @@ interface BatonDesktopBridge {
    - 左下角是一排只有图标的按钮：设置、团队、待处理（待处理数显示成角标），最右边是主题切换。收起时这一排竖着排列。
    - 可以调宽度：拖动右边缘，最小 200px、最大 440px，双击恢复默认 260px。
    - 收起状态和宽度都存在 localStorage。窄屏（≤900px）默认收起，展开时浮在内容上方。
+   - **排序**：项目按最近活动倒序（项目下最新会话的活动时间，没有会话用项目的 `lastRunAt` / `createdAt`），同时刻按名称；项目内的会话按**最近活动时间**倒序，同时刻按 id。最近活动时间 = `RunSummary.lastActivityAt ?? lastEventAt ?? updatedAt`。`lastActivityAt` 是最近一个「活动事件」的时间（`isActivityEvent`，`reduce.ts`）：只改标题、重新生成标题、归档 / 取消归档、改策略的 `run.updated` 不算活动，所以改名、归档不会让会话跳到顶部，也不会变成未读。会话行末尾显示的日期也是最近活动时间（当天显示 HH:mm，否则显示月日）。服务端在快照和 `GET /api/runs` 里给出 `lastActivityAt`，客户端用 `applyEvent` 实时推进它。
+   - **未读会话**：会话有新活动（最近活动时间，见上）且晚于你上次看它的时间，就算未读：会话行右侧显示一个强调色小圆点，标题加粗；项目分组头显示该项目的未读数；收起成图标条时 Run 列表按钮上显示未读角标。正在看的会话（选中且在 Run 页）随时标为已读。已读时间按 Run 存在 localStorage（`baton.runSeen`）；第一次加载时已有的会话都当作已读，不会全部亮起。右键菜单多一项「标为未读 / 标为已读」。
+   - **列表工具**：「PROJECTS」标题行右侧有两个图标按钮：「只看未读」筛选（开启时只显示有未读会话的项目和未读会话，选中的会话始终保留；没有未读时显示「没有未读会话」），和「全部折叠 / 全部展开」项目分组。筛选开关存在 localStorage。
+   - **选中内容添加到对话**（参考 Codex）：在会话 transcript 里用鼠标选中文字后，选区上方浮出一个小按钮「添加到对话」；点击后把选中的文字作为 Markdown 引用块（`> …`，多行逐行加 `>`）插入当前输入框草稿末尾并聚焦输入框，选区清除。只对消息正文生效（不含输入框、按钮、工具栏）；滚动、按 Esc、点别处或选区为空时浮窗消失。
    - 标题旁有"重命名"和"重新生成标题"，标题来源由生成模型生成时，标一个小图标。
    - 设置页有"标题模型"一节：启用开关、Base URL、模型、API Key（只写）或环境变量名，以及"测试"按钮，测试时显示生成的标题和耗时。
 

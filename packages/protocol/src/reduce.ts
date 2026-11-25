@@ -22,10 +22,23 @@ function patchById<T extends { id: string }>(list: T[], id: string, patch: Parti
   return next;
 }
 
+/** run.updated patch keys that only edit how a run is shown or governed, not what it did. */
+const COSMETIC_RUN_KEYS = new Set(["title", "titleSource", "archived", "archivedAt", "policy", "updatedAt"]);
+
+/**
+ * True unless the event is a run.updated whose patch only touches COSMETIC_RUN_KEYS (rename, title
+ * regeneration, archive / unarchive, policy toggles). Such edits must not reorder the sidebar or
+ * mark a run unread. Status, usage, pauses and every non-run.updated event count as activity.
+ */
+export function isActivityEvent(event: Pick<RunEventEnvelope, "type"> & { patch?: object }): boolean {
+  if (event.type !== "run.updated" || !event.patch) return true;
+  return Object.keys(event.patch).some((key) => !COSMETIC_RUN_KEYS.has(key));
+}
+
 /** Returns a new snapshot (or the same object when the event is older than lastSeq). */
 export function applyEvent(snapshot: RunSnapshot, event: RunEventEnvelope): RunSnapshot {
   if (event.seq <= snapshot.lastSeq) return snapshot;
-  const next: RunSnapshot = { ...snapshot, lastSeq: event.seq, lastEventAt: event.ts };
+  const next: RunSnapshot = { ...snapshot, lastSeq: event.seq, lastEventAt: event.ts, ...(isActivityEvent(event) ? { lastActivityAt: event.ts } : {}) };
   switch (event.type) {
     case "run.created":
       next.run = event.run;

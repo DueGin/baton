@@ -1,5 +1,7 @@
 import { applyEvent, emptyUsage, type CreateRunRequest, type DelegationRecord, type GetItemsResponse, type PatchRunRequest, type PermissionDecision, type RunEvent, type RunEventEnvelope, type RunSnapshot, type TimelineItem, type AddMemberRequest, type ReplaceMemberRequest, type ReassignRequest, type TeamPreset, type TeamPresetInput, type SaveTeamPresetRequest, type TeamRecord, type TeamMember, type TeamMemberSpec, type TeamChange, type TeamProposal, type ApproveTeamProposalRequest, type RejectTeamProposalRequest, type InboxItem, type AnswerQuestionRequest, type ResolveEscalationRequest, type PermissionRule, type CreatePermissionRuleRequest, type QuestionRecord, type EscalationRecord, type SendMessageResponse, type SettingsResponse, type UpdateSettingsRequest, type TestTitleModelRequest, type TestTitleModelResponse } from "@baton/protocol";
 import { idleScenario } from "./idle.js";
+import { DemoTasks } from "./tasks.js";
+import type { CreateTaskRequest, PatchTaskRequest, StartTaskRequest, StartTasksRequest } from "@baton/protocol";
 import type { NodeRecord, UpdateNodeConfigRequest, UpdateNodeConfigResponse } from "@baton/protocol";
 import { activeTurn, conversationRows } from "../lib/conversation.js";
 import { compatibleThinking, findModel, thinkingOptions } from "../lib/models.js";
@@ -68,7 +70,12 @@ export class DemoClient implements BatonClient {
   private heldMessages = new Map<string, string[]>();
   private attachments = new Map<string, { blob: Blob; record: AttachmentRecord }>();
   private attachmentSerial = 0;
+  private readonly taskBoard: DemoTasks;
   constructor(private readonly now: () => number = Date.now) {
+    this.taskBoard = new DemoTasks({ now, advance: () => this.advance(), createRun: request => this.createRun(request, 4000),
+      checkProject: id => { const project = this.projectRecords.get(id); if (!project) throw new HttpError(404, "项目不存在"); if (project.archived) throw new HttpError(400, "项目已归档"); },
+      run: id => { const data = this.data.get(id); return data && summarize(data.snapshot); },
+    });
     initialDemoProjects(new Date(now() - 86_400_000).toISOString()).forEach(project => this.projectRecords.set(project.id, project));
     const scenario = createScenario(now() - 86000);
     let snapshot = scenario.initial;
@@ -76,6 +83,7 @@ export class DemoClient implements BatonClient {
     for (const event of log) snapshot = applyEvent(snapshot, event);
     snapshot = { ...snapshot, run: { ...snapshot.run, projectId: "project-atlas" } };
     this.data.set(snapshot.run.id, { snapshot, log, remaining: scenario.events.filter(event => Date.parse(event.ts) > now()) });
+    this.taskBoard.seed(summarize(snapshot));
     const archived = createScenario(now() - 86400000, "run-previous");
     let previous = archived.events.reduce(applyEvent, archived.initial);
     previous = {
@@ -123,6 +131,13 @@ export class DemoClient implements BatonClient {
     prDemo.prs.forEach(pr => this.emit(prData, { type: "pr", pr }));
   }
   agents = async () => structuredClone(demoAgents);
+  tasks = (projectId?: string) => this.taskBoard.list(projectId);
+  createTask = (request: CreateTaskRequest) => this.taskBoard.create(request);
+  patchTask = (id: string, request: PatchTaskRequest) => this.taskBoard.patch(id, request);
+  deleteTask = (id: string) => this.taskBoard.remove(id);
+  startTask = (id: string, request?: StartTaskRequest) => this.taskBoard.start(id, request);
+  startTasks = (request: StartTasksRequest) => this.taskBoard.startMany(request);
+  taskEvents = (changed: () => void, signal: AbortSignal) => this.taskBoard.events(changed, signal);
   commands = async (query: CommandQuery): Promise<ListCommandsResponse> => {
     const node = "nodeId" in query ? this.forNode(query.nodeId).snapshot.nodes.find(entry => entry.id === query.nodeId) : undefined;
     const agent = "agentId" in query ? query.agentId : node?.agentId;
@@ -188,6 +203,7 @@ export class DemoClient implements BatonClient {
     const envelope = { ...event, runId: data.snapshot.run.id, seq: data.snapshot.lastSeq + 1, ts: new Date(this.now()).toISOString() } as RunEventEnvelope;
     data.snapshot = applyEvent(data.snapshot, envelope); data.log.push(envelope);
     this.listeners.forEach(listener => listener(envelope));
+    this.taskBoard.runChanged(envelope.runId);
     if (["permission", "question", "escalation", "team.updated", "run.updated", "node.updated"].includes(event.type)) this.inboxListeners.forEach(listener => listener());
     if (event.type === "node.updated" && event.patch.status && terminal(event.patch.status)) {
       for (const row of this.queuedMessages(data, event.nodeId)) {
@@ -282,7 +298,7 @@ export class DemoClient implements BatonClient {
       if (!terminal(data.snapshot.run.status) && ready.some(event => event.seq === 0 && event.type !== "background") && data.snapshot.nodes.every(node => node.status === "idle" || terminal(node.status))) this.emit(data, { type: "run.updated", patch: { status: "idle", updatedAt: new Date(this.now()).toISOString() } });
     }
   }
-  async createRun(request: CreateRunRequest): Promise<RunSnapshot> {
+  async createRun(request: CreateRunRequest, firstTurnMs = 0): Promise<RunSnapshot> {
     if (!request.projectId) throw new Error("400 · projectId 必填");
     const project = this.projectRecords.get(request.projectId); if (!project) throw new Error("404 · 项目不存在");
     if (project.archived) throw new Error("400 · 项目已归档");
@@ -297,13 +313,17 @@ export class DemoClient implements BatonClient {
     const lead = preset?.lead ?? { agentId: request.agent ?? "claude", model: request.model, modeId: request.modeId, thinking: request.thinking };
     const mode = preset ? "preset" : request.policy?.mode ?? "dynamic";
     const snapshot: RunSnapshot = { run: { id, projectId: project.id, title: request.title || request.prompt.slice(0, 28), titleSource: request.title ? "human" : "prompt", status: "active", cwd, rootNodeId, createdAt: ts, updatedAt: ts, policy: { maxDepth: 3, maxActiveChildren: 6, autoApprove: false, teamApproval: true, maxTeamSize: 5, stallMinutes: 10, ...request.policy, mode }, usage: emptyUsage() }, nodes: [{ id: rootNodeId, runId: id, parentNodeId: null, delegationId: null, depth: 0, ...lead, title: request.title || "处理用户请求", status: "running", activity: "分析任务", cwd, usage: emptyUsage(), turns: 1, createdAt: ts, updatedAt: ts }], turns: [{ id: `${id}:t1`, runId: id, nodeId: rootNodeId, status: "running", trigger: "user", startedAt: ts }], delegations: [], permissions: [], questions: [], escalations: [], toolSpans: [], lastSeq: 0 };
-    const data = { snapshot, log: [], remaining: [] }; this.data.set(id, data);
+    const data: DemoRun = { snapshot, log: [], remaining: [] }; this.data.set(id, data);
     this.append(data, rootNodeId, { type: "user_message", text: request.prompt });
     this.append(data, rootNodeId, { type: "notice", level: "info", message: "这是浏览器内 demo。消息与操作保存在本次会话中，不会调用本机 agent。" });
     this.append(data, rootNodeId, { type: "assistant_message", text: "收到任务。我会先检查项目结构，再根据工作范围创建委派。\n\n当前为 demo 模式；连接 daemon 后会启动真实 agent。" });
-    this.emit(data, { type: "node.updated", nodeId: rootNodeId, patch: { status: "idle", activity: "等待下一条消息" } });
-    this.emit(data, { type: "turn.updated", turnId: `${id}:t1`, patch: { status: "completed", endedAt: ts } });
-    this.emit(data, { type: "run.updated", patch: { status: "idle" } });
+    const endedAt = firstTurnMs ? new Date(this.now() + firstTurnMs).toISOString() : ts;
+    const finishTurn: RunEvent[] = [
+      { type: "node.updated", nodeId: rootNodeId, patch: { status: "idle", activity: "等待下一条消息" } },
+      { type: "turn.updated", turnId: `${id}:t1`, patch: { status: "completed", endedAt } },
+    ];
+    if (firstTurnMs) data.remaining.push(...finishTurn.map(event => ({ ...event, seq: 0, runId: id, ts: endedAt })));
+    else { finishTurn.forEach(event => this.emit(data, event)); this.emit(data, { type: "run.updated", patch: { status: "idle" } }); }
     const extra = mode === "solo" ? [] : (request.candidates ?? []).filter(candidate => !(preset?.candidates ?? []).some(existing => JSON.stringify(cleanCandidate(existing)) === JSON.stringify(cleanCandidate(candidate))));
     const candidates = [...preset?.candidates ?? [], ...extra].map((candidate, index) => ({ ...cleanCandidate(candidate), id: `c${index + 1}` }));
     const pool = candidates.length ? { candidates } : {};
@@ -446,9 +466,9 @@ export class DemoClient implements BatonClient {
 
     const edge: DelegationRecord = { id, runId: data.snapshot.run.id, kind: "delegate", fromNodeId: parentId, toNodeId: nodeId, role: member.role, memberId, brief, status: "queued", round: 1, createdAt: ts, subtreeUsage: emptyUsage(), ...(blockedByProposal ? { blockedByProposal } : {}), ...(replaces ? { replaces } : {}) };
     this.emit(data, { type: "delegation.created", delegation: edge });
-    if (!blockedByProposal) this.startTask(data, edge, memberId);
+    if (!blockedByProposal) this.startDelegation(data, edge, memberId);
   }
-  private startTask(data: DemoRun, old: DelegationRecord, memberId?: string): void {
+  private startDelegation(data: DemoRun, old: DelegationRecord, memberId?: string): void {
     const { blockedByProposal: _blocked, ...reserved } = old;
     const ts = new Date(this.now()).toISOString(); const member = activeMembers(data.snapshot.run.team).find(entry => entry.id === memberId);
     if (!member) throw new Error("任务需要活跃团队成员");
@@ -499,7 +519,7 @@ export class DemoClient implements BatonClient {
     }
     for (const edge of data.snapshot.delegations.filter(edge => edge.blockedByProposal === proposalId)) {
       const member = members.find(member => member.role === edge.role);
-      if (member) this.startTask(data, edge, member.id); else this.cancelQueued(data, edge);
+      if (member) this.startDelegation(data, edge, member.id); else this.cancelQueued(data, edge);
     }
     const originalSpecs = (proposal.members ?? (proposal.replace ? [proposal.replace.with] : [])).map(cleanMember);
     const originalRoles = originalSpecs.map(member => member.role);
@@ -787,7 +807,7 @@ export class DemoClient implements BatonClient {
         else if (held.length) this.startReply(data, node.id, held.join("\n\n"), "result");
       }
     }
-    for (const edge of data.snapshot.delegations.filter(edge => edge.status === "queued" && !edge.blockedByProposal)) this.startTask(data, edge, edge.memberId);
+    for (const edge of data.snapshot.delegations.filter(edge => edge.status === "queued" && !edge.blockedByProposal)) this.startDelegation(data, edge, edge.memberId);
     return structuredClone(data.snapshot.run);
   }
   async cancelNode(nodeId: string): Promise<void> {

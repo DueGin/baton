@@ -9,6 +9,7 @@ import type {
   SendMessageResponse, SendMode, DeliverMessageRequest, EditMessageRequest, ReorderQueueRequest, ReorderQueueResponse, InboxItem, AnswerQuestionRequest, ResolveEscalationRequest, PermissionRule, CreatePermissionRuleRequest,
   AttachmentRecord, ListCheckpointsResponse, CheckpointChangesResponse, RollbackRequest, RollbackResponse,
   ListCommandsResponse, SearchFilesResponse,
+  TaskSummary, CreateTaskRequest, PatchTaskRequest, StartTaskRequest, StartTasksRequest, StartTasksResponse,
 } from "@baton/protocol";
 
 /** The server may attach availability warnings to successful preset mutations. */
@@ -67,6 +68,13 @@ export interface BatonClient {
   rejectTeam(runId: string, proposalId: string, request: RejectTeamProposalRequest): Promise<void>;
   inbox(): Promise<InboxItem[]>;
   inboxEvents(changed: () => void, signal: AbortSignal): Promise<void>;
+  tasks(projectId?: string): Promise<TaskSummary[]>;
+  createTask(request: CreateTaskRequest): Promise<TaskSummary>;
+  patchTask(id: string, request: PatchTaskRequest): Promise<TaskSummary>;
+  deleteTask(id: string): Promise<void>;
+  startTask(id: string, request?: StartTaskRequest): Promise<TaskSummary>;
+  startTasks(request: StartTasksRequest): Promise<StartTasksResponse>;
+  taskEvents(changed: () => void, signal: AbortSignal): Promise<void>;
   answer(id: string, request: AnswerQuestionRequest): Promise<void>;
   declineQuestion(id: string): Promise<void>;
   resolveEscalation(id: string, request: ResolveEscalationRequest): Promise<void>;
@@ -179,13 +187,23 @@ export class ApiClient implements BatonClient {
   approveTeam = (id: string, proposalId: string, body: ApproveTeamProposalRequest) => this.request<void>(`/runs/${encodeURIComponent(id)}/team/proposals/${encodeURIComponent(proposalId)}/approve`, "POST", body);
   rejectTeam = (id: string, proposalId: string, body: RejectTeamProposalRequest) => this.request<void>(`/runs/${encodeURIComponent(id)}/team/proposals/${encodeURIComponent(proposalId)}/reject`, "POST", body);
   inbox = () => this.request<InboxItem[]>("/inbox");
+  tasks = (projectId?: string) => this.request<TaskSummary[]>(`/tasks${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`);
+  createTask = (body: CreateTaskRequest) => this.request<TaskSummary>("/tasks", "POST", body);
+  patchTask = (id: string, body: PatchTaskRequest) => this.request<TaskSummary>(`/tasks/${encodeURIComponent(id)}`, "PATCH", body);
+  deleteTask = (id: string) => this.request<void>(`/tasks/${encodeURIComponent(id)}`, "DELETE");
+  startTask = (id: string, body: StartTaskRequest = {}) => this.request<TaskSummary>(`/tasks/${encodeURIComponent(id)}/start`, "POST", body);
+  startTasks = (body: StartTasksRequest) => this.request<StartTasksResponse>("/tasks/start", "POST", body);
   answer = (id: string, body: AnswerQuestionRequest) => this.request<void>(`/questions/${encodeURIComponent(id)}/answer`, "POST", body);
   declineQuestion = (id: string) => this.request<void>(`/questions/${encodeURIComponent(id)}/decline`, "POST");
   resolveEscalation = (id: string, body: ResolveEscalationRequest) => this.request<void>(`/escalations/${encodeURIComponent(id)}/resolve`, "POST", body);
   permissionRules = () => this.request<PermissionRule[]>("/permission-rules");
   createPermissionRule = (body: CreatePermissionRuleRequest) => this.request<void>("/permission-rules", "POST", body);
   deletePermissionRule = (id: string) => this.request<void>(`/permission-rules/${encodeURIComponent(id)}`, "DELETE");
-  inboxEvents = (changed: () => void, signal: AbortSignal) => this.stream("/inbox/events", new SseFrames(frame => { if (frame.event === "changed" || frame.data === "changed") changed(); }), signal, changed);
+  inboxEvents = (changed: () => void, signal: AbortSignal) => this.changedStream("/inbox/events", changed, signal);
+  taskEvents = (changed: () => void, signal: AbortSignal) => this.changedStream("/tasks/events", changed, signal);
+  private changedStream(path: string, changed: () => void, signal: AbortSignal): Promise<void> {
+    return this.stream(path, new SseFrames(frame => { if (frame.event === "changed" || frame.data === "changed") changed(); }), signal, changed);
+  }
 
   events(id: string, after: number, onEvent: (event: RunEventEnvelope) => void, signal: AbortSignal): Promise<void> {
     return this.stream(`/runs/${encodeURIComponent(id)}/events?after=${after}`, new SseParser(onEvent), signal);

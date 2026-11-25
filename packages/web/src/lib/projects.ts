@@ -1,4 +1,5 @@
 import type { CreateRunRequest, ProjectSummary, RunSummary, TeamPresetInput } from "@baton/protocol";
+import { runActivityAt } from "./unread.js";
 export const currentProjectKey = "baton.currentProject";
 export const collapsedProjectsKey = "baton.collapsedProjects";
 export type ProjectAgent = TeamPresetInput["lead"];
@@ -31,10 +32,14 @@ export function projectRunPayload(project: ProjectSummary | undefined, subdir: s
 }
 export function groupProjects(projects: ProjectSummary[], runs: RunSummary[]): Array<{ project: ProjectSummary; runs: RunSummary[]; activity: string }> {
   return projects.map(project => {
-    const children = runs.filter(run => run.projectId === project.id).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
-    return { project, runs: children, activity: [project.lastRunAt ?? "", children[0]?.updatedAt ?? ""].sort().at(-1) || project.createdAt };
-  }).sort((a, b) => b.activity.localeCompare(a.activity) || a.project.name.localeCompare(b.project.name));
+    const children = runs.filter(run => run.projectId === project.id).sort(compareRunActivity);
+    const activity = children[0] ? runActivityAt(children[0]) : project.lastRunAt ?? project.createdAt;
+    return { project, runs: children, activity };
+  }).sort((left, right) => Date.parse(right.activity) - Date.parse(left.activity) || left.project.name.localeCompare(right.project.name));
+}
+export function compareRunActivity(left: RunSummary, right: RunSummary): number {
+  return Date.parse(runActivityAt(right)) - Date.parse(runActivityAt(left)) || left.id.localeCompare(right.id);
 }
 export function liveProjectSummaries(projects: ProjectSummary[], runs: RunSummary[]): ProjectSummary[] {
-  return projects.map(project => { const entries = runs.filter(run => run.projectId === project.id); return { ...project, openPrCount: entries.reduce((sum, run) => sum + (run.openPrCount ?? 0), 0), runCount: entries.length, activeRunCount: entries.filter(run => run.status !== "paused" && (run.status === "active" || run.activeNodeCount > 0)).length, pendingTotal: entries.reduce((sum, run) => sum + run.pendingTotal, 0), backgroundCount: entries.reduce((sum, run) => sum + (run.backgroundCount ?? 0), 0), lastRunAt: entries.map(run => run.updatedAt).sort().at(-1) ?? project.lastRunAt }; });
+  return projects.map(project => { const entries = runs.filter(run => run.projectId === project.id); return { ...project, openPrCount: entries.reduce((sum, run) => sum + (run.openPrCount ?? 0), 0), runCount: entries.length, activeRunCount: entries.filter(run => run.status !== "paused" && (run.status === "active" || run.activeNodeCount > 0)).length, pendingTotal: entries.reduce((sum, run) => sum + run.pendingTotal, 0), backgroundCount: entries.reduce((sum, run) => sum + (run.backgroundCount ?? 0), 0), lastRunAt: entries.map(runActivityAt).sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? project.lastRunAt }; });
 }

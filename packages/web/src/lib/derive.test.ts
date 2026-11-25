@@ -3,6 +3,13 @@ import { applyEvent, type NodeRecord } from "@baton/protocol";
 import { createScenario } from "../demo/scenario.js";
 import { summarize } from "./derive.js";
 
+it("passes through distinct activity and event timestamps from the snapshot", () => {
+  const scenario = createScenario(Date.parse("2026-11-10T07:00:00Z"));
+  const lastActivityAt = "2026-11-10T07:01:00.000Z";
+  const lastEventAt = "2026-11-10T07:02:00.000Z";
+  expect(summarize({ ...scenario.initial, lastActivityAt, lastEventAt })).toMatchObject({ lastActivityAt, lastEventAt });
+});
+
 it("summarizes distinct agent/model pairs root-first, preserving node creation order through updates", () => {
   const scenario = createScenario(Date.parse("2026-11-10T07:00:00Z"));
   const snapshot = scenario.events.reduce(applyEvent, scenario.initial);

@@ -732,6 +732,12 @@ export interface RunSnapshot {
   lastSeq: number;
   /** Timestamp of the event at lastSeq (the run's latest activity; absent for an empty log). */
   lastEventAt?: IsoTime;
+  /**
+   * Timestamp of the latest *activity* event (`isActivityEvent`): like lastEventAt but ignoring
+   * cosmetic run edits (rename, title regeneration, archive, policy). Drives sidebar order and
+   * unread state (DESIGN §8). Absent for an empty log or older servers.
+   */
+  lastActivityAt?: IsoTime;
 }
 
 export interface RunSummary {
@@ -741,6 +747,8 @@ export interface RunSummary {
   titleSource?: RunRecord["titleSource"];
   /** Timestamp of the run's latest event. */
   lastEventAt?: IsoTime;
+  /** See RunSnapshot.lastActivityAt. */
+  lastActivityAt?: IsoTime;
   status: RunStatus;
   cwd: string;
   rootAgentId: string;
@@ -771,4 +779,38 @@ export interface RunSummary {
 
 export function emptyUsage(): UsageTotals {
   return { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, costUsd: 0 };
+}
+
+/**
+ * A collected task (DESIGN §4.17 任务): a prompt waiting to become a Run. Starting a task creates
+ * exactly one Run (`runId`); a started task's status then follows that Run live.
+ */
+export interface TaskRecord {
+  id: string;
+  /** Short name shown in the task list; also the started Run's title. 1–200 chars. */
+  title: string;
+  /** First message of the Run. Empty string → the title is sent instead. */
+  prompt: string;
+  /** Project the Run is created in (must exist and not be archived when starting). */
+  projectId: string;
+  /** Root agent / model / team preset used at start; StartTaskRequest fields override these. */
+  agent?: string;
+  model?: string;
+  teamPresetId?: string;
+  /** Set once started; the task is then immutable except for `title`. */
+  runId?: string;
+  startedAt?: IsoTime;
+  /** Message of the last failed start (cleared by a successful start). */
+  error?: string;
+  createdAt: IsoTime;
+  updatedAt: IsoTime;
+}
+
+/** "todo" until started; afterwards the linked Run's status ("canceled" if the Run is gone). */
+export type TaskStatus = "todo" | RunStatus;
+
+export interface TaskSummary extends TaskRecord {
+  status: TaskStatus;
+  /** Live summary of the linked Run (absent for todo tasks or when the Run no longer exists). */
+  run?: RunSummary;
 }

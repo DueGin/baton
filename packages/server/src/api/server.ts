@@ -17,6 +17,7 @@ import { Settings } from "../settings/index.js";
 import { Titles, type TitleGenerator } from "../titles/index.js";
 import { BackgroundRegistry, type BackgroundOptions } from "../background/index.js";
 import { Projects, ProjectError } from "../projects/index.js";
+import { Tasks, TaskError } from "../tasks/index.js";
 import { PullRequests, type PullRequestOptions } from "../pull-requests/index.js";
 import { AttachmentError, Attachments, isAttachmentMimeType, readLocalImage } from "../attachments/index.js";
 import { CheckpointError, Checkpoints } from "../checkpoints/index.js";
@@ -114,6 +115,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
   const notify: Notifier = options.notifier ? async (event) => { await hub.notify(event); await options.notifier!(event); } : hub.notify;
   const notifications = new Notifications(store, notify, options.notificationCoalesceMs);
   let kernel: Kernel, background: BackgroundRegistry, pullRequests: PullRequests, port = 0;
+  const tasks = new Tasks(store, (input) => kernel.createRun(input));
   const streams = new Set<ServerResponse>();
   const webDist = resolve(options.webDist ?? fileURLToPath(new URL("../../../web/dist", import.meta.url)));
   const server = createServer((request, response) => {
@@ -121,7 +123,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
     void route(request, response).catch((error: unknown) => {
       if (response.headersSent) { response.end(); return; }
       const message = error instanceof Error ? error.message : String(error);
-      const status = error instanceof HttpError || error instanceof ProjectError || error instanceof MessageError || error instanceof AttachmentError || error instanceof CheckpointError ? error.status : /not found/i.test(message) ? 404 : 400;
+      const status = error instanceof HttpError || error instanceof ProjectError || error instanceof TaskError || error instanceof MessageError || error instanceof AttachmentError || error instanceof CheckpointError ? error.status : /not found/i.test(message) ? 404 : 400;
       json(response, status, { error: { code: `HTTP_${status}`, message } });
     });
   });
@@ -142,6 +144,18 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
     });
     const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), 15000); heartbeat.unref();
     response.once("close", () => { clearTimeout(timer); clearInterval(heartbeat); unsubscribe(); streams.delete(response); });
+  }
+  function tasksStream(response: ServerResponse): void {
+    response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache, no-transform", connection: "keep-alive" }); response.flushHeaders(); streams.add(response);
+    let timer: NodeJS.Timeout | undefined;
+    const changed = (): void => {
+      if (timer) return;
+      timer = setTimeout(() => { timer = undefined; response.write("event: changed\ndata: {}\n\n"); }, 50);
+    };
+    const unsubscribeTasks = tasks.subscribe(changed);
+    const unsubscribeRuns = store.subscribe(({ runId }) => { if (!timer && store.hasTaskForRun(runId)) changed(); });
+    const heartbeat = setInterval(() => response.write(": heartbeat\n\n"), 15000); heartbeat.unref();
+    response.once("close", () => { clearTimeout(timer); clearInterval(heartbeat); unsubscribeTasks(); unsubscribeRuns(); streams.delete(response); });
   }
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const host = request.headers.host;
@@ -194,6 +208,19 @@ export async function startServer(options: StartServerOptions = {}): Promise<Bat
         const id = decodeURIComponent(projectRoute[1]!);
         if (method === "GET") { json(response, 200, await kernel.projects.summary(id)); return; }
         if (method === "PATCH") { kernel.projects.patch(id, record(await body(request)) as PatchProjectRequest); json(response, 200, await kernel.projects.summary(id)); return; }
+      }
+      if (path === "/api/tasks") {
+        if (method === "GET") { json(response, 200, tasks.list(url.searchParams.get("projectId") ?? undefined)); return; }
+        if (method === "POST") { json(response, 201, tasks.create(record(await body(request)))); return; }
+      }
+      if (method === "GET" && path === "/api/tasks/events") { tasksStream(response); return; }
+      if (method === "POST" && path === "/api/tasks/start") { json(response, 200, await tasks.startMany(record(await body(request)))); return; }
+      const taskRoute = /^\/api\/tasks\/([^/]+)(\/start)?$/.exec(path);
+      if (taskRoute) {
+        const id = segment(taskRoute[1]!);
+        if (method === "POST" && taskRoute[2]) { json(response, 200, await tasks.start(id, record(await body(request)))); return; }
+        if (method === "PATCH" && !taskRoute[2]) { json(response, 200, tasks.patch(id, record(await body(request)))); return; }
+        if (method === "DELETE" && !taskRoute[2]) { tasks.delete(id); json(response, 200, { ok: true }); return; }
       }
       if (method === "GET" && path === "/api/fs/dirs") { json(response, 200, await kernel.projects.dirs(url.searchParams.get("path") ?? undefined, url.searchParams.get("hidden") === "1")); return; }
       if (method === "GET" && path === "/api/prs") { json(response, 200, pullRequests.list(url.searchParams.get("projectId") ?? undefined, url.searchParams.get("state") ?? "open")); return; }

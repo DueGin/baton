@@ -4,6 +4,8 @@ import type { PullRequestRecord, AnswerQuestionRequest, AgentEntry, CreateRunReq
 import type { BatonClient } from "./api.js";
 import { InboxStore } from "./inbox-store.js";
 import { Inbox } from "./components/Inbox.js";
+import { TasksPage } from "./components/Tasks.js";
+import type { TaskSummary } from "@baton/protocol";
 import { NotificationTracker } from "./lib/notifications.js";
 import { snapshotInbox } from "./lib/inbox.js";
 import { RunStore, errorText } from "./store.js";
@@ -21,7 +23,8 @@ import { RunDetails } from "./components/RunDetails.js";
 import { readRunPanel, reduceRunPanel, saveRunPanel, visibleRunPanel, type RunTab } from "./lib/run-layout.js";
 import { CancelRunDialog } from "./components/BackgroundProcesses.js";
 import { AddProject, ProjectsEmpty } from "./components/Projects.js";
-import { liveProjectSummaries, readCurrentProject, saveCurrentProject } from "./lib/projects.js";
+import { liveProjectSummaries, readCurrentProject, readProjectAgent, saveCurrentProject } from "./lib/projects.js";
+import { taskAgentDefaults, taskStartBatches } from "./lib/tasks.js";
 import { agentReady } from "./lib/agents.js";
 import { ImageContext } from "./lib/images.js";
 import { NewSession } from "./components/NewRun.js";
@@ -43,6 +46,49 @@ function storedPolicy(): RunPolicy {
     }
   } catch { /* Use conservative defaults for malformed settings. */ }
   return defaultPolicy;
+}
+
+function useLiveTasks(client: BatonClient, refreshRuns: () => Promise<void>) {
+  const [tasks, setTasks] = useState<TaskSummary[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [streamError, setStreamError] = useState<string | null>(null);
+  const refresh = useRef<() => Promise<void>>(async () => {});
+  useEffect(() => {
+    const controller = new AbortController(); const { signal } = controller;
+    let pending: Promise<void> | undefined; let dirty = false; let retry: ReturnType<typeof setTimeout>;
+    let runsTimer: ReturnType<typeof setTimeout> | undefined;
+    setLoaded(false); setTasks([]);
+    const fetchLatest = async () => {
+      do {
+        dirty = false;
+        try { const items = await client.tasks(); if (!signal.aborted) { setTasks(items); setError(null); } }
+        catch (cause) { if (!signal.aborted) setError(errorText(cause)); }
+        if (!signal.aborted) setLoaded(true);
+      } while (dirty && !signal.aborted);
+      pending = undefined;
+    };
+    const reload = () => { dirty = true; return pending ??= fetchLatest(); };
+    refresh.current = reload;
+    const connect = async (delay: number) => {
+      try {
+        await client.taskEvents(() => {
+          if (signal.aborted) return;
+          setStreamError(null); void reload();
+          runsTimer ??= setTimeout(() => { runsTimer = undefined; void refreshRuns().catch(() => undefined); }, 500);
+        }, signal);
+        if (!signal.aborted) throw new Error("连接已断开");
+      } catch (cause) {
+        if (!signal.aborted) {
+          setStreamError(`任务实时更新中断，正在重连：${errorText(cause)}`);
+          retry = setTimeout(() => { void connect(Math.min(delay * 2, 15000)); void reload(); }, delay);
+        }
+      }
+    };
+    void connect(1000); void reload();
+    return () => { controller.abort(); clearTimeout(retry); clearTimeout(runsTimer); refresh.current = async () => {}; };
+  }, [client, refreshRuns]);
+  return { tasks, loaded, error: error ?? streamError, refresh: () => refresh.current() };
 }
 
 export default function App({ client }: { client: BatonClient }) {
@@ -180,6 +226,7 @@ export default function App({ client }: { client: BatonClient }) {
     entries.sort((a, b) => b.createdAt.localeCompare(a.createdAt)); setRuns(entries);
     setRunId(current => current ?? entries.find(entry => !entry.archived)?.id ?? null);
   }, [client, store]);
+  const taskState = useLiveTasks(client, refreshRuns);
   useEffect(() => {
     let active = true;
     void Promise.all([refreshRuns(), refreshProjects(), client.permissionRules().then(entries => { if (active) setRules(entries); }), client.teams().then(entries => { if (active) setPresets(entries); }), client.agents().then(entries => { if (active) setAgents(entries); })]).catch((cause: unknown) => { if (active) setError(errorText(cause)); }).finally(() => { if (active) setInitialLoading(false); });
@@ -205,6 +252,19 @@ export default function App({ client }: { client: BatonClient }) {
     try { await operation(); await inboxStore.refresh(); return true; } catch (cause) { setError(errorText(cause)); return false; } finally { setBusy(false); }
   };
   const decideFull = (id: string, decision: PermissionDecision): void => { void action(async () => { await client.decide(id, decision); if (decision.remember) setRules(await client.permissionRules()); }); };
+  const taskAction = (operation: () => Promise<unknown>, createsRuns = false) => action(async () => {
+    try { await operation(); }
+    finally { await taskState.refresh(); if (createsRuns) await refreshRuns(); }
+  });
+  const resolveTaskAgent = (task: TaskSummary) => taskAgentDefaults(task, agents, readProjectAgent(localStorage, task.projectId));
+  const startTaskBatch = (tasks: TaskSummary[]) => taskAction(async () => {
+    const errors = [];
+    for (const batch of taskStartBatches(tasks, resolveTaskAgent)) {
+      const result = await client.startTasks({ ids: batch.ids, start: { ...batch.start, policy: defaults } });
+      errors.push(...result.errors);
+    }
+    if (errors.length) throw new Error(`${errors.length} 项任务未能开始：${errors[0]!.message}`);
+  }, true);
   const answer = (id: string, request: AnswerQuestionRequest): void => { void action(() => client.answer(id, request)); };
   const decline = (id: string): void => { void action(() => client.declineQuestion(id)); };
   const resolve = (id: string, request: ResolveEscalationRequest): void => { void action(() => client.resolveEscalation(id, request)); };
@@ -232,7 +292,7 @@ export default function App({ client }: { client: BatonClient }) {
   const sessionRefs = useMemo(() => new Map(Object.entries(inboxSnapshots).filter(([id]) => id !== snapshot?.run.id)), [inboxSnapshots, snapshot?.run.id]);
   const sessionNav = useMemo<SessionNav>(() => ({ open: (ref) => { openInboxItem(ref.run, ref.node); }, refs: () => sessionRefs, inspect: setInspected }), [inboxSnapshots, runs, runId]);
   return <SessionNavProvider value={sessionNav}><ImageContext value={images}><div className="app-shell">
-    {page === "settings" ? <SettingsSidebar section={settingsSection} select={chooseSettingsSection} back={() => setPage("runs")} /> : <Sidebar pullRequests={visiblePrs} projects={projects} currentProjectId={currentProjectId} reveal={projectReveal} selectProject={rememberProject} addProject={() => setAddProject(draft ? "draft" : "sidebar")} mutateProject={async (id, request) => { await client.patchProject(id, request); await refreshProjects(); }}
+    {page === "settings" ? <SettingsSidebar section={settingsSection} select={chooseSettingsSection} back={() => setPage("runs")} /> : <Sidebar taskCount={taskState.tasks.filter(task => task.status === "active").length} pullRequests={visiblePrs} projects={projects} currentProjectId={currentProjectId} reveal={projectReveal} selectProject={rememberProject} addProject={() => setAddProject(draft ? "draft" : "sidebar")} mutateProject={async (id, request) => { await client.patchProject(id, request); await refreshProjects(); }}
       runs={runs} runId={draft ? null : runId} draftProjectId={draft?.projectId ?? null} mutateRun={async (id, request) => { await client.patchRun(id, request); await refreshRuns(); }} page={page} navigate={setPage} selectRun={id => { const projectId = runs.find(run => run.id === id)?.projectId; if (projectId) rememberProject(projectId); setRunId(id); setPage("runs"); }} newRun={openNewRun} canCreate={agents.some(agentReady)} pendingCount={inboxState.loaded ? inboxState.items.length : runs.reduce((sum, run) => sum + run.pendingTotal, 0)} presetCount={presets.length} theme={theme} toggleTheme={() => setTheme(current => current === "dark" ? "light" : "dark")} loading={initialLoading} />}
     <main className="main-shell">
       <div className="window-titlebar" aria-hidden="true" />
@@ -241,6 +301,10 @@ export default function App({ client }: { client: BatonClient }) {
       {warnings.length > 0 && <div className="global-error reconnect-warning preset-warnings" role="status"><div><strong>预设已保存 · Agent 可用性提示</strong>{warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div><button className="icon-button" title="关闭提示" onClick={() => setWarnings([])}><Icon name="close" size={14} /></button></div>}
       {page === "runs" && !initialLoading && !projects.length ? <ProjectsEmpty add={() => setAddProject("draft")} /> : page === "runs" && draft ?
         <NewSession key={draftKey} projects={projects} projectId={draft.projectId} selectProject={chooseDraftProject} addProject={() => setAddProject("draft")} agents={agents} presets={presets} defaults={defaults} create={create} busy={creating} client={client} error={createError} />
+        : page === "tasks" ? <TasksPage tasks={taskState.tasks} loading={!taskState.loaded} error={taskState.error} refresh={taskState.refresh} agents={agents} presets={presets} projects={projects} currentProjectId={currentProjectId} busy={busy} now={now}
+          create={request => taskAction(() => client.createTask(request))} patch={(id, request) => taskAction(() => client.patchTask(id, request))} remove={id => taskAction(() => client.deleteTask(id))}
+          resolveAgent={resolveTaskAgent} start={task => taskAction(() => client.startTask(task.id, { ...resolveTaskAgent(task), policy: defaults }), true)} startMany={startTaskBatch}
+          open={(id, projectId) => { rememberProject(projectId); setPage("runs"); setRunId(id); setTab("transcript"); setConversation(""); setInspected(null); }} />
         : page === "inbox" ? <Inbox projects={projects} items={inboxState.items} snapshots={inboxSnapshots} busy={busy} loading={!inboxState.loaded} error={inboxState.error} refresh={() => { void inboxStore.refresh(); }} open={openInboxItem} decide={decideFull} approve={(id, proposalId) => { void action(() => client.approveTeam(id, proposalId, {})); }} answer={answer} decline={decline} resolve={resolve} /> : page === "teams" ? <TeamsPage presets={presets} agents={agents} busy={busy} error={error} save={(input, id) => action(async () => { const saved = id ? await client.updateTeam(id, input) : await client.createTeam(input); setWarnings(saved.warnings ?? []); setPresets(await client.teams()); })} remove={id => action(async () => { await client.deleteTeam(id); setPresets(await client.teams()); })} /> : page === "settings" ? <SettingsContent section={settingsSection} client={client} demo={client.demo} theme={theme} setTheme={setTheme} notifications={notifications} notificationPermission={notificationPermission} toggleNotifications={enabled => { void toggleNotifications(enabled); }} policy={defaults} setPolicy={saveDefaults} agents={agents} refreshing={refreshing} refreshAgents={() => { void refreshAgents(); }} runs={runs} rules={rules} busy={busy} createRule={input => action(async () => { await client.createPermissionRule(input); setRules(await client.permissionRules()); })} removeRule={id => { void action(async () => { await client.deletePermissionRule(id); setRules(await client.permissionRules()); }); }} /> : snapshot ? <>
         <RunBar busy={busy} pause={() => { void action(async () => { await client.pauseRun(snapshot.run.id); }); }} resume={() => { void action(async () => { await client.resumeRun(snapshot.run.id); }); }} project={activeProject} openProject={() => { if (activeProject) selectProject(activeProject.id); }} key={snapshot.run.id} rename={title => action(() => client.patchRun(snapshot.run.id, { title }))} regenerate={() => action(() => client.regenerateTitle(snapshot.run.id))} snapshot={snapshot} tab={tab} setTab={setTab} detailsOpen={rightPanel === "details"} toggleDetails={() => dispatchPanel({ type: "toggle_details" })} />
         <div className="workspace-body"><section id="run-view" className="view-panel" role="tabpanel" aria-labelledby={`run-tab-${tab}`} aria-label={tab === "topology" ? "拓扑图" : tab === "timeline" ? "时间线" : tab === "team" ? "团队" : "会话"}>{(tab === "topology" || tab === "team") && proposals.map(proposal => <ProposalCard key={proposal.id} proposal={proposal} snapshot={snapshot} agents={agents} busy={busy} error={error} approve={request => { void action(() => client.approveTeam(snapshot.run.id, proposal.id, request)); }} reject={feedback => { void action(() => client.rejectTeam(snapshot.run.id, proposal.id, { feedback })); }} />)}<Suspense fallback={<Empty><div className="loading-orbit" />正在加载视图…</Empty>}>{tab === "topology" ? <Topology answer={answer} decline={decline} resolve={resolve} snapshot={snapshot} selected={inspected} now={now} inspect={setInspected} decide={decide} busy={busy} reassign={id => { setError(null); setReassignId(id); }} openTeam={() => setTab("team")} /> : tab === "timeline" ? <Timeline key={snapshot.run.id} snapshot={snapshot} inspect={setInspected} /> : tab === "team" ? <RunTeam snapshot={snapshot} busy={busy} add={() => { setError(null); setTeamDialog("add"); }} replace={member => { setError(null); setTeamDialog(member); }} remove={member => { void action(() => client.removeMember(snapshot.run.id, member.id)); }} save={() => { setError(null); setTeamDialog("save"); }} inspect={setInspected} /> : <Transcript refs={sessionRefs} showTopology={id => { setTab("topology"); setInspected(id); }} agents={agents} stopRun={() => { void action(async () => { await client.pauseRun(snapshot.run.id); }); }} resumeRun={() => { void action(async () => { await client.resumeRun(snapshot.run.id); }); }} answer={answer} decline={decline} busy={busy} projectName={activeProject?.name} snapshot={snapshot} store={store} items={state.items} itemStatus={state.itemStatus} nodeId={conversation || snapshot.run.rootNodeId} setNodeId={setConversation} now={now} inspect={setInspected} />}</Suspense></section>

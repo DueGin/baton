@@ -1,6 +1,6 @@
 /** REST request/response bodies (DESIGN §7). */
 import type { AttachmentRef, PermissionResponse } from "./timeline.js";
-import type { AgentEntry, BackgroundProcess, PullRequestRecord, ProjectRecord, ProjectSummary, DelegationRecord, InboxItem, ItemRecord, NodeRecord, PermissionRule, RunPolicy, RunSnapshot, RunSummary, TeamCandidateSpec, TeamMemberSpec, TeamPreset } from "./records.js";
+import type { AgentEntry, BackgroundProcess, PullRequestRecord, ProjectRecord, ProjectSummary, DelegationRecord, InboxItem, ItemRecord, NodeRecord, PermissionRule, RunPolicy, RunSnapshot, RunSummary, TaskSummary, TeamCandidateSpec, TeamMemberSpec, TeamPreset } from "./records.js";
 
 export interface CreateRunRequest {
   /** Root agent. Optional when `teamPresetId` is given (the preset's lead is used). */
@@ -493,3 +493,54 @@ export const ATTACHMENT_URL_PREFIX = "attachment:";
  * by the client against NodeRecord.cwd). Only ATTACHMENT_MIME_TYPES extensions, regular files, at
  * most ATTACHMENT_MAX_BYTES; 404 otherwise. Bearer auth.
  */
+
+/** POST /api/tasks → 201 TaskSummary (DESIGN §4.17). */
+export interface CreateTaskRequest {
+  title: string;
+  prompt?: string;
+  projectId: string;
+  agent?: string;
+  model?: string;
+  teamPresetId?: string;
+}
+
+/**
+ * PATCH /api/tasks/:id → TaskSummary. `null` clears an optional field. After start only `title`
+ * may change (it does not rename the Run); any other field → 409.
+ */
+export interface PatchTaskRequest {
+  title?: string;
+  /** `null` clears it to "" (the title is then sent as the first message). */
+  prompt?: string | null;
+  projectId?: string;
+  agent?: string | null;
+  model?: string | null;
+  teamPresetId?: string | null;
+}
+
+/**
+ * POST /api/tasks/:id/start → TaskSummary. Creates the Run with
+ * `{ projectId, title, prompt: prompt || title, agent, model, teamPresetId, ...overrides }`.
+ * 409 if already started; 400 (and `task.error` recorded) when the Run cannot be created.
+ */
+export interface StartTaskRequest {
+  agent?: string;
+  model?: string;
+  modeId?: string;
+  thinking?: string;
+  teamPresetId?: string;
+  policy?: Partial<RunPolicy>;
+}
+
+/** POST /api/tasks/start — 一键开始: start several todo tasks in order (non-todo ids are skipped). */
+export interface StartTasksRequest {
+  ids: string[];
+  /** Applied to every task in the batch (same meaning as StartTaskRequest). */
+  start?: StartTaskRequest;
+}
+
+export interface StartTasksResponse {
+  /** Every requested task after the batch, in request order (unknown ids omitted). */
+  tasks: TaskSummary[];
+  errors: Array<{ id: string; message: string }>;
+}

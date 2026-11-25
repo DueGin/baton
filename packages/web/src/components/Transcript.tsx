@@ -31,6 +31,7 @@ import { AttachImageButton, LazyComposer, type ComposerHandle, type ComposerStat
 import { RollbackAction, RolledBackToggle, type RollbackProps } from "./RollbackMenu.js";
 import { rolledBackGroups, rollbackTarget } from "../lib/rollback.js";
 import { ConversationOutline } from "./ConversationOutline.js";
+import { SelectionQuote } from "./SelectionQuote.js";
 import { outlineItems } from "../lib/outline.js";
 export { Markdown } from "./Markdown.js";
 
@@ -200,7 +201,8 @@ export function Transcript({ snapshot, store, items, itemStatus, nodeId, setNode
       if (hidden) return toggle && <Fragment key={`rolled:${key}`}>{toggle}</Fragment>;
       const content = <>{entry.type === "question" ? entry.question.status === "pending" ? <QuestionMarker question={entry.question} jump={jumpQuestion} /> : <QuestionCard inline compact question={entry.question} answer={answer} busy={busy} /> : (() => { const { row, outgoing } = entry.entry; return <TranscriptRow client={store.client} refs={refs} row={row} node={node} snapshot={snapshot} inspect={inspect} outgoing={outgoing} actionState={state.messageActions[messageActionKey(node.id, row.seq)]} act={action => { void store.actOnMessage(node.id, row.seq, action); }} retry={outgoing ? () => { void store.sendMessage(node.id, outgoing.text, outgoing.clientId); } : undefined} streaming={live && inTurn(row) && (row.item.type === "reasoning" || (row.seq === latestText?.seq && phase?.kind === "reply"))} rollback={rollbackTarget(row, row.seq === firstHuman) ? rollback : undefined} />; })()}{footers.get(index)?.map(turn => <TurnFooter key={turn.id} turn={turn} />)}</>;
       return <Fragment key={entry.type === "question" ? entry.question.id : entry.entry.outgoing?.clientId ?? entry.entry.row.seq}>{toggle}{start >= 0 ? <div className="rolled-back-row">{content}</div> : content}</Fragment>;
-    })}{!entries.length && itemStatus[node.id] === "ready" && <Empty>这个节点还没有消息。</Empty>}{phase && <TurnIndicator key={node.id} phase={phase} snapshot={snapshot} now={now} inspect={inspect} jumpQuestion={jumpQuestion} />}</TranscriptScroll><ConversationOutline items={outline} scroll={scroll} /></div>
+    })}{!entries.length && itemStatus[node.id] === "ready" && <Empty>这个节点还没有消息。</Empty>}{phase && <TurnIndicator key={node.id} phase={phase} snapshot={snapshot} now={now} inspect={inspect} jumpQuestion={jumpQuestion} />}</TranscriptScroll>
+    {!closed && <SelectionQuote key={node.id} scroll={scroll} composer={composer} />}<ConversationOutline items={outline} scroll={scroll} /></div>
     <div className="composer-stack">{dockQuestions.length > 0 && <div className="question-dock" aria-label="待回答的问题">{dockQuestions.map(question => <QuestionCard key={question.id} inline compact question={question} answer={answer} decline={decline} busy={busy} />)}</div>}
     <div className="composer-tools"><BackgroundPopover projectName={projectName} key={snapshot.run.id} snapshot={snapshot} now={now} client={store.client} inspect={inspect} /><PullRequestPopover key={`pr:${snapshot.run.id}`} snapshot={snapshot} client={store.client} inspect={inspect} /></div>
     <QueueDock key={node.id} entries={queue} actions={state.messageActions} pending={queueState?.pending} error={queueState?.error} reorder={order => { void store.reorderQueue(node.id, order); }} act={(seq, action) => store.actOnMessage(node.id, seq, action)} edit={(seq, text) => store.editMessage(node.id, seq, text)} />

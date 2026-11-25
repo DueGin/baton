@@ -4,7 +4,7 @@ import { getSchema } from "@tiptap/core";
 import { EditorState, TextSelection, type Transaction } from "@tiptap/pm/state";
 import type { AgentEntry, AttachmentRecord } from "@baton/protocol";
 import { composerExtensions, EMPHASIS_INPUT, imageIdentity, imageStatus } from "./composer-extensions.js";
-import { Composer } from "./Composer.js";
+import { appendQuoteTransaction, Composer } from "./Composer.js";
 import { Transcript } from "./Transcript.js";
 import { docToMarkdown, markdownToDoc, pastedTextDoc } from "../lib/composer-markdown.js";
 import { acceptImages, attachmentName, ComposerUploads } from "../lib/composer-uploads.js";
@@ -94,6 +94,15 @@ describe("composer completion", () => {
 });
 
 describe("composer document", () => {
+  it.each(["", "- 已有草稿", "> 已有引用", "![图](attachment:att_123)"])("appends a top-level quote and puts the caret in a new paragraph: %s", draft => {
+    const state = EditorState.create({ doc: valid(draft) });
+    const next = state.apply(appendQuoteTransaction(state, "> 第一行\n>\n> 第二行\n\n"));
+    expect(docToMarkdown(next.doc.toJSON())).toBe([draft, "> 第一行\n>\n> 第二行"].filter(Boolean).join("\n\n"));
+    expect(next.doc.childCount).toBe(draft ? 3 : 2);
+    expect(next.doc.lastChild?.type.name).toBe("paragraph");
+    expect(next.selection.$from.parent).toBe(next.doc.lastChild);
+    expect(next.selection.empty).toBe(true);
+  });
   it("parses every supported Markdown construct into a document TipTap's schema accepts", () => {
     for (const markdown of ["# 标题", "- a\n  - b\n    1. c", "- [ ] 待办\n  - [x] 嵌套", "> 引用\n> - 列表", "```ts\nx\n```", "| a |\n| - |\n| 1 |", "<div>html</div>", "---", "第一行\n第二行", "[链接](https://x.y) ![图](attachment:att_1) `c` **b** *i* ~~s~~", "[^1]\n\n[^1]: 脚注", ""]) {
       expect(() => valid(markdown), markdown).not.toThrow();
