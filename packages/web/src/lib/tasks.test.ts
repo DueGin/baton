@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TaskStatus, TaskSummary } from "@baton/protocol";
-import { activityAge, compareTasks, groupTasks, taskAgentDefaults, taskLabels, taskStartBatches } from "./tasks.js";
+import { activityAge, compareTasks, groupTasks, taskAgentDefaults, taskChanges, taskLabels, taskStartBatches } from "./tasks.js";
 import { demoAgents } from "../demo/agents.js";
 import { summarize } from "./derive.js";
 import { createScenario } from "../demo/scenario.js";
@@ -45,5 +45,17 @@ describe("task board", () => {
     const at = new Date(0).toISOString();
     expect([-1000, 119999, 3600000, 86400000].map(now => activityAge(at, now))).toEqual(["刚刚", "1 分钟前", "1 小时前", "1 天前"]);
     expect(activityAge("", 0)).toBe("—");
+  });
+  it("edits only changed fields, without pinning project defaults on a title edit", () => {
+    const original = row("todo", 0);
+    expect(taskChanges(original, original)).toEqual({});
+    expect(taskChanges(original, { title: "改名", projectId: original.projectId })).toEqual({ title: "改名" });
+    expect(taskChanges({ ...original, prompt: "old" }, { title: original.title, projectId: "elsewhere" })).toEqual({ prompt: "", projectId: "elsewhere" });
+  });
+  it("explicitly clears incompatible agent/model fields or preset on an edit", () => {
+    const pinned = { ...row("todo", 0), agent: "codex", model: "gpt" };
+    const preset = { ...row("todo", 0), teamPresetId: "team" };
+    expect(taskChanges(pinned, preset)).toEqual({ agent: null, model: null, teamPresetId: "team" });
+    expect(taskChanges(preset, pinned)).toEqual({ agent: "codex", model: "gpt", teamPresetId: null });
   });
 });

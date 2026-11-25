@@ -30,12 +30,10 @@ export function projectRunPayload(project: ProjectSummary | undefined, subdir: s
   const result = subdirectoryPath(project.path, subdir); if (result.error) throw new Error(result.error);
   return { ...body, projectId: project.id, ...(result.cwd ? { cwd: result.cwd } : {}) };
 }
-export function groupProjects(projects: ProjectSummary[], runs: RunSummary[]): Array<{ project: ProjectSummary; runs: RunSummary[]; activity: string }> {
-  return projects.map(project => {
-    const children = runs.filter(run => run.projectId === project.id).sort(compareRunActivity);
-    const activity = children[0] ? runActivityAt(children[0]) : project.lastRunAt ?? project.createdAt;
-    return { project, runs: children, activity };
-  }).sort((left, right) => Date.parse(right.activity) - Date.parse(left.activity) || left.project.name.localeCompare(right.project.name));
+export function groupProjects(projects: ProjectSummary[], runs: RunSummary[]): Array<{ project: ProjectSummary; runs: RunSummary[] }> {
+  return [...projects]
+    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt) || left.name.localeCompare(right.name))
+    .map(project => ({ project, runs: runs.filter(run => run.projectId === project.id).sort(compareRunActivity) }));
 }
 export function compareRunActivity(left: RunSummary, right: RunSummary): number {
   return Date.parse(runActivityAt(right)) - Date.parse(runActivityAt(left)) || left.id.localeCompare(right.id);

@@ -9,7 +9,9 @@ export function AgentMark({ agent, small = false }: { agent: string; small?: boo
 export function Status({ status, dot = true }: { status: string; dot?: boolean }) {
   return <span className={`status status-${status}`}>{dot && <i className="status-dot" />}{statusLabels[status] ?? status}</span>;
 }
-export function Icon({ name, size = 18 }: { name: "copy" | "pause" | "play" | "trash" | "clock" | "steer" | "lightning" | "undo" | "grip" | "up" | "down" | "warning" | "folder" | "server" | "edit" | "panel" | "inbox" | "graph" | "timeline" | "chat" | "agents" | "settings" | "plus" | "close" | "sun" | "moon" | "arrow" | "stop" | "chevron" | "refresh" | "check" | "image" | "back" | "shield" | "info" | "checklist" | "filter" | "collapse-all" | "expand-all"; size?: number }) {
+const bellPaths = <><path d="M18 8a6 6 0 0 0-12 0c0 4.7-1.3 6.7-2.7 8.2A1 1 0 0 0 4 18h16a1 1 0 0 0 .7-1.8C19.3 14.7 18 12.7 18 8Z" /><path d="M10 21a2.3 2.3 0 0 0 4 0" /></>;
+
+export function Icon({ name, size = 18 }: { name: "copy" | "pause" | "play" | "trash" | "clock" | "steer" | "lightning" | "undo" | "grip" | "up" | "down" | "warning" | "folder" | "server" | "edit" | "panel" | "inbox" | "graph" | "timeline" | "chat" | "agents" | "settings" | "plus" | "close" | "sun" | "moon" | "arrow" | "stop" | "chevron" | "refresh" | "check" | "image" | "back" | "shield" | "info" | "checklist" | "bell" | "bell-filled" | "collapse-all" | "expand-all"; size?: number }) {
   const paths: Record<typeof name, ReactNode> = {
     copy: <><rect x="8" y="8" width="13" height="13" rx="2" /><path d="M16 8V3H3v13h5" /></>,
     folder: <path d="M3 6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v10H3V6Z" />,
@@ -35,7 +37,8 @@ export function Icon({ name, size = 18 }: { name: "copy" | "pause" | "play" | "t
     refresh: <><path d="M20 7a9 9 0 1 0 1 9M20 2v6h-6" /></>,
     check: <path d="m5 12 4 4L19 6" />,
     checklist: <path d="m3 6 2 2 4-4M12 6h9M3 13l2 2 4-4m3 2h9M5 20h.01M12 20h9" />,
-    filter: <path d="M3 5h18l-7 8v5l-4 2v-7L3 5Z" />,
+    bell: bellPaths,
+    "bell-filled": bellPaths,
     "collapse-all": <path d="m6 5 6 5 6-5M6 19l6-5 6 5" />,
     "expand-all": <path d="m6 9 6-5 6 5M6 15l6 5 6-5" />,
     image: <><rect x="3" y="4" width="18" height="16" rx="2.5" /><circle cx="9" cy="9.5" r="1.8" /><path d="m21 15.5-4.6-4.6L7 20.3" /></>,
@@ -51,7 +54,7 @@ export function Icon({ name, size = 18 }: { name: "copy" | "pause" | "play" | "t
     pause: <><path d="M7 4h3v16H7zM14 4h3v16h-3z" /></>,
     play: <path d="m7 3 14 9-14 9V3Z" />,
   };
-  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill={name === "bell-filled" ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
 export function Toggle({ checked, onChange, label, disabled = false }: { checked: boolean; onChange: (checked: boolean) => void; label: string; disabled?: boolean }) {
   return <label className="toggle-label"><input className="toggle-input" type="checkbox" checked={checked} onChange={event => onChange(event.target.checked)} disabled={disabled} /><span className="toggle-track" />{label}</label>;
