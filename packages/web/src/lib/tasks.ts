@@ -1,4 +1,4 @@
-import type { AgentEntry, StartTaskRequest, TaskStatus, TaskSummary } from "@baton/protocol";
+import type { AgentEntry, CreateTaskRequest, PatchTaskRequest, StartTaskRequest, TaskStatus, TaskSummary } from "@baton/protocol";
 import { agentReady } from "./agents.js";
 import type { ProjectAgent } from "./projects.js";
 
@@ -27,12 +27,23 @@ export function groupTasks(tasks: readonly TaskSummary[]) {
   return groups;
 }
 
-export function taskAgentDefaults(task: TaskSummary, agents: AgentEntry[], saved?: ProjectAgent): Pick<StartTaskRequest, "agent" | "model"> {
+export function taskAgentDefaults(task: Pick<CreateTaskRequest, "agent" | "model" | "teamPresetId">, agents: AgentEntry[], saved?: ProjectAgent): Pick<StartTaskRequest, "agent" | "model"> {
   if (task.agent || task.teamPresetId) return {};
   const remembered = saved && agents.find(agent => agent.id === saved.agentId && agentReady(agent));
   const agent = remembered ?? agents.find(agentReady);
   const model = !task.model && remembered ? saved?.model : undefined;
   return agent ? { agent: agent.id, ...(model ? { model } : {}) } : {};
+}
+
+export function taskChanges(original: TaskSummary, next: CreateTaskRequest): PatchTaskRequest {
+  const patch: PatchTaskRequest = {};
+  if (original.title !== next.title) patch.title = next.title;
+  if (original.prompt !== (next.prompt ?? "")) patch.prompt = next.prompt ?? "";
+  if (original.projectId !== next.projectId) patch.projectId = next.projectId;
+  for (const key of ["agent", "model", "teamPresetId"] as const) {
+    if (original[key] !== next[key]) patch[key] = next[key] ?? null;
+  }
+  return patch;
 }
 
 export function taskStartBatches(tasks: readonly TaskSummary[], resolve: (task: TaskSummary) => ReturnType<typeof taskAgentDefaults>) {

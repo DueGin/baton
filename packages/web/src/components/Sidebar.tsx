@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PatchRunRequest, PullRequestRecord, ProjectSummary, RunSummary } from "@baton/protocol";
 import { expandProjectGroup, ProjectGroups, ProjectListTools } from "./Projects.js";
 import { clampSidebarWidth, readSidebar, readSidebarUnreadOnly, saveSidebar, saveSidebarUnreadOnly, sidebarDefaultWidth, sidebarKeyWidth } from "../lib/sidebar.js";
-import { markRunSeen, readRunSeen, reconcileRunSeen, runActivityAt, saveRunSeen, setRunRead, summarizeUnread } from "../lib/unread.js";
+import { markRunSeen, mergeRunSeenStorage, readRunSeen, reconcileRunSeen, runActivityAt, runSeenKey, saveRunSeen, setRunRead, summarizeUnread, type RunSeen } from "../lib/unread.js";
 import { Icon } from "./common.js";
 import batonIcon from "../assets/baton-icon.png";
 export type Page = "inbox" | "runs" | "tasks" | "teams" | "settings";
@@ -17,6 +17,12 @@ export function Sidebar({ pullRequests, runs, runId, page, navigate, selectRun, 
   const [preference, setPreference] = useState(() => readSidebar(localStorage, narrow));
   const [unreadOnly, setUnreadOnly] = useState(() => readSidebarUnreadOnly(localStorage));
   const [seen, setSeen] = useState(() => readRunSeen(localStorage));
+  const seenRef = useRef(seen);
+  const updateSeen = useCallback((next: RunSeen | null) => {
+    if (next === seenRef.current) return;
+    seenRef.current = next;
+    setSeen(next);
+  }, []);
   const [runsOpen, setRunsOpen] = useState(false); const dragging = useRef(false); const aside = useRef<HTMLElement>(null);
   const collapsed = preference.collapsed;
   const toggle = () => { setPreference(current => ({ ...current, collapsed: !current.collapsed })); setRunsOpen(false); };
@@ -26,11 +32,24 @@ export function Sidebar({ pullRequests, runs, runId, page, navigate, selectRun, 
   const unread = useMemo(() => summarizeUnread(runs, seen), [runs, seen]);
   useEffect(() => { saveSidebar(localStorage, preference); }, [preference]);
   useEffect(() => { saveSidebarUnreadOnly(localStorage, unreadOnly); }, [unreadOnly]);
-  useEffect(() => { setSeen(current => reconcileRunSeen(current, runs, loading)); }, [runs, loading]);
   useEffect(() => {
-    if (viewedId && viewedAt) setSeen(current => current && markRunSeen(current, viewedId, viewedAt));
-  }, [viewedId, viewedAt, loading]);
-  useEffect(() => { if (seen) saveRunSeen(localStorage, seen); }, [seen]);
+    const sync = (event: StorageEvent) => {
+      if (event.key === runSeenKey && event.storageArea === localStorage) updateSeen(mergeRunSeenStorage(seenRef.current, event));
+    };
+    window.addEventListener("storage", sync); return () => window.removeEventListener("storage", sync);
+  }, [updateSeen]);
+  useEffect(() => {
+    if (!loading) {
+      const current = seenRef.current ?? readRunSeen(localStorage);
+      updateSeen(saveRunSeen(localStorage, reconcileRunSeen(current, runs, false), { runs }));
+    }
+  }, [runs, loading, updateSeen]);
+  useEffect(() => {
+    const current = seenRef.current;
+    if (!current || !viewedId || !viewedAt) return;
+    const next = markRunSeen(current, viewedId, viewedAt);
+    if (next !== current) updateSeen(saveRunSeen(localStorage, next));
+  }, [viewedId, viewedAt, loading, updateSeen]);
   useEffect(() => {
     const media = matchMedia("(max-width: 900px)"); const change = () => { setNarrow(media.matches); if (media.matches) setPreference(current => ({ ...current, collapsed: true })); };
     media.addEventListener("change", change); return () => media.removeEventListener("change", change);
@@ -49,9 +68,18 @@ export function Sidebar({ pullRequests, runs, runId, page, navigate, selectRun, 
   }, [narrow]);
   const dismissNavigation = () => { setRunsOpen(false); if (narrow) setPreference(current => ({ ...current, collapsed: true })); };
   const go = (target: Page) => { navigate(target); dismissNavigation(); };
-  const choose = (id: string) => { selectRun(id); dismissNavigation(); };
+  const changeRunRead = (run: RunSummary, read: boolean) => {
+    const current = seenRef.current ?? readRunSeen(localStorage) ?? reconcileRunSeen(null, runs, false);
+    const next = read ? setRunRead(current, run, true) : current;
+    updateSeen(saveRunSeen(localStorage, next, read ? undefined : { markUnread: run }));
+  };
+  const choose = (id: string) => {
+    const run = runs.find(entry => entry.id === id);
+    if (run) changeRunRead(run, true);
+    selectRun(id); dismissNavigation();
+  };
   const startRun = (projectId?: string) => { newRun(projectId); dismissNavigation(); };
-  const list = <ProjectGroups pullRequests={pullRequests} projects={projects} runs={runs} runId={runId} currentId={currentProjectId} page={page} reveal={reveal} choose={choose} selectProject={selectProject} newRun={startRun} add={addProject} canCreate={canCreate} mutate={mutateProject} loading={loading} mutateRun={mutateRun} draftProjectId={draftProjectId} unread={unread} unreadOnly={unreadOnly} setRunRead={(run, read) => setSeen(current => current && setRunRead(current, run, read))} />;
+  const list = <ProjectGroups pullRequests={pullRequests} projects={projects} runs={runs} runId={runId} currentId={currentProjectId} page={page} reveal={reveal} choose={choose} selectProject={selectProject} newRun={startRun} add={addProject} canCreate={canCreate} mutate={mutateProject} loading={loading} mutateRun={mutateRun} draftProjectId={draftProjectId} unread={unread} unreadOnly={unreadOnly} setRunRead={changeRunRead} />;
   const projectHeading = <div className="sidebar-section-heading">
     <span>PROJECTS</span>
     <div className="sidebar-project-tools">

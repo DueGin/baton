@@ -2,12 +2,25 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ApiClient, HttpError } from "../api.js";
 import { DemoClient } from "../demo/client.js";
-import { AddProject, DirectoryBrowser, ProjectGroups, ProjectLink, ProjectsEmpty, type ProjectGroupsProps } from "./Projects.js";
+import { AddProject, DirectoryBrowser, ProjectGroups, ProjectLink, ProjectListTools, ProjectsEmpty, type ProjectGroupsProps } from "./Projects.js";
 import { NewSession } from "./NewRun.js";
+import { Icon } from "./common.js";
 import { projectRunPayload } from "../lib/projects.js";
 const now = Date.parse("2026-11-15T01:00:00Z");
 afterEach(() => vi.unstubAllGlobals());
 describe("project screens", () => {
+  it.each([
+    { unreadOnly: false, icon: "bell", fill: "none" },
+    { unreadOnly: true, icon: "bell-filled", fill: "currentColor" },
+  ] as const)("shows $icon for the unread filter when pressed is $unreadOnly", ({ unreadOnly, icon, fill }) => {
+    const html = renderToStaticMarkup(<ProjectListTools projects={[]} unreadOnly={unreadOnly} toggleUnreadOnly={() => undefined} />);
+    const button = html.match(/<button[^>]*aria-label="只看未读"[^>]*>.*?<\/button>/)?.[0];
+    const bell = renderToStaticMarkup(<Icon name={icon} size={14} />);
+    expect(button).toContain(`aria-pressed="${unreadOnly}"`);
+    expect(button).toContain(bell);
+    expect(bell).toContain(`fill="${fill}"`);
+  });
+
   it("provides a mandatory empty-state CTA and add-project directory browser", async () => {
     const client = new DemoClient(() => now); const dirs = await client.dirs("~");
     const empty = renderToStaticMarkup(<ProjectsEmpty add={() => undefined} />); expect(empty).toContain("添加项目（工作目录）后才能开始会话");

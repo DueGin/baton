@@ -55,7 +55,7 @@ export function ProjectListTools({ projects, unreadOnly, toggleUnreadOnly }: { p
   const allCollapsed = activeIds.length > 0 && activeIds.every(id => collapsed.has(id));
   const toggleLabel = allCollapsed ? "全部展开" : "全部折叠";
   return <>
-    <button type="button" className="icon-button" title="只看未读" aria-label="只看未读" aria-pressed={unreadOnly} onClick={toggleUnreadOnly}><Icon name="filter" size={14} /></button>
+    <button type="button" className="icon-button" title="只看未读" aria-label="只看未读" aria-pressed={unreadOnly} onClick={toggleUnreadOnly}><Icon name={unreadOnly ? "bell-filled" : "bell"} size={14} /></button>
     <button type="button" className="icon-button" title={toggleLabel} aria-label={toggleLabel} disabled={!activeIds.length} onClick={() => setCollapsedState(() => new Set(allCollapsed ? [] : activeIds))}><Icon name={allCollapsed ? "expand-all" : "collapse-all"} size={15} /></button>
   </>;
 }

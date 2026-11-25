@@ -1,29 +1,74 @@
 import { describe, expect, it } from "vitest";
-import { filterUnreadRuns, isUnread, markRunSeen, readRunSeen, reconcileRunSeen, runActivityAt, saveRunSeen, setRunRead, summarizeUnread } from "./unread.js";
+import { isActivityEvent } from "@baton/protocol";
+import { filterUnreadRuns, isUnread, markRunSeen, mergeRunSeen, mergeRunSeenStorage, readRunSeen, reconcileRunSeen, runActivityAt, runSeenKey, saveRunSeen, setRunRead, summarizeUnread } from "./unread.js";
 
 const first = "2026-11-15T01:00:00.000Z";
 const second = "2026-11-15T02:00:00.000Z";
 const third = "2026-11-15T03:00:00.000Z";
 const atlas = { id: "run-atlas", projectId: "atlas", updatedAt: second, lastEventAt: first };
 const notes = { id: "run-notes", projectId: "notes", updatedAt: first };
+const memoryStorage = () => {
+  const values = new Map<string, string>();
+  return { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
+};
 
 describe("run unread state", () => {
   it("round-trips ISO timestamps, distinguishing an empty stored map from first load", () => {
-    const values = new Map<string, string>();
-    const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
+    const storage = memoryStorage();
     expect(readRunSeen(storage)).toBeNull();
     saveRunSeen(storage, new Map());
     expect(readRunSeen(storage)).toEqual(new Map());
-    values.set("baton.runSeen", JSON.stringify({ [atlas.id]: first, invalid: "yesterday", number: 5 }));
+    storage.setItem(runSeenKey, JSON.stringify({ [atlas.id]: first, invalid: "yesterday", number: 5 }));
     const seen = readRunSeen(storage)!;
     expect(seen).toEqual(new Map([[atlas.id, first]]));
     saveRunSeen(storage, seen);
-    expect(JSON.parse(values.get("baton.runSeen")!)).toEqual({ [atlas.id]: first });
-    values.set("baton.runSeen", "[]");
+    expect(JSON.parse(storage.getItem(runSeenKey)!)).toEqual({ [atlas.id]: first });
+    storage.setItem(runSeenKey, "[]");
     expect(readRunSeen(storage)).toBeNull();
     const denied = { getItem: () => { throw new Error("denied"); }, setItem: () => { throw new Error("denied"); } };
     expect(readRunSeen(denied)).toBeNull();
     expect(() => saveRunSeen(denied, seen)).not.toThrow();
+  });
+
+  it("merges per-run timestamps by their latest instant without changing either input", () => {
+    const local = new Map([[atlas.id, first], [notes.id, third], ["local-only", first]]);
+    const incoming = new Map([[atlas.id, "2026-11-14T21:00:00-05:00"], [notes.id, second], ["other-tab", first]]);
+    expect(mergeRunSeen(local, incoming)).toEqual(new Map([[atlas.id, incoming.get(atlas.id)], [notes.id, third], ["local-only", first], ["other-tab", first]]));
+    expect(local.get(atlas.id)).toBe(first);
+    expect(incoming.get(notes.id)).toBe(second);
+    expect(mergeRunSeen(local, new Map([[atlas.id, first]]))).toBe(local);
+  });
+
+  it("preserves another tab's read marks until reconciling with a loaded run list", () => {
+    const storage = memoryStorage();
+    saveRunSeen(storage, new Map([[atlas.id, third], ["removed", first]]));
+    const otherTab = new Map([[atlas.id, second], [notes.id, first]]);
+    saveRunSeen(storage, otherTab);
+    expect(readRunSeen(storage)).toEqual(new Map([[atlas.id, third], ["removed", first], [notes.id, first]]));
+    saveRunSeen(storage, otherTab, { runs: [atlas, notes] });
+    expect(readRunSeen(storage)).toEqual(new Map([[atlas.id, third], [notes.id, first]]));
+  });
+
+  it("merges storage events by max and ignores unrelated or invalid events", () => {
+    const local = new Map([[atlas.id, third], ["local-only", first]]);
+    const event = { key: runSeenKey, oldValue: JSON.stringify(Object.fromEntries(local)), newValue: JSON.stringify({ [atlas.id]: second, [notes.id]: first }) };
+    expect(mergeRunSeenStorage(local, event)).toEqual(new Map([...local, [notes.id, first]]));
+    expect(mergeRunSeenStorage(local, { ...event, key: "other" })).toBe(local);
+    expect(mergeRunSeenStorage(local, { ...event, newValue: "invalid" })).toBe(local);
+  });
+
+  it("syncs a manual mark-unread without discarding newer read marks in another tab", () => {
+    const storage = memoryStorage();
+    const local = new Map([[atlas.id, first], [notes.id, second]]);
+    saveRunSeen(storage, local);
+    const oldValue = storage.getItem(runSeenKey);
+    const unread = saveRunSeen(storage, local, { markUnread: atlas });
+    const event = { key: runSeenKey, oldValue, newValue: storage.getItem(runSeenKey) };
+    expect(isUnread(atlas, unread)).toBe(true);
+    expect(readRunSeen(storage)).toEqual(new Map([[notes.id, second]]));
+    expect(isUnread(atlas, mergeRunSeenStorage(local, event))).toBe(true);
+    const newer = markRunSeen(local, atlas.id, third);
+    expect(mergeRunSeenStorage(newer, event)).toBe(newer);
   });
 
   it("seeds only on the first completed load and prunes only against the loaded list", () => {
@@ -48,7 +93,7 @@ describe("run unread state", () => {
     expect(isUnread({ ...atlas, updatedAt: third, lastEventAt: third, lastActivityAt: second }, seen)).toBe(true);
   });
 
-  it("tracks viewed activity continuously but leaves subsequent background events unread", () => {
+  it("tracks viewed activity continuously but leaves subsequent activity unread when not viewed", () => {
     const initial = new Map([[atlas.id, first]]);
     const active = { ...atlas, lastEventAt: second };
     const read = markRunSeen(initial, active.id, runActivityAt(active));
@@ -60,6 +105,14 @@ describe("run unread state", () => {
     expect(isUnread(next, reconcileRunSeen(read, [next, notes], false))).toBe(true);
     expect(isUnread(next, markRunSeen(read, next.id, runActivityAt(next)))).toBe(false);
     expect(markRunSeen(read, notes.id, runActivityAt(notes)).get(notes.id)).toBe(first);
+  });
+
+  it("excludes background, PR and cosmetic events from conversation activity", () => {
+    expect(isActivityEvent({ type: "background" })).toBe(false);
+    expect(isActivityEvent({ type: "pr" })).toBe(false);
+    expect(isActivityEvent({ type: "item" })).toBe(true);
+    expect(isActivityEvent({ type: "run.updated", patch: { status: "idle" } })).toBe(true);
+    expect(isActivityEvent({ type: "run.updated", patch: { title: "x", updatedAt: third } })).toBe(false);
   });
 
   it("marks a run unread or read without mutating the saved map", () => {

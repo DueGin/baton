@@ -26,11 +26,21 @@ function patchById<T extends { id: string }>(list: T[], id: string, patch: Parti
 const COSMETIC_RUN_KEYS = new Set(["title", "titleSource", "archived", "archivedAt", "policy", "updatedAt"]);
 
 /**
- * True unless the event is a run.updated whose patch only touches COSMETIC_RUN_KEYS (rename, title
- * regeneration, archive / unarchive, policy toggles). Such edits must not reorder the sidebar or
- * mark a run unread. Status, usage, pauses and every non-run.updated event count as activity.
+ * Event types that only refresh bookkeeping the daemon polls on its own: background-process
+ * registrations (re-emitted every 60 s with a new lastSeenAt while a process runs) and pull-request
+ * status (re-emitted on every status poll / 5-minute heartbeat). They say nothing new about the
+ * conversation, so they must not reorder the sidebar or mark a run unread.
+ */
+const BOOKKEEPING_EVENTS = new Set<string>(["background", "pr"]);
+
+/**
+ * Whether the event counts as conversation activity (drives `lastActivityAt`, sidebar order and
+ * unread state). Not activity: BOOKKEEPING_EVENTS, and run.updated whose patch only touches
+ * COSMETIC_RUN_KEYS (rename, title regeneration, archive / unarchive, policy toggles). Everything
+ * else — items, turns, nodes, delegations, questions, permissions, status / usage / pauses — is.
  */
 export function isActivityEvent(event: Pick<RunEventEnvelope, "type"> & { patch?: object }): boolean {
+  if (BOOKKEEPING_EVENTS.has(event.type)) return false;
   if (event.type !== "run.updated" || !event.patch) return true;
   return Object.keys(event.patch).some((key) => !COSMETIC_RUN_KEYS.has(key));
 }

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyEvent, emptyUsage, type ItemRecord, type RunEventEnvelope, type RunSnapshot } from "@baton/protocol";
+import { applyEvent, emptyUsage, type BackgroundProcess, type ItemRecord, type PullRequestRecord, type RunEvent, type RunEventEnvelope, type RunSnapshot } from "@baton/protocol";
 import { Store } from "./index.js";
 import { exportRun } from "../telemetry/index.js";
 
@@ -19,6 +19,41 @@ describe("snapshot.lastEventAt", () => {
     expect(summary?.titleSource).toBe("generated");
     expect(summary?.lastEventAt).toBe(second.ts);
     store.close();
+  });
+
+  it("advances lastEventAt but not lastActivityAt for background and PR updates", () => {
+    const store = new Store(":memory:"), runId = "r1";
+    const createdAt = "2026-11-13T00:00:00.000Z", activityAt = "2026-11-13T00:01:00.000Z";
+    const backgroundAt = "2026-11-13T00:02:00.000Z", prAt = "2026-11-13T00:06:00.000Z";
+    const initial: RunSnapshot = {
+      run: { id: runId, title: "t", cwd: "/", rootNodeId: "n1", status: "active", policy: { maxDepth: 3, maxActiveChildren: 6, autoApprove: false }, createdAt, updatedAt: createdAt, usage: emptyUsage() },
+      nodes: [], delegations: [], turns: [], toolSpans: [], permissions: [], lastSeq: 0,
+    };
+    const process: BackgroundProcess = {
+      id: `1234:${Date.parse(activityAt) / 1000}`, runId, pid: 1234, ppid: 1230, pgid: 1234,
+      command: "node app.js", ports: [3000], children: [], startedAt: activityAt, status: "running", attribution: "tree", lastSeenAt: backgroundAt,
+    };
+    const pr: PullRequestRecord = {
+      id: `${runId}:github:owner/repo#42`, runId, source: "manual", url: "https://github.com/owner/repo/pull/42",
+      forge: "github", repo: "owner/repo", number: 42, state: "open", createdAt: activityAt, lastCheckedAt: prAt,
+      checks: { state: "none", total: 0, passed: 0, failed: 0, pending: 0, failedChecks: [] },
+    };
+    const updates: [string, RunEvent][] = [[backgroundAt, { type: "background", process }], [prAt, { type: "pr", pr }]];
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(createdAt);
+      store.append(runId, { type: "run.created", run: initial.run });
+      vi.setSystemTime(activityAt);
+      const activity = store.append(runId, { type: "run.updated", patch: { status: "idle", updatedAt: activityAt } });
+      for (const [lastEventAt, update] of updates) {
+        vi.setSystemTime(lastEventAt);
+        store.append(runId, update);
+        const expected = { lastActivityAt: activity.ts, lastEventAt };
+        expect(store.snapshot(runId)).toMatchObject(expected);
+        expect(store.list().find(({ id }) => id === runId)).toMatchObject(expected);
+      }
+      expect(store.events(runId).reduce(applyEvent, initial)).toMatchObject({ lastActivityAt: activity.ts, lastEventAt: prAt });
+    } finally { vi.useRealTimers(); store.close(); }
   });
 
   it("preserves itemTs across replacements while event time and lastEventAt advance, including export replay", () => {

@@ -5,7 +5,7 @@ import type { BatonClient } from "./api.js";
 import { InboxStore } from "./inbox-store.js";
 import { Inbox } from "./components/Inbox.js";
 import { TasksPage } from "./components/Tasks.js";
-import type { TaskSummary } from "@baton/protocol";
+import type { CreateTaskRequest, TaskSummary } from "@baton/protocol";
 import { NotificationTracker } from "./lib/notifications.js";
 import { snapshotInbox } from "./lib/inbox.js";
 import { RunStore, errorText } from "./store.js";
@@ -256,7 +256,8 @@ export default function App({ client }: { client: BatonClient }) {
     try { await operation(); }
     finally { await taskState.refresh(); if (createsRuns) await refreshRuns(); }
   });
-  const resolveTaskAgent = (task: TaskSummary) => taskAgentDefaults(task, agents, readProjectAgent(localStorage, task.projectId));
+  const resolveTaskAgent = (task: Pick<CreateTaskRequest, "projectId" | "agent" | "model" | "teamPresetId">) => taskAgentDefaults(task, agents, readProjectAgent(localStorage, task.projectId));
+  const startTask = (task: TaskSummary) => client.startTask(task.id, { ...resolveTaskAgent(task), policy: defaults });
   const startTaskBatch = (tasks: TaskSummary[]) => taskAction(async () => {
     const errors = [];
     for (const batch of taskStartBatches(tasks, resolveTaskAgent)) {
@@ -302,8 +303,8 @@ export default function App({ client }: { client: BatonClient }) {
       {page === "runs" && !initialLoading && !projects.length ? <ProjectsEmpty add={() => setAddProject("draft")} /> : page === "runs" && draft ?
         <NewSession key={draftKey} projects={projects} projectId={draft.projectId} selectProject={chooseDraftProject} addProject={() => setAddProject("draft")} agents={agents} presets={presets} defaults={defaults} create={create} busy={creating} client={client} error={createError} />
         : page === "tasks" ? <TasksPage tasks={taskState.tasks} loading={!taskState.loaded} error={taskState.error} refresh={taskState.refresh} agents={agents} presets={presets} projects={projects} currentProjectId={currentProjectId} busy={busy} now={now}
-          create={request => taskAction(() => client.createTask(request))} patch={(id, request) => taskAction(() => client.patchTask(id, request))} remove={id => taskAction(() => client.deleteTask(id))}
-          resolveAgent={resolveTaskAgent} start={task => taskAction(() => client.startTask(task.id, { ...resolveTaskAgent(task), policy: defaults }), true)} startMany={startTaskBatch}
+          create={request => client.createTask(request)} patch={(id, request) => client.patchTask(id, request)} remove={id => taskAction(() => client.deleteTask(id))}
+          resolveAgent={resolveTaskAgent} startSaved={startTask} start={task => taskAction(() => startTask(task), true)} startMany={startTaskBatch}
           open={(id, projectId) => { rememberProject(projectId); setPage("runs"); setRunId(id); setTab("transcript"); setConversation(""); setInspected(null); }} />
         : page === "inbox" ? <Inbox projects={projects} items={inboxState.items} snapshots={inboxSnapshots} busy={busy} loading={!inboxState.loaded} error={inboxState.error} refresh={() => { void inboxStore.refresh(); }} open={openInboxItem} decide={decideFull} approve={(id, proposalId) => { void action(() => client.approveTeam(id, proposalId, {})); }} answer={answer} decline={decline} resolve={resolve} /> : page === "teams" ? <TeamsPage presets={presets} agents={agents} busy={busy} error={error} save={(input, id) => action(async () => { const saved = id ? await client.updateTeam(id, input) : await client.createTeam(input); setWarnings(saved.warnings ?? []); setPresets(await client.teams()); })} remove={id => action(async () => { await client.deleteTeam(id); setPresets(await client.teams()); })} /> : page === "settings" ? <SettingsContent section={settingsSection} client={client} demo={client.demo} theme={theme} setTheme={setTheme} notifications={notifications} notificationPermission={notificationPermission} toggleNotifications={enabled => { void toggleNotifications(enabled); }} policy={defaults} setPolicy={saveDefaults} agents={agents} refreshing={refreshing} refreshAgents={() => { void refreshAgents(); }} runs={runs} rules={rules} busy={busy} createRule={input => action(async () => { await client.createPermissionRule(input); setRules(await client.permissionRules()); })} removeRule={id => { void action(async () => { await client.deletePermissionRule(id); setRules(await client.permissionRules()); }); }} /> : snapshot ? <>
         <RunBar busy={busy} pause={() => { void action(async () => { await client.pauseRun(snapshot.run.id); }); }} resume={() => { void action(async () => { await client.resumeRun(snapshot.run.id); }); }} project={activeProject} openProject={() => { if (activeProject) selectProject(activeProject.id); }} key={snapshot.run.id} rename={title => action(() => client.patchRun(snapshot.run.id, { title }))} regenerate={() => action(() => client.regenerateTitle(snapshot.run.id))} snapshot={snapshot} tab={tab} setTab={setTab} detailsOpen={rightPanel === "details"} toggleDetails={() => dispatchPanel({ type: "toggle_details" })} />
