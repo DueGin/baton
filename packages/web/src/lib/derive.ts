@@ -48,7 +48,7 @@ export function summarize(snapshot: RunSnapshot): RunSummary {
     seen.add(key);
     models.push(model === undefined ? { agentId } : { agentId, model });
   }
-  return { ...run, openPrCount: prSummary(snapshot).count, backgroundCount: backgroundSummary(snapshot).count, lastEventAt: snapshot.lastEventAt, status: displayRunStatus(snapshot), rootAgentId: root?.agentId ?? "unknown", agents: [...new Set(nodes.map(node => node.agentId))], models, nodeCount: nodes.length, activeNodeCount: run.status === "paused" ? 0 : nodes.filter(node => !terminal(node.status) && node.status !== "idle").length, pendingPermissions: snapshot.permissions.filter(permission => permission.status === "pending").length, pendingTotal: snapshotInbox(snapshot).length };
+  return { ...run, openPrCount: prSummary(snapshot).count, backgroundCount: backgroundSummary(snapshot).count, lastEventAt: snapshot.lastEventAt, lastActivityAt: snapshot.lastActivityAt, status: displayRunStatus(snapshot), rootAgentId: root?.agentId ?? "unknown", agents: [...new Set(nodes.map(node => node.agentId))], models, nodeCount: nodes.length, activeNodeCount: run.status === "paused" ? 0 : nodes.filter(node => !terminal(node.status) && node.status !== "idle").length, pendingPermissions: snapshot.permissions.filter(permission => permission.status === "pending").length, pendingTotal: snapshotInbox(snapshot).length };
 }
 export const tokens = (value: number): string => value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 1 : 2)}k` : String(Math.round(value));
 export const cost = (value: number): string => `$${value.toFixed(value < 1 ? 3 : 2)}`;

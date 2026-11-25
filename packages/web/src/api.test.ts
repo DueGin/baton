@@ -131,13 +131,24 @@ describe("API transport", () => {
     expect(JSON.parse((fetchMock.mock.calls[1]![1] as RequestInit).body as string)).toEqual({ resolution: "extend", extraRounds: 3, note: "继续" });
     expect(JSON.parse((fetchMock.mock.calls[2]![1] as RequestInit).body as string).remember).toEqual({ scope: "run", pattern: "npm test", agentOnly: true });
   });
-  it("refetches inbox on fragmented changed frames and sends Bearer on its SSE stream", async () => {
+  it("sends the task collection and start payloads to their encoded endpoints", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => Response.json({})); vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("token"); const task = { title: "复核", projectId: "p/1" }; const start = { policy: { maxDepth: 1 } };
+    await client.tasks(); await client.tasks(task.projectId); await client.createTask(task); await client.patchTask("t/1", { model: null });
+    await client.startTask("t/1"); await client.startTask("t/2", start); await client.startTasks({ ids: ["t/1"], start }); await client.deleteTask("t/1");
+    expect(fetchMock.mock.calls.map(([url, init]) => [init?.method, url, init?.body && JSON.parse(String(init.body))])).toEqual([
+      ["GET", "/api/tasks", undefined], ["GET", "/api/tasks?projectId=p%2F1", undefined], ["POST", "/api/tasks", task],
+      ["PATCH", "/api/tasks/t%2F1", { model: null }], ["POST", "/api/tasks/t%2F1/start", {}], ["POST", "/api/tasks/t%2F2/start", start],
+      ["POST", "/api/tasks/start", { ids: ["t/1"], start }], ["DELETE", "/api/tasks/t%2F1", undefined],
+    ]);
+  });
+  it.each([["inboxEvents", "inbox"], ["taskEvents", "tasks"]] as const)("%s reconciles on connection and fragmented changed frames", async (method, resource) => {
     const bytes = new TextEncoder().encode(': heartbeat\r\n\r\nevent: changed\r\ndata: {}\r\n\r\nevent: changed\ndata: {}\n\n');
     const body = new ReadableStream<Uint8Array>({ start(controller) { for (const byte of bytes) controller.enqueue(new Uint8Array([byte])); controller.close(); } });
     const fetchMock = vi.fn().mockResolvedValue(new Response(body)); vi.stubGlobal("fetch", fetchMock); const changed = vi.fn();
-    await new ApiClient("token").inboxEvents(changed, new AbortController().signal);
+    await new ApiClient("token")[method](changed, new AbortController().signal);
     expect(changed).toHaveBeenCalledTimes(3); // initial connection reconciliation + two changed events
-    expect(fetchMock.mock.calls[0]![0]).toBe("/api/inbox/events");
+    expect(fetchMock.mock.calls[0]![0]).toBe(`/api/${resource}/events`);
     expect((fetchMock.mock.calls[0]![1] as RequestInit).headers).toMatchObject({ Authorization: "Bearer token", Accept: "text/event-stream" });
   });
   it("retains additive availability warnings from preset mutations", async () => {

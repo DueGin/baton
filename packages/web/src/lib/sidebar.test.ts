@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clampSidebarWidth, readSidebar, saveSidebar, sidebarKeyWidth } from "./sidebar.js";
+import { clampSidebarWidth, readSidebar, readSidebarUnreadOnly, saveSidebar, saveSidebarUnreadOnly, sidebarKeyWidth } from "./sidebar.js";
 describe("sidebar preferences", () => {
   it("clamps dragging and keyboard widths and resets to the standard 260", () => {
     expect(clampSidebarWidth(20)).toBe(200); expect(clampSidebarWidth(900)).toBe(440); expect(clampSidebarWidth(NaN)).toBe(260);
@@ -11,5 +11,15 @@ describe("sidebar preferences", () => {
     saveSidebar(storage, { width: 315, collapsed: true }); expect(readSidebar(storage, false)).toEqual({ width: 315, collapsed: true });
     values.set("baton.sidebarWidth", "900"); expect(readSidebar(storage, false).width).toBe(440);
     expect(readSidebar({ getItem: () => { throw new Error("denied"); } }, true).collapsed).toBe(true);
+  });
+  it("persists the unread-only filter independently of the sidebar layout", () => {
+    const values = new Map<string, string>();
+    const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
+    expect(readSidebarUnreadOnly(storage)).toBe(false);
+    saveSidebarUnreadOnly(storage, true);
+    expect(values.get("baton.sidebarUnreadOnly")).toBe("true");
+    expect(readSidebarUnreadOnly(storage)).toBe(true);
+    saveSidebarUnreadOnly(storage, false);
+    expect(readSidebarUnreadOnly(storage)).toBe(false);
   });
 });

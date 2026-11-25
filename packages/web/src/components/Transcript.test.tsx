@@ -10,6 +10,20 @@ import { demoBriefPrompt, demoResultsPrompt } from "../demo/prompts.js";
 import { reasoningBlockId, reasoningPreferences } from "../lib/reasoning.js";
 import type { TimelineItem } from "@baton/protocol";
 import { nodeIsLive, type MessageActionState } from "../lib/conversation.js";
+import { selectionQuotePosition } from "./SelectionQuote.js";
+
+describe("transcript quote pill", () => {
+  const viewport = { left: 100, right: 500, top: 70, bottom: 320 };
+  const button = { width: 100, height: 28 };
+  it("centers above the selection, within the transcript edges", () => {
+    expect(selectionQuotePosition({ left: 200, right: 260, top: 140, bottom: 160 }, viewport, button)).toEqual({ left: 180, top: 106 });
+    expect(selectionQuotePosition({ left: 440, right: 496, top: 140, bottom: 160 }, viewport, button)?.left).toBe(394);
+  });
+  it("flips below near the toolbar and ignores offscreen selections", () => {
+    expect(selectionQuotePosition({ left: 102, right: 120, top: 75, bottom: 89 }, viewport, button)).toEqual({ left: 106, top: 95 });
+    expect(selectionQuotePosition({ left: 110, right: 160, top: 25, bottom: 45 }, viewport, button)).toBeNull();
+  });
+});
 
 describe("transcript scrolling", () => {
   it("shows the return button only away from the bottom and hides it when the jump resumes following", () => {

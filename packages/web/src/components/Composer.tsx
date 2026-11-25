@@ -1,6 +1,7 @@
 import { useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type Ref } from "react";
 import { EditorContent, useEditor, type Editor, type JSONContent } from "@tiptap/react";
 import { Slice, type Node as PMNode, type Schema } from "@tiptap/pm/model";
+import { TextSelection, type EditorState } from "@tiptap/pm/state";
 import type { BatonClient } from "../api.js";
 import { docIsEmpty, docToMarkdown, IMAGE_NODE, markdownToDoc, pastedTextDoc } from "../lib/composer-markdown.js";
 import { acceptImages, attachmentName, composerUploads } from "../lib/composer-uploads.js";
@@ -18,6 +19,14 @@ export type { ComposerHandle, ComposerStatus } from "./composer-shell.js";
 
 /** Unsent drafts per node, kept while the page lives (switching nodes or views keeps them). */
 const drafts = new Map<string, JSONContent>();
+
+export function appendQuoteTransaction(state: EditorState, markdown: string) {
+  const quote = state.schema.nodeFromJSON(markdownToDoc(markdown));
+  const end = state.doc.content.size, last = state.doc.lastChild;
+  const from = last?.type.name === "paragraph" && !last.content.size ? end - last.nodeSize : end;
+  const transaction = state.tr.replaceWith(from, end, quote.content.addToEnd(state.schema.node("paragraph")));
+  return transaction.setSelection(TextSelection.atEnd(transaction.doc)).scrollIntoView();
+}
 
 interface DraftImage { identity: string; key: string | null; src: string | null; alt: string }
 function draftImages(doc: JSONContent | undefined): DraftImage[] {
@@ -212,6 +221,11 @@ export function Composer({ ref, nodeId, cwd, client, placeholder, disabled, imag
       else editor.chain().focus("end").insertContent(doc.content ?? []).run();
       editor.commands.focus("end");
       flash("已把回退的消息放回输入框，可以修改后重新发送");
+    },
+    insertQuote: markdown => {
+      if (!editor || editor.isDestroyed || props.current.disabled) return;
+      editor.view.dispatch(appendQuoteTransaction(editor.state, markdown));
+      editor.commands.focus();
     },
     hint: text => flash(text),
   }), [editor]);

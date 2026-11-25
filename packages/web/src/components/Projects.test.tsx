@@ -81,6 +81,54 @@ describe("project screens", () => {
     const withoutDraft = atlasGroup(renderToStaticMarkup(<ProjectGroups {...props} />));
     expect(withoutDraft).toContain("＋ 开始第一个会话");
   });
+  it("shows unread counts and the trailing mark, and keeps the selected run in the filtered list", async () => {
+    const client = new DemoClient(() => now);
+    const base = { ...(await client.runs())[0]!, models: [], lastActivityAt: new Date(now).toISOString() };
+    const projects = await client.projects(true);
+    const runs = [
+      { ...base, id: "unread", title: "Unread run", projectId: "project-atlas", archived: false, pendingTotal: 2, titleSource: undefined },
+      { ...base, id: "read", title: "Other read run", projectId: "project-atlas", archived: false },
+      { ...base, id: "selected", title: "Selected read run", projectId: "project-notes", archived: false },
+    ];
+    const noop = () => undefined;
+    const props: ProjectGroupsProps = { projects, runs, runId: "selected", currentId: null, page: "runs", reveal: null, choose: noop, selectProject: noop, newRun: noop, add: noop, canCreate: true, mutate: async () => {}, loading: false };
+    const unread = { ids: new Set(["unread"]), byProject: new Map([["project-atlas", 1]]) };
+    const html = renderToStaticMarkup(<ProjectGroups {...props} unread={unread} unreadOnly />);
+    expect(html).toContain('class="run-list-item is-unread"');
+    expect(html).toMatch(/Unread run<\/span><i class="run-unread-dot"[^>]*><\/i><span class="permission-count">2/);
+    expect(html).toContain(`<time dateTime="${base.lastActivityAt}" title=`);
+    expect(html).toContain('class="project-unread-count"');
+    expect(html).toContain("Selected read run");
+    expect(html).not.toContain("Other read run");
+    expect(html).not.toContain("已归档项目");
+    const empty = renderToStaticMarkup(<ProjectGroups {...props} unreadOnly />);
+    expect(empty).toContain("没有未读会话");
+    expect(empty).toContain("Selected read run");
+    const inbox = renderToStaticMarkup(<ProjectGroups {...props} page="inbox" unread={unread} unreadOnly />);
+    expect(inbox.includes("Unread run")).toBe(true);
+    expect(inbox.includes("Selected read run")).toBe(false);
+    expect(inbox.includes('data-project-id="project-notes"')).toBe(false);
+  });
+  it("keeps filtered archived runs in the archive sections, including unassigned runs", async () => {
+    const client = new DemoClient(() => now);
+    const projects = await client.projects(true);
+    const base = { ...(await client.runs())[0]!, models: [], archived: true };
+    const runs = [
+      { ...base, id: "atlas-archived", title: "Unread archived Atlas run", projectId: "project-atlas" },
+      { ...base, id: "legacy-archived", title: "Unread archived legacy run", projectId: undefined },
+      { ...base, id: "atlas-read", title: "Read archived Atlas run", projectId: "project-atlas" },
+    ];
+    const noop = () => undefined;
+    const props: ProjectGroupsProps = { projects, runs, runId: null, currentId: null, page: "runs", reveal: null, choose: noop, selectProject: noop, newRun: noop, add: noop, canCreate: true, mutate: async () => {}, loading: false };
+    const unread = { ids: new Set(["atlas-archived", "legacy-archived"]), byProject: new Map([["project-atlas", 1]]) };
+    const html = renderToStaticMarkup(<ProjectGroups {...props} unread={unread} unreadOnly />);
+    expect(html.includes("Unread archived Atlas run")).toBe(false);
+    expect(html.includes("Unread archived legacy run")).toBe(false);
+    expect(html.match(/aria-expanded="false"><span aria-hidden="true">▸<\/span>已归档会话 1/g)).toHaveLength(2);
+    const selected = renderToStaticMarkup(<ProjectGroups {...props} runId="atlas-read" unread={unread} unreadOnly />);
+    expect(selected).toMatch(/class="project-archived-runs"[^>]*><button[^>]*>.*?已归档会话 2<\/button><button[^>]*title="Read archived Atlas run"[^>]*aria-current="true"/s);
+    expect(selected.includes("Unread archived Atlas run")).toBe(false);
+  });
   it("models run archive conflicts and preserves timestamps on unarchive in demo mode", async () => {
     const client = new DemoClient(() => now);
     const runs = await client.runs();

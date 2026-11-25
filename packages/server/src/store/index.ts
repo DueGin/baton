@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { applyEvent, type AttachmentRecord, type PullRequestRecord, type ProjectRecord, type BackgroundProcess, type ItemRecord, type RunEvent, type RunEventEnvelope, type RunSnapshot, type RunSummary, type TeamPreset, type PermissionRule, type InboxItem, type QuestionRecord, type EscalationRecord, type TurnTrigger } from "@baton/protocol";
+import { applyEvent, isActivityEvent, type AttachmentRecord, type PullRequestRecord, type ProjectRecord, type BackgroundProcess, type ItemRecord, type RunEvent, type RunEventEnvelope, type RunSnapshot, type RunSummary, type TaskRecord, type TeamPreset, type PermissionRule, type InboxItem, type QuestionRecord, type EscalationRecord, type TurnTrigger } from "@baton/protocol";
 export interface HeldPrompt { text: string; trigger: TurnTrigger; humanSeq?: number }
 
 const tables = ["nodes", "delegations", "turns", "tool_spans", "permissions", "questions", "escalations", "background_processes", "pull_requests"] as const;
@@ -10,6 +10,8 @@ export class Store {
     this.db = new DatabaseSync(path);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS tasks_run ON tasks(json_extract(data, '$.runId'));
       CREATE TABLE IF NOT EXISTS permission_rules (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS delegation_round_limits (id TEXT PRIMARY KEY, extra INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS notices (id TEXT PRIMARY KEY, node_id TEXT NOT NULL, run_id TEXT NOT NULL, text TEXT NOT NULL);
@@ -29,10 +31,15 @@ export class Store {
     const row = this.db.prepare("SELECT data, seq FROM runs WHERE id=?").get(id);
     if (!row) throw new Error(`Run not found: ${id}`);
     const read = <T>(table: string): T[] => this.db.prepare(`SELECT data FROM ${table} WHERE run_id=? ORDER BY rowid`).all(id).map((r) => JSON.parse(String(r.data)) as T);
-    const last = this.db.prepare("SELECT json_extract(data, '$.ts') AS ts FROM events WHERE run_id=? AND seq=?").get(id, Number(row.seq));
+    let lastEventAt: string | undefined, lastActivityAt: string | undefined;
+    for (const entry of this.db.prepare("SELECT data FROM events WHERE run_id=? ORDER BY seq DESC").iterate(id)) {
+      const event = JSON.parse(String(entry.data)) as RunEventEnvelope;
+      lastEventAt ??= event.ts;
+      if (isActivityEvent(event)) { lastActivityAt = event.ts; break; }
+    }
     const backgroundProcesses = visibleBackground(read<BackgroundProcess>("background_processes"));
     const pullRequests = read<PullRequestRecord>("pull_requests");
-    return { run: JSON.parse(String(row.data)) as RunSnapshot["run"], lastSeq: Number(row.seq), ...(last?.ts ? { lastEventAt: String(last.ts) } : {}), ...(backgroundProcesses.length ? { backgroundProcesses } : {}), ...(pullRequests.length ? { pullRequests } : {}), nodes: read("nodes"), delegations: read("delegations"), turns: read("turns"), toolSpans: read("tool_spans"), permissions: read("permissions"), questions: read("questions"), escalations: read("escalations") };
+    return { run: JSON.parse(String(row.data)) as RunSnapshot["run"], lastSeq: Number(row.seq), ...(lastEventAt ? { lastEventAt } : {}), ...(lastActivityAt ? { lastActivityAt } : {}), ...(backgroundProcesses.length ? { backgroundProcesses } : {}), ...(pullRequests.length ? { pullRequests } : {}), nodes: read("nodes"), delegations: read("delegations"), turns: read("turns"), toolSpans: read("tool_spans"), permissions: read("permissions"), questions: read("questions"), escalations: read("escalations") };
   }
   append(runId: string, payload: RunEvent): RunEventEnvelope {
     this.db.exec("BEGIN IMMEDIATE");
@@ -97,19 +104,23 @@ export class Store {
   }
   list(projectId?: string): RunSummary[] {
     const rows = projectId === undefined ? this.db.prepare("SELECT id FROM runs ORDER BY rowid DESC").all() : this.db.prepare("SELECT id FROM runs WHERE json_extract(data, '$.projectId')=? ORDER BY rowid DESC").all(projectId);
-    return rows.map((r) => {
-      const s = this.snapshot(String(r.id));
-      const root = s.nodes.find(node => node.id === s.run.rootNodeId);
-      const ordered = root ? [root, ...s.nodes.filter(node => node !== root)] : s.nodes;
-      const models: NonNullable<RunSummary["models"]> = [], seen = new Set<string>();
-      for (const { agentId, model } of ordered) {
-        const key = JSON.stringify([agentId, model]);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        models.push(model === undefined ? { agentId } : { agentId, model });
-      }
-      return { ...s.run, ...(s.lastEventAt ? { lastEventAt: s.lastEventAt } : {}), rootAgentId: root?.agentId ?? "", models, agents: [...new Set(s.nodes.map((n) => n.agentId))], nodeCount: s.nodes.length, activeNodeCount: s.run.status === "paused" ? 0 : s.nodes.filter((n) => ["starting", "running", "waiting_permission"].includes(n.status)).length, pendingPermissions: s.permissions.filter((p) => p.status === "pending").length, pendingTotal: this.inboxFor(s).length, backgroundCount: backgroundCount(s.backgroundProcesses), openPrCount: (s.pullRequests ?? []).filter((p) => !p.unlinkedAt && ["open", "draft"].includes(p.state)).length };
-    });
+    return rows.map((row) => this.summarizeRun(this.snapshot(String(row.id))));
+  }
+  runSummary(id: string): RunSummary | undefined {
+    return this.db.prepare("SELECT 1 FROM runs WHERE id=?").get(id) ? this.summarizeRun(this.snapshot(id)) : undefined;
+  }
+  private summarizeRun(snapshot: RunSnapshot): RunSummary {
+    const { run, nodes, permissions, backgroundProcesses, pullRequests, lastEventAt, lastActivityAt } = snapshot;
+    const root = nodes.find((node) => node.id === run.rootNodeId);
+    const ordered = root ? [root, ...nodes.filter((node) => node !== root)] : nodes;
+    const models: NonNullable<RunSummary["models"]> = [], seen = new Set<string>();
+    for (const { agentId, model } of ordered) {
+      const key = JSON.stringify([agentId, model]);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      models.push(model === undefined ? { agentId } : { agentId, model });
+    }
+    return { ...run, ...(lastEventAt ? { lastEventAt } : {}), ...(lastActivityAt ? { lastActivityAt } : {}), rootAgentId: root?.agentId ?? "", models, agents: [...new Set(nodes.map((node) => node.agentId))], nodeCount: nodes.length, activeNodeCount: run.status === "paused" ? 0 : nodes.filter((node) => ["starting", "running", "waiting_permission"].includes(node.status)).length, pendingPermissions: permissions.filter((permission) => permission.status === "pending").length, pendingTotal: this.inboxFor(snapshot).length, backgroundCount: backgroundCount(backgroundProcesses), openPrCount: (pullRequests ?? []).filter((pr) => !pr.unlinkedAt && ["open", "draft"].includes(pr.state)).length };
   }
   private inboxFor(s: RunSnapshot): InboxItem[] {
     const common = { runId: s.run.id, runTitle: s.run.title };
@@ -152,6 +163,11 @@ export class Store {
   project(id: string): ProjectRecord { const row = this.db.prepare("SELECT data FROM projects WHERE id=?").get(id); if (!row) throw new Error("Project not found"); return JSON.parse(String(row.data)) as ProjectRecord; }
   projectAt(path: string): ProjectRecord | undefined { const row = this.db.prepare("SELECT data FROM projects WHERE path=?").get(path); return row ? JSON.parse(String(row.data)) as ProjectRecord : undefined; }
   saveProject(project: ProjectRecord): void { this.db.prepare("INSERT INTO projects VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET path=excluded.path, data=excluded.data").run(project.id, project.path, JSON.stringify(project)); }
+  tasks(): TaskRecord[] { return this.db.prepare("SELECT data FROM tasks ORDER BY rowid").all().map((row) => JSON.parse(String(row.data)) as TaskRecord); }
+  task(id: string): TaskRecord { const row = this.db.prepare("SELECT data FROM tasks WHERE id=?").get(id); if (!row) throw new Error("Task not found"); return JSON.parse(String(row.data)) as TaskRecord; }
+  saveTask(task: TaskRecord): void { this.db.prepare("INSERT INTO tasks VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data=excluded.data").run(task.id, JSON.stringify(task)); }
+  deleteTask(id: string): void { if (this.db.prepare("DELETE FROM tasks WHERE id=?").run(id).changes === 0) throw new Error("Task not found"); }
+  hasTaskForRun(runId: string): boolean { return this.db.prepare("SELECT 1 FROM tasks WHERE json_extract(data, '$.runId')=? LIMIT 1").get(runId) !== undefined; }
   attachment(id: string): AttachmentRecord | undefined { const row = this.db.prepare("SELECT data FROM attachments WHERE id=?").get(id); return row ? JSON.parse(String(row.data)) as AttachmentRecord : undefined; }
   attachmentBySha(sha256: string): AttachmentRecord | undefined { const row = this.db.prepare("SELECT data FROM attachments WHERE sha256=?").get(sha256); return row ? JSON.parse(String(row.data)) as AttachmentRecord : undefined; }
   /** Inserts unless the same content is already stored; returns the stored record. */

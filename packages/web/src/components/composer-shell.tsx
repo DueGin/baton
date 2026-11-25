@@ -10,6 +10,7 @@ export interface ComposerHandle {
   focus(): void;
   /** Put Markdown into the draft (replaces an empty draft, else appended) and focus it. */
   setDraft(markdown: string): void;
+  insertQuote(markdown: string): void;
   /** Show a short hint in the composer footer. */
   hint(text: string): void;
 }
